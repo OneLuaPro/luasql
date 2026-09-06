@@ -59,6 +59,14 @@
 
 #endif
 
+/*
+** Hijack original SSL flags to invert their behavior for the Lua API.
+** Necessary because the modern MariaDB connector enforces full SSL and
+** certificate validation by default, requiring an explicit opt-out mechanism.
+*/
+#define CLIENT_SSL_DISABLE CLIENT_SSL
+#define CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE CLIENT_SSL_VERIFY_SERVER_CERT
+
 typedef struct {
 	short      closed;
 } env_data;
@@ -487,7 +495,13 @@ static int escape_string (lua_State *L) {
 */
 static int conn_getfd (lua_State *L) {
 	conn_data *conn = getconnection (L);
+#if defined(_WIN32) || defined(WIN32)
+	/* Windows */
+	int fd = (int)(conn->my_conn->net.fd);
+#else
+	/* Linux / Unix / macOS */
 	int fd = mysql_get_socket(conn->my_conn);
+#endif
 	if (fd < 0) return luasql_failmsg(L, "invalid socket descriptor", NULL);
 	lua_pushinteger(L, fd);
 	return 1;
@@ -678,7 +692,8 @@ static int env_connect (lua_State *L) {
 	const char *host = luaL_optstring(L, 5, NULL);
 	const int port = luaL_optinteger(L, 6, 0);
 	const char *unix_socket = luaL_optstring(L, 7, NULL);
-	const long client_flag = (long)luaL_optinteger(L, 8, 0);
+	/* The 8th argument holds our 32-bit client capability bitmask */
+	unsigned long client_flag = (unsigned long)luaL_optinteger(L, 8, 0);
 	MYSQL *conn;
 	getenvironment(L); /* validate environment */
 
@@ -691,6 +706,36 @@ static int env_connect (lua_State *L) {
 #ifdef MARIADB_PACKAGE_VERSION
 	mysql_options(conn, MYSQL_OPT_NONBLOCK, 0);
 #endif
+
+	/*
+	** Default state (no flags passed from Lua):
+	** verify_cert = 1, enforce_ssl = 1 (Full Security)
+	*/
+	my_bool verify_cert = 1;
+	my_bool enforce_ssl = 1;
+
+	/*
+	** "Hijack" the official flags for the inverse behavior:
+	** If Lua passes CLIENT_SSL_DISABLE, it explicitly wants to DISABLE SSL.
+	** If Lua passes CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE, it wants to DISABLE the cert check.
+	*/
+	if (client_flag & CLIENT_SSL_DISABLE) {
+	  enforce_ssl = 0;
+	  verify_cert = 0; /* Turning off SSL automatically turns off verification */
+	}
+	else if (client_flag & CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE) {
+	  verify_cert = 0;
+	}
+
+	/* Apply settings via mysql_options */
+	mysql_options(conn, MYSQL_OPT_SSL_ENFORCE, &enforce_ssl);
+	mysql_options(conn, MYSQL_OPT_SSL_VERIFY_SERVER_CERT, &verify_cert);
+
+	/*
+	** Crucial: Clean the hijacked flags out of the bitmask
+	** so mysql_real_connect doesn't see them as standard protocol flags.
+	*/
+	client_flag &= ~(CLIENT_SSL_DISABLE | CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE);
 
 	if (!mysql_real_connect(conn, host, username, password,
 		sourcename, port, unix_socket, client_flag))
@@ -795,6 +840,49 @@ static int create_environment (lua_State *L) {
 	return 1;
 }
 
+/*
+** MariaDB / MySQL Client Relevant Capability Flags
+*/
+void register_client_flags(lua_State *L) {
+
+    /*
+    ** See mariadb-connector-c/include/mariadb_com.h for details. Only useful flags
+    ** mentioned here. Deprecated, outdated, unused or insecure flags not mentioned here.
+    */
+
+    // Return the number of matched rows instead of affected (changed) rows for UPDATEs.
+    lua_pushinteger(L, 2);
+    lua_setfield(L, -2, "CLIENT_FOUND_ROWS");
+
+    // Enables network protocol compression (zlib/zstd) to reduce bandwidth usage over slow connections.
+    lua_pushinteger(L, 32);
+    lua_setfield(L, -2, "CLIENT_COMPRESS");
+
+    // Parser flag; allows spaces between function names and '(' but reserves all function names.
+    lua_pushinteger(L, 256);
+    lua_setfield(L, -2, "CLIENT_IGNORE_SPACE");
+
+    // Signals an interactive client (like a CLI or GUI), telling the server to use 'interactive_timeout'.
+    lua_pushinteger(L, 1024);
+    lua_setfield(L, -2, "CLIENT_INTERACTIVE");
+
+    // Feature flag; allows sending multiple semicolon-separated SQL statements in a single query string.
+    lua_pushinteger(L, (1UL << 16)); /* 65536 */
+    lua_setfield(L, -2, "CLIENT_MULTI_STATEMENTS");
+
+    // Feature flag; enables handling multiple result sets, required for Stored Procedures.
+    lua_pushinteger(L, (1UL << 17)); /* 131072 */
+    lua_setfield(L, -2, "CLIENT_MULTI_RESULTS");
+
+    /* Completely unencrypted connection forced */
+    lua_pushinteger(L, CLIENT_SSL_DISABLE);
+    lua_setfield(L, -2, "CLIENT_SSL_DISABLE");
+
+    /* Encrypted connection, but skips certificate validation */
+    lua_pushinteger(L, CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE);
+    lua_setfield(L, -2, "CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE");
+}
+
 
 /*
 ** Creates the metatables for the objects and registers the
@@ -816,5 +904,6 @@ lua_pushliteral (L, MARIADB_CLIENT_VERSION_STR);
 lua_pushliteral (L, MYSQL_SERVER_VERSION);
 #endif
     lua_settable (L, -3);
+    register_client_flags(L);
 	return 1;
 }
