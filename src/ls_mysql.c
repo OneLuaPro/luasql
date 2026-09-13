@@ -750,20 +750,25 @@ static int env_connect (lua_State *L) {
 
 
 /*
-**
+** Environment object collector function.
 */
 static int env_gc (lua_State *L) {
 	env_data *env= (env_data *)luaL_checkudata (L, 1, LUASQL_ENVIRONMENT_MYSQL);
 	if (env != NULL && !(env->closed)) {
 		env->closed = 1;
-		mysql_library_end();
 	}
+	/* Always finalize library here to ensure cleanup after all child objects are released */
+	mysql_library_end();
 	return 0;
 }
 
 
 /*
-** Close environment object.
+** Close environment object. Do not call mysql_library_end() here, because it
+** invalidates active connections and causes crashes. Cleanup is handled in env_gc().
+** Returns true in case of success, or false in case the environment was
+** already closed.
+** Throws an error if the argument is not an environment.
 */
 static int env_close (lua_State *L) {
 	env_data *env= (env_data *)luaL_checkudata (L, 1, LUASQL_ENVIRONMENT_MYSQL);
@@ -774,7 +779,6 @@ static int env_close (lua_State *L) {
 		return 2;
 	}
 	env->closed = 1;
-	mysql_library_end();
 	lua_pushboolean (L, 1);
 	return 1;
 }

@@ -133,9 +133,8 @@ function basic_test ()
 	assert2 (false, ENV:close())
 	-- Reopen the environment.
 	ENV = ENV_OK (luasql[driver] ())
-
-	-- Check connection object.
-	local conn, err = ENV:connect (datasource, username, password)
+	local conn, err = ENV:connect (datasource, username, password, host,
+				       port, unix_socket, client_flag)
 	assert (conn, (err or '').." ("..datasource..")")
 	CONN_OK (conn)
 	assert2 (true, conn:close(), "couldn't close connection")
@@ -151,7 +150,8 @@ function basic_test ()
 	local a = {}
 	setmetatable(a, {__mode="v"})
 	a.ENV = ENV_OK (luasql[driver] ())
-	a.CONN = a.ENV:connect (datasource, username, password)
+	a.CONN = a.ENV:connect (datasource, username, password, host,
+				port, unix_socket, client_flag)
 	collectgarbage ()
 	collectgarbage ()
 	assert2(nil, a.ENV, "environment not collected")
@@ -175,7 +175,8 @@ end
 ---------------------------------------------------------------------
 function create_table ()
 	-- Check SQL statements.
-	CONN = CONN_OK (ENV:connect (datasource, username, password))
+	CONN = CONN_OK (ENV:connect (datasource, username, password, host,
+				     port, unix_socket, client_flag))
 	CONN:execute"drop table t"
 	-- Create t.
 	local cmd = define_table(TOTAL_FIELDS)
@@ -192,7 +193,8 @@ function fetch2 ()
 	assert (cur0:close(), "couldn't close the cursor after counting rows from t")
 
 	assert (CONN:close(), "couldn't close the connection after creating a table!")
-	CONN = CONN_OK (ENV:connect (datasource, username, password))
+	CONN = CONN_OK (ENV:connect (datasource, username, password, host,
+				     port, unix_socket, client_flag))
 
 	-- insert a record.
 	assert2 (1, CONN:execute ("insert into t (f1, f2) values ('b', 'c')"))
@@ -228,7 +230,8 @@ function fetch2 ()
 	assert (cur0:close(), "couldn't close the cursor after counting rows from t")
 
 	assert (CONN:close(), "couldn't close the connection after creating a table!")
-	CONN = CONN_OK (ENV:connect (datasource, username, password))
+	CONN = CONN_OK (ENV:connect (datasource, username, password, host,
+				     port, unix_socket, client_flag))
 end
 
 ---------------------------------------------------------------------
@@ -569,7 +572,8 @@ function column_info ()
 	assert2 (1, CONN:execute ("delete from t where f1 = 'a'"))
 
 	assert (CONN:close(), "couldn't close the connection after deleting rows from the table")
-	CONN = ENV:connect (datasource, username, password)
+	CONN = ENV:connect (datasource, username, password, host,
+			    port, unix_socket, client_flag)
 end
 
 ---------------------------------------------------------------------
@@ -605,7 +609,8 @@ function check_close()
 	-- force garbage collection
 	local a = {}
 	setmetatable(a, {__mode="v"})
-	a.CONN = ENV:connect (datasource, username, password)
+	a.CONN = ENV:connect (datasource, username, password, host,
+			      port, unix_socket, client_flag)
 	cur = CUR_OK(a.CONN:execute (cmd))
 
 	collectgarbage ()
@@ -621,7 +626,8 @@ function check_close()
 	assert2(nil, a.CONN, "connection not collected")
 
 	-- check cursor integrity after trying to close its connection
-	local conn = CONN_OK (ENV:connect (datasource, username, password))
+	local conn = CONN_OK (ENV:connect (datasource, username, password, host,
+					   port, unix_socket, client_flag))
 	assert2 (1, conn:execute"insert into t (f1) values (1)", "could not insert a new record")
 	local cur = CUR_OK (conn:execute (cmd))
 	local ok, err, msg = pcall (conn.close, conn)
@@ -640,7 +646,8 @@ function check_close()
 	--cur0:close()
 
 	-- check connection integrity after trying to close an environment
-	local conn = CONN_OK (ENV:connect (datasource, username, password))
+	local conn = CONN_OK (ENV:connect (datasource, username, password, host,
+					   port, unix_socket, client_flag))
 	local closed = ENV:close()
 	--assert2 (true, ENV:close(), "couldn't close the environment!")
 	if closed then
@@ -794,6 +801,7 @@ end
 datasource = arg[2] or DEFAULT_TEST_DATABASE or "luasql-test"
 username = arg[3] or DEFAULT_USERNAME or nil
 password = arg[4] or DEFAULT_PASSWORD or nil
+host = arg[5] or "localhost"
 
 -- Complete set of tests
 tests = {
@@ -827,6 +835,16 @@ else
 		table.insert (tests, 11, { "to-be-closed support", to_be_closed_support })
 	end
 end
+
+-- Set optional connect arguments: port, unix_socket, client_flag
+port = nil
+unix_socket = nil
+client_flag = nil
+if driver == "mysql" and luasql.CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE then
+   -- luasql.CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE is an OneLuaPro extension
+   client_flag = luasql.CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE
+end
+
 assert (luasql, "Could not load driver: no luasql table.")
 io.write (luasql._VERSION.." "..driver)
 if luasql._CLIENTVERSION then
