@@ -76,23 +76,23 @@ set(INSTALL_LUASQL_CDIR ${INSTALL_TOP_CDIR}/luasql)
 
 # ------------------------------------------------------------------------------
 # Build Options for Drivers (Schalte aus, was du nicht kompilieren kannst)
-option(WITH_ODBC       "Build ODBC driver"       ON)
-option(WITH_ADO        "Build ADO driver"        ON)
-option(WITH_SQLITE     "Build SQLite3 driver"    ON)
-option(WITH_MYSQL      "Build MySQL driver"      OFF)
-option(WITH_ORACLE     "Build Oracle driver"     OFF)
-option(WITH_POSTGRES   "Build PostgreSQL driver" OFF)
-option(WITH_FIREBIRD   "Build Firebird driver"   OFF)
+# option(WITH_ODBC       "Build ODBC driver"       ON)
+# option(WITH_ADO        "Build ADO driver"        ON)
+# option(WITH_SQLITE     "Build SQLite3 driver"    ON)
+# option(WITH_MYSQL      "Build MySQL driver"      OFF)
+# option(WITH_ORACLE     "Build Oracle driver"     OFF)
+# option(WITH_POSTGRES   "Build PostgreSQL driver" OFF)
+# option(WITH_FIREBIRD   "Build Firebird driver"   OFF)
 
 # Externe Abhängigkeiten-Pfade (Falls SDKs nicht im Standard-Pfad liegen)
-set(SQLITE3_INCLUDE_DIR "${LIBLUA_INCLUDEDIR}" CACHE PATH "Path to sqlite3 header")
-set(SQLITE3_LIBRARY     "${LIBLUA_LIBDIR}/sqlean.lib" CACHE FILEPATH "sqlite3 lib")
-set(MYSQL_INCLUDE_DIR   "${LIBLUA_INCLUDEDIR}/mariadb" CACHE PATH "Path to mysql.h")
-set(MYSQL_LIBRARY       "${LIBLUA_LIBDIR}/mariadb/mariadbclient.lib" CACHE FILEPATH "Path to mysql.lib")
+set(SQLITE3_INCLUDE_DIR  "${LIBLUA_INCLUDEDIR}" CACHE PATH "Path to sqlite3 header")
+set(SQLITE3_LIBRARY      "${LIBLUA_LIBDIR}/sqlean.lib" CACHE FILEPATH "sqlite3 lib")
+set(MYSQL_INCLUDE_DIR    "${LIBLUA_INCLUDEDIR}/mariadb" CACHE PATH "Path to mysql.h")
+set(MYSQL_LIBRARY        "${LIBLUA_LIBDIR}/mariadb/mariadbclient.lib" CACHE FILEPATH "Path to mysql.lib")
+set(POSTGRES_INCLUDE_DIR "${LIBLUA_INCLUDEDIR}" CACHE PATH "Path to postgres header")
+set(POSTGRES_LIBRARY     "${LIBLUA_LIBDIR}/pq.lib" CACHE FILEPATH "Path to pq.lib")
 set(ORACLE_INCLUDE_DIR  "" CACHE PATH "Path to Oracle OCI headers")
 set(ORACLE_LIBRARY      "" CACHE FILEPATH "Path to oci.lib")
-set(POSTGRES_INCLUDE_DIR "" CACHE PATH "Path to pg_config.h / libpq-fe.h")
-set(POSTGRES_LIBRARY     "" CACHE FILEPATH "Path to libpq.lib")
 set(FIREBIRD_INCLUDE_DIR "" CACHE PATH "Path to ibase.h")
 set(FIREBIRD_LIBRARY     "" CACHE FILEPATH "Path to fbclient.lib")
 
@@ -126,7 +126,7 @@ macro(add_luasql_driver DRIVER_NAME SOURCES_LIST EXT_INCLUDES EXT_LIBS)
       brotlicommon.lib brotlidec.lib
       nghttp2.lib nghttp3.lib ngtcp2.lib ngtcp2_crypto_libressl.lib
       ssl.lib crypto.lib
-      liblua.lib secur32.lib rpcrt4.lib crypt32.lib
+      liblua.lib ws2_32.lib secur32.lib rpcrt4.lib crypt32.lib
       iphlpapi.lib bcrypt.lib shlwapi.lib wldap32.lib normaliz.lib
     )
   else()
@@ -145,6 +145,12 @@ message(STATUS "Configuring LuaSQL-SQLite3...")
 add_luasql_driver(sqlite3 "src/ls_sqlite3.c" "${SQLITE3_INCLUDE_DIR}" "${SQLITE3_LIBRARY}")
 message(STATUS "Configuring LuaSQL-MySQL...")
 add_luasql_driver(mysql "src/ls_mysql.c" "${MYSQL_INCLUDE_DIR}" "${MYSQL_LIBRARY}")
+message(STATUS "Configuring LuaSQL-PostgreSQL...")
+add_luasql_driver(postgres "src/ls_postgres.c" "${POSTGRES_INCLUDE_DIR}" "${POSTGRES_LIBRARY}")
+message(STATUS "Postgres Lib: ${POSTGRES_LIBRARY}")
+
+
+
 
 #add_luasql_driver(ado "src/ls_ado.c" "" "")
 

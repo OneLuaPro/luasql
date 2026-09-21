@@ -802,6 +802,7 @@ datasource = arg[2] or DEFAULT_TEST_DATABASE or "luasql-test"
 username = arg[3] or DEFAULT_USERNAME or nil
 password = arg[4] or DEFAULT_PASSWORD or nil
 host = arg[5] or "localhost"
+port = arg[6] or nil
 
 -- Complete set of tests
 tests = {
@@ -837,7 +838,7 @@ else
 end
 
 -- Set optional connect arguments: port, unix_socket, client_flag
-port = nil
+-- port = nil
 unix_socket = nil
 client_flag = nil
 if driver == "mysql" and luasql.CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE then
