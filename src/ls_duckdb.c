@@ -18,14 +18,16 @@
 
 typedef struct {
     short closed;
-    int   open_conns;  /* number of open connections created from this env */
+    int   open_conns;    /* number of open connections created from this env */
+    short db_open;       /* whether the shared database handle is currently open */
+    duckdb_database db;  /* shared database handle, reused by all connections
+			 ** created from this environment */
 } env_data;
 
 typedef struct {
     short closed;
     int env;                /* reference to environment */
     int auto_commit;        /* 0 for manual commit */
-    duckdb_database db;
     duckdb_connection con;
 } conn_data;
 
@@ -279,7 +281,6 @@ static void sql_begin(conn_data *conn) {
 }
 
 
-
 /*
 ** Connection object collector function
 */
@@ -288,18 +289,24 @@ static int conn_gc(lua_State *L) {
     if (conn != NULL && !(conn->closed)) {
         /* Nullify structure fields. */
         conn->closed = 1;
-         if (conn->env != LUA_NOREF) {
+        duckdb_disconnect(&conn->con);
+        if (conn->env != LUA_NOREF) {
             lua_rawgeti(L, LUA_REGISTRYINDEX, conn->env);
             env_data *e = (env_data *)luaL_checkudata(L, -1, LUASQL_ENVIRONMENT_DUCKDB);
             if (e && e->open_conns > 0) e->open_conns -= 1;
+            /* close the shared database handle once the last connection is gone */
+            if (e && e->open_conns == 0 && e->db_open) {
+                duckdb_close(&e->db);
+                e->db_open = 0;
+            }
             lua_pop(L, 1);
             luaL_unref(L, LUA_REGISTRYINDEX, conn->env);
             conn->env = LUA_NOREF;
         }
-        duckdb_disconnect(&conn->con);
     }
     return 0;
 }
+
 
 /*
 ** Closes the connection on top of the stack.
@@ -311,24 +318,29 @@ static int conn_close(lua_State *L) {
     conn_data *conn = (conn_data *)luaL_checkudata(L, 1, LUASQL_CONNECTION_DUCKDB);
     luaL_argcheck(L, conn != NULL, 1, LUASQL_PREFIX "connection expected");
     if (conn->closed) {
-        lua_pushboolean (L, 0);
+        lua_pushboolean(L, 0);
         lua_pushstring(L, "Connection is already closed");
         return 2;
     }
     conn->closed = 1;
+    duckdb_disconnect(&conn->con);
     if (conn->env != LUA_NOREF) {
-        /* load env, decrement counter, then unref */
+        /* load env, decrement counter, close shared db if no longer used, then unref */
         lua_rawgeti(L, LUA_REGISTRYINDEX, conn->env);
         env_data *e = (env_data *)luaL_checkudata(L, -1, LUASQL_ENVIRONMENT_DUCKDB);
         if (e && e->open_conns > 0) e->open_conns -= 1;
+        if (e && e->open_conns == 0 && e->db_open) {
+            duckdb_close(&e->db);
+            e->db_open = 0;
+        }
         lua_pop(L, 1); /* pop env */
         luaL_unref(L, LUA_REGISTRYINDEX, conn->env);
         conn->env = LUA_NOREF;
     }
-    duckdb_disconnect(&conn->con);
     lua_pushboolean(L, 1);
     return 1;
 }
+
 
 /*
 ** Execute an SQL statement.
@@ -434,22 +446,32 @@ static int create_connection(lua_State *L, int env, duckdb_connection const con)
 
 /*
 ** Connects to a DuckDB database.
+** The underlying database file is opened only once per environment
+** and shared by all connections created from it; DuckDB's intended
+** usage is a single duckdb_database with multiple duckdb_connection
+** handles on top of it. The database is closed again once the last
+** connection referencing it is closed (see conn_close/conn_gc).
 */
 static int env_connect(lua_State *L) {
     const char *sourcename = luaL_checkstring(L, 2);
-    duckdb_database db;
     duckdb_connection con;
+    char *error = NULL;
 
-    char * error = NULL;
+    env_data *env = getenvironment(L);   /* validate environment */
 
-    getenvironment(L);	/* validate environment */
-
-    // Needs to pass in db config in third parameter here
-    if (duckdb_open_ext(sourcename, &db, NULL, &error) != DuckDBSuccess) {
-        return luasql_failmsg(L, "error connecting to database. DuckDB: ", error);
+    if (!env->db_open) {
+        if (duckdb_open_ext(sourcename, &env->db, NULL, &error) != DuckDBSuccess) {
+            return luasql_failmsg(L, "error connecting to database. DuckDB: ", error);
+        }
+        env->db_open = 1;
     }
-    if (duckdb_connect(db, &con) != DuckDBSuccess) {
-        duckdb_close(&db);
+
+    if (duckdb_connect(env->db, &con) != DuckDBSuccess) {
+        /* only close the shared handle if nobody else is using it */
+        if (env->open_conns == 0) {
+            duckdb_close(&env->db);
+            env->db_open = 0;
+        }
         return luasql_failmsg(L, "error connecting to database. DuckDB: ", "Unspecified driver error");
     }
     return create_connection(L, 1, con);
@@ -538,6 +560,7 @@ static int create_environment(lua_State *L) {
 
     /* fill in structure */
     env->closed = 0;
+    env->db_open = 0;   /* database is opened lazily on first connect */
     return 1;
 }
 
