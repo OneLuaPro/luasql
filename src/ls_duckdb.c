@@ -352,7 +352,9 @@ static int conn_execute(lua_State *L) {
     const char *statement = luaL_checkstring(L, 2);
     duckdb_result result;
     if (duckdb_query(conn->con, statement, &result) != DuckDBSuccess) {
-        return luasql_failmsg(L, "error executing statement. DuckDB: ", duckdb_result_error(&result));
+        int ret = luasql_failmsg(L, "error executing statement. DuckDB: ", duckdb_result_error(&result));
+        duckdb_destroy_result(&result);
+        return ret;
     }
 
     duckdb_result_type rt;
@@ -390,7 +392,6 @@ static int conn_commit(lua_State *L)
 */
 static int conn_rollback(lua_State *L)
 {
-  char *errmsg;
   conn_data *conn = getconnection(L);
   duckdb_result res;
   const char *sql = "ROLLBACK";
@@ -401,26 +402,57 @@ static int conn_rollback(lua_State *L)
     {
       lua_pushnil(L);
       lua_pushliteral(L, LUASQL_PREFIX);
-      lua_pushstring(L, errmsg);
+      lua_pushstring(L, duckdb_result_error(&res));
       lua_concat(L, 2);
+      duckdb_destroy_result(&res);
       return 2;
     }
+  duckdb_destroy_result(&res);
   lua_pushboolean(L, 1);
   return 1;
 }
 
 /*
 ** Set "auto commit" property of the connection.
-** If 'true', then rollback current transaction.
-** If 'false', then start a new transaction.
+**
+** Semantics decision: on enabling autocommit, any pending manual
+** transaction is ROLLED BACK (not committed). This matches the
+** upstream ls_postgres.c/ls_sqlite3.c/ls_oci8.c drivers, which all
+** use the same convention for backends without a native autocommit
+** switch (unlike MySQL/ODBC, which merely forward to their client
+** library's own built-in toggle and inherit its commit-on-enable
+** behavior from there).
+**
 */
 static int conn_setautocommit(lua_State *L) {
     conn_data *conn = getconnection(L);
-    if (lua_toboolean(L, 2)) {
+    int new_value = lua_toboolean(L, 2);
+    duckdb_result res;
+
+    if (new_value && conn->auto_commit == 0) {
+        /* Leaving manual mode: discard whatever hasn't been committed yet. */
+        if (duckdb_query(conn->con, "ROLLBACK", &res) != DuckDBSuccess) {
+            const char *errmsg = duckdb_result_error(&res);
+            lua_pushnil(L);
+            lua_pushstring(L, errmsg ? errmsg : "error rolling back transaction during setautocommit");
+            duckdb_destroy_result(&res);
+            return 2;
+        }
+        duckdb_destroy_result(&res);
         conn->auto_commit = 1;
-    } else {
+    } else if (!new_value && conn->auto_commit == 1) {
+        /* Entering manual mode: open the transaction explicitly. */
+        if (duckdb_query(conn->con, "BEGIN", &res) != DuckDBSuccess) {
+            const char *errmsg = duckdb_result_error(&res);
+            lua_pushnil(L);
+            lua_pushstring(L, errmsg ? errmsg : "error starting transaction during setautocommit");
+            duckdb_destroy_result(&res);
+            return 2;
+        }
+        duckdb_destroy_result(&res);
         conn->auto_commit = 0;
     }
+
     lua_pushboolean(L, 1);
     return 1;
 }
