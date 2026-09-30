@@ -208,6 +208,7 @@ static int fail(lua_State *L,  const SQLSMALLINT type, const SQLHANDLE handle) {
         ret = SQLGetDiagRec(type, handle, i, State, &NativeError, Msg,
                 sizeof(Msg), &MsgSize);
         if (ret == SQL_NO_DATA) break;
+	if (ret == SQL_ERROR) break;
         luaL_addlstring(&b, (char*)Msg, MsgSize);
         luaL_addchar(&b, '\n');
         i++;
@@ -219,7 +220,9 @@ static int fail(lua_State *L,  const SQLSMALLINT type, const SQLHANDLE handle) {
 static param_data *malloc_stmt_params(SQLSMALLINT c)
 {
 	param_data *p = (param_data *)malloc(sizeof(param_data)*c);
-	memset(p, 0, sizeof(param_data)*c);
+	if (p != NULL) {
+	        memset(p, 0, sizeof(param_data)*c);
+	}
 
 	return p;
 }
@@ -695,7 +698,9 @@ static int conn_close (lua_State *L)
 	conn->closed = 1;
 	ret = SQLDisconnect(conn->hdbc);
 	if (error(ret)) {
-		return fail(L, hDBC, conn->hdbc);
+	        int res = fail(L, hDBC, conn->hdbc);
+		SQLFreeHandle(hDBC, conn->hdbc);
+		return res;
 	}
 
 	ret = SQLFreeHandle(hDBC, conn->hdbc);
@@ -748,7 +753,7 @@ static int raw_execute(lua_State *L, int istmt)
 
 static int set_param(lua_State *L, stmt_data *stmt, int i, param_data *data)
 {
-	static SQLLEN cbNull = SQL_NULL_DATA;
+        static SQLLEN cbNull = SQL_NULL_DATA;
 
 	switch(lua_type(L, -1)) {
 	case LUA_TNIL: {
@@ -825,13 +830,15 @@ static int set_param(lua_State *L, stmt_data *stmt, int i, param_data *data)
 */
 static int raw_readparams_table(lua_State *L, stmt_data *stmt, int iparams)
 {
-	static SQLLEN cbNull = SQL_NULL_DATA;
 	SQLSMALLINT i;
 	param_data *data;
 	int res = 0;
 
 	free_stmt_params(stmt->params, stmt->numparams);
 	stmt->params = malloc_stmt_params(stmt->numparams);
+	if (stmt->params == NULL && stmt->numparams > 0) {
+		return luasql_faildirect(L, "memory allocation error.");
+	}
 	data = stmt->params;
 
 	for(i=1; i<=stmt->numparams; ++i, ++data) {
@@ -853,13 +860,15 @@ static int raw_readparams_table(lua_State *L, stmt_data *stmt, int iparams)
 */
 static int raw_readparams_args(lua_State *L, stmt_data *stmt, int arg, int ltop)
 {
-	static SQLLEN cbNull = SQL_NULL_DATA;
 	SQLSMALLINT i;
 	param_data *data;
 	int res = 0;
 
 	free_stmt_params(stmt->params, stmt->numparams);
 	stmt->params = malloc_stmt_params(stmt->numparams);
+	if (stmt->params == NULL && stmt->numparams > 0) {
+		return luasql_faildirect(L, "memory allocation error.");
+	}
 	data = stmt->params;
 
 	for(i=1; i<=stmt->numparams; ++i, ++data, ++arg) {
@@ -889,10 +898,13 @@ static int stmt_execute(lua_State *L)
 {
 	int ltop = lua_gettop(L);
 	int res;
+	stmt_data *stmt = getstatement(L, 1);
+
+	luaL_argcheck (L, stmt->lock == 0, 1,
+	               LUASQL_PREFIX"there are still open cursors");
 
 	/* any parameters to use */
 	if(ltop > 1) {
-		stmt_data *stmt = getstatement(L, 1);
 		if(lua_type(L, 2) == LUA_TTABLE) {
 			res = raw_readparams_table(L, stmt, 2);
 		} else {
@@ -1045,7 +1057,7 @@ static int conn_commit (lua_State *L) {
 	conn_data *conn = (conn_data *) getconnection (L, 1);
 	SQLRETURN ret = SQLEndTran(hDBC, conn->hdbc, SQL_COMMIT);
 	if (error(ret))
-		return fail(L, hSTMT, conn->hdbc);
+		return fail(L, hDBC, conn->hdbc);
 	else
 		return pass(L);
 }
@@ -1057,7 +1069,7 @@ static int conn_rollback (lua_State *L) {
 	conn_data *conn = (conn_data *) getconnection (L, 1);
 	SQLRETURN ret = SQLEndTran(hDBC, conn->hdbc, SQL_ROLLBACK);
 	if (error(ret))
-		return fail(L, hSTMT, conn->hdbc);
+		return fail(L, hDBC, conn->hdbc);
 	else
 		return pass(L);
 }
@@ -1076,7 +1088,7 @@ static int conn_setautocommit (lua_State *L) {
 			(SQLPOINTER) SQL_AUTOCOMMIT_OFF, 0);
 	}
 	if (error(ret))
-		return fail(L, hSTMT, conn->hdbc);
+		return fail(L, hDBC, conn->hdbc);
 	else
 		return pass(L);
 }
