@@ -3,6 +3,11 @@
 ** Author: Geraldo Luiz
 ** ls_duckdb.c
 */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -605,6 +610,19 @@ LUASQL_API int luaopen_luasql_duckdb(lua_State *L) {
         {"duckdb", create_environment},
         {NULL, NULL},
     };
+#ifdef _WIN32
+    {
+        /* Pin this DLL: the statically linked DuckDB extensions (e.g. the AWS
+           SDK) keep threads running that would execute unmapped code after
+           Lua unloads the module with FreeLibrary in lua_close(). A pinned DLL
+           stays mapped until process exit, where Windows terminates all other
+           threads first. If pinning fails we simply keep the old behaviour. */
+        HMODULE self = NULL;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_PIN,
+                           (LPCSTR)&luaopen_luasql_duckdb, &self);
+    }
+#endif
     create_metatables(L);
     lua_newtable(L);
     luaL_setfuncs(L, driver, 0);
