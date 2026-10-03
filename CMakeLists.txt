@@ -75,6 +75,14 @@ set(INSTALL_TOP_CDIR
 set(INSTALL_LUASQL_CDIR ${INSTALL_TOP_CDIR}/luasql)
 
 # ------------------------------------------------------------------------------
+# Get AWS SDK path and settings
+get_filename_component(AWS_PREFIX "${LIBLUA_LIBDIR}/.." ABSOLUTE)
+list(APPEND CMAKE_PREFIX_PATH "${AWS_PREFIX}")
+find_package(ZLIB REQUIRED)
+find_package(AWSSDK REQUIRED COMPONENTS core sso sts identity-management rds)
+message(STATUS "AWS SDK link libraries: ${AWSSDK_LINK_LIBRARIES}")
+
+# ------------------------------------------------------------------------------
 # Externe Abhaengigkeiten-Pfade (Falls SDKs nicht im Standard-Pfad liegen)
 set(SQLITE3_INCLUDE_DIR  "${LIBLUA_INCLUDEDIR}" CACHE PATH "Path to sqlite3 header")
 set(SQLITE3_LIBRARY      "${LIBLUA_LIBDIR}/sqlean.lib" CACHE FILEPATH "sqlite3 lib")
@@ -83,7 +91,7 @@ set(MYSQL_LIBRARY        "${LIBLUA_LIBDIR}/mariadb/mariadbclient.lib" CACHE FILE
 set(POSTGRES_INCLUDE_DIR "${LIBLUA_INCLUDEDIR}" CACHE PATH "Path to postgres header")
 set(POSTGRES_LIBRARY     "${LIBLUA_LIBDIR}/pq.lib" CACHE FILEPATH "Path to pq.lib")
 set(DUCKDB_INCLUDE_DIR   "${LIBLUA_INCLUDEDIR}" CACHE PATH "Path to duckdb.h")
-set(DUCKDB_LIBRARY       "duckdb_static.lib;core_functions_extension.lib;parquet_extension.lib;json_extension.lib;duckdb_generated_extension_loader.lib;postgres_scanner_extension.lib;pq.lib;mysql_scanner_extension.lib;${LIBLUA_LIBDIR}/mariadb/mariadbclient.lib;sqlite_scanner_extension.lib;sqlean.lib;odbc_scanner_extension.lib;odbc32.lib" CACHE STRING "DuckDB static libraries and their transitive dependencies")
+set(DUCKDB_LIBRARY       "duckdb_static.lib;core_functions_extension.lib;parquet_extension.lib;json_extension.lib;duckdb_generated_extension_loader.lib;postgres_scanner_extension.lib;pq.lib;mysql_scanner_extension.lib;${LIBLUA_LIBDIR}/mariadb/mariadbclient.lib;sqlite_scanner_extension.lib;sqlean.lib;odbc_scanner_extension.lib;odbc32.lib;httpfs_extension.lib;excel_extension.lib;libexpatMT.lib;minizip-ng.lib;bzip2.lib;lzma.lib;ppmd.lib;fts_extension.lib;aws_extension.lib;${AWSSDK_LINK_LIBRARIES}" CACHE STRING "DuckDB static libraries and their transitive dependencies")
 
 set(ORACLE_INCLUDE_DIR  "" CACHE PATH "Path to Oracle OCI headers")
 set(ORACLE_LIBRARY      "" CACHE FILEPATH "Path to oci.lib")
