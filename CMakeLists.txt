@@ -81,6 +81,26 @@ list(APPEND CMAKE_PREFIX_PATH "${AWS_PREFIX}")
 find_package(ZLIB REQUIRED)
 find_package(AWSSDK REQUIRED COMPONENTS core sso sts identity-management rds)
 message(STATUS "AWS SDK link libraries: ${AWSSDK_LINK_LIBRARIES}")
+#
+find_package(azure-identity-cpp CONFIG REQUIRED)
+find_package(azure-storage-blobs-cpp CONFIG REQUIRED)
+find_package(azure-storage-files-datalake-cpp CONFIG REQUIRED)
+
+# ------------------------------------------------------------------------------
+# spatial: the same find_package calls and the same order as in
+# duckdb-spatial's CMakeLists.txt (PROJ before GDAL, see gdal_smoke)
+#
+# Hints for sqlean.lib in the spelling that CMake's FindSQLite3 reads. The variable
+# names are case sensitive, the SQLITE3_* variables below are not seen by it.
+set(SQLite3_INCLUDE_DIR "${LIBLUA_INCLUDEDIR}" CACHE PATH "Path to sqlite3 header")
+set(SQLite3_LIBRARY     "${LIBLUA_LIBDIR}/sqlean.lib" CACHE FILEPATH "sqlite3 lib (sqlean)")
+set(OPENSSL_USE_STATIC_LIBS ON)
+find_package(OpenSSL REQUIRED)
+find_package(PROJ CONFIG REQUIRED)
+find_package(GDAL CONFIG REQUIRED)
+find_package(GEOS REQUIRED)
+find_package(sqlean CONFIG REQUIRED)
+find_package(CURL REQUIRED)
 
 # ------------------------------------------------------------------------------
 # Externe Abhaengigkeiten-Pfade (Falls SDKs nicht im Standard-Pfad liegen)
@@ -91,7 +111,7 @@ set(MYSQL_LIBRARY        "${LIBLUA_LIBDIR}/mariadb/mariadbclient.lib" CACHE FILE
 set(POSTGRES_INCLUDE_DIR "${LIBLUA_INCLUDEDIR}" CACHE PATH "Path to postgres header")
 set(POSTGRES_LIBRARY     "${LIBLUA_LIBDIR}/pq.lib" CACHE FILEPATH "Path to pq.lib")
 set(DUCKDB_INCLUDE_DIR   "${LIBLUA_INCLUDEDIR}" CACHE PATH "Path to duckdb.h")
-set(DUCKDB_LIBRARY       "duckdb_static.lib;core_functions_extension.lib;parquet_extension.lib;json_extension.lib;duckdb_generated_extension_loader.lib;postgres_scanner_extension.lib;pq.lib;mysql_scanner_extension.lib;${LIBLUA_LIBDIR}/mariadb/mariadbclient.lib;sqlite_scanner_extension.lib;sqlean.lib;odbc_scanner_extension.lib;odbc32.lib;httpfs_extension.lib;excel_extension.lib;libexpatMT.lib;minizip-ng.lib;bzip2.lib;lzma.lib;ppmd.lib;fts_extension.lib;aws_extension.lib;${AWSSDK_LINK_LIBRARIES}" CACHE STRING "DuckDB static libraries and their transitive dependencies")
+set(DUCKDB_LIBRARY       "duckdb_static.lib;core_functions_extension.lib;parquet_extension.lib;json_extension.lib;duckdb_generated_extension_loader.lib;postgres_scanner_extension.lib;pq.lib;mysql_scanner_extension.lib;${LIBLUA_LIBDIR}/mariadb/mariadbclient.lib;sqlite_scanner_extension.lib;sqlean.lib;odbc_scanner_extension.lib;odbc32.lib;httpfs_extension.lib;excel_extension.lib;libexpatMT.lib;minizip-ng.lib;bzip2.lib;lzma.lib;ppmd.lib;fts_extension.lib;aws_extension.lib;${AWSSDK_LINK_LIBRARIES};azure_extension.lib;Azure::azure-identity;Azure::azure-storage-blobs;Azure::azure-storage-files-datalake;flatccrt.lib;vss_extension.lib;spatial_extension.lib;GDAL::GDAL;PROJ::proj;GEOS::geos_c;sqlean::sqlean;ZLIB::ZLIB;CURL::libcurl;OpenSSL::SSL;OpenSSL::Crypto;wbemuuid.lib" CACHE STRING "DuckDB static libraries and their transitive dependencies")
 
 set(ORACLE_INCLUDE_DIR  "" CACHE PATH "Path to Oracle OCI headers")
 set(ORACLE_LIBRARY      "" CACHE FILEPATH "Path to oci.lib")
