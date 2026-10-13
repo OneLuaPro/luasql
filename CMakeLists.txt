@@ -115,8 +115,8 @@ set(DUCKDB_LIBRARY       "duckdb_static.lib;core_functions_extension.lib;parquet
 
 set(ORACLE_INCLUDE_DIR  "" CACHE PATH "Path to Oracle OCI headers")
 set(ORACLE_LIBRARY      "" CACHE FILEPATH "Path to oci.lib")
-set(FIREBIRD_INCLUDE_DIR "" CACHE PATH "Path to ibase.h")
-set(FIREBIRD_LIBRARY     "" CACHE FILEPATH "Path to fbclient.lib")
+set(FIREBIRD_INCLUDE_DIR "${LIBLUA_INCLUDEDIR}" CACHE PATH "Path to ibase.h")
+set(FIREBIRD_LIBRARY     "fbclient_static.lib;tomcrypt.lib;tommath.lib;mpr.lib" CACHE STRING "Firebird static client and its dependencies")
 
 # ------------------------------------------------------------------------------
 macro(add_luasql_driver DRIVER_NAME SOURCES_LIST EXT_INCLUDES EXT_LIBS)
@@ -173,7 +173,8 @@ message(STATUS "Configuring LuaSQL-PostgreSQL...")
 add_luasql_driver(postgres "src/ls_postgres.c" "${POSTGRES_INCLUDE_DIR}" "${POSTGRES_LIBRARY}")
 message(STATUS "Configuring DuckDB...")
 add_luasql_driver(duckdb "src/ls_duckdb.c" "${DUCKDB_INCLUDE_DIR}" "${DUCKDB_LIBRARY}")
-
+message(STATUS "Configuring LuaSQL-Firebird...")
+add_luasql_driver(firebird "src/ls_firebird.c" "${FIREBIRD_INCLUDE_DIR}" "${FIREBIRD_LIBRARY}")
 
 
 #add_luasql_driver(ado "src/ls_ado.c" "" "")
