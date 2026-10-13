@@ -15,6 +15,11 @@
 
 #include "luasql.h"
 
+/* BOOLEAN exists from Firebird 3 on, older ibase.h do not know it */
+#ifndef SQL_BOOLEAN
+#define SQL_BOOLEAN 32764
+#endif
+
 #define LUASQL_ENVIRONMENT_FIREBIRD "Firebird environment"
 #define LUASQL_CONNECTION_FIREBIRD "Firebird connection"
 #define LUASQL_CURSOR_FIREBIRD "Firebird cursor"
@@ -389,7 +394,26 @@ static int conn_execute (lua_State *L) {
 
 	/* prep the result set ready to handle the data */
 	for (i=0, var = cur.out_sqlda->sqlvar; i < cur.out_sqlda->sqld; i++, var++) {
+	        var->sqldata = NULL;	/* the XSQLDA comes from malloc, not zeroed */
 		dtype = (var->sqltype & ~1); /* drop flag bit for now */
+
+		/* A type this driver does not know (INT128, DECFLOAT, the TIME ZONE
+		   types, ...): ask the server for text, it converts the value. */
+		switch(dtype) {
+		case SQL_VARYING: case SQL_TEXT: case SQL_SHORT: case SQL_LONG:
+		case SQL_INT64: case SQL_FLOAT: case SQL_DOUBLE: case SQL_TYPE_TIME:
+		case SQL_TYPE_DATE: case SQL_TIMESTAMP: case SQL_BLOB:
+		case SQL_BOOLEAN: case SQL_ARRAY:
+		  break;
+		default:
+		  var->sqltype = SQL_VARYING + (var->sqltype & 1);
+		  var->sqllen = 128;
+		  var->sqlscale = 0;
+		  var->sqlsubtype = 0;
+		  dtype = SQL_VARYING;
+		  break;
+		}
+		
 		switch(dtype) {
 		case SQL_VARYING:
 			var->sqldata = (char *)malloc_zero(sizeof(char)*var->sqllen + 2);
@@ -423,6 +447,9 @@ static int conn_execute (lua_State *L) {
 			break;
 		case SQL_BLOB:
 			var->sqldata = (char *)malloc_zero(sizeof(ISC_QUAD));
+			break;
+		case SQL_BOOLEAN:
+			var->sqldata = (char *)malloc_zero(sizeof(unsigned char));
 			break;
 		/* TODO : add extra data type handles here */
 		}
@@ -529,10 +556,16 @@ static int conn_rollback(lua_State *L) {
 static int conn_setautocommit(lua_State *L) {
 	conn_data *conn = getconnection(L,1);
 
-	if(lua_toboolean(L, 2))
-		conn->autocommit = 1;
-	else
-		conn->autocommit = 0;
+	int on = lua_toboolean(L, 2);
+
+	/* switching from manual to automatic commit commits what is pending, as
+	   the other drivers do (ODBC, SQLite3, DuckDB) */
+	if (on && conn->autocommit == 0) {
+	  isc_commit_retaining(conn->env->status_vector, &conn->transaction);
+	  if ( CHECK_DB_ERROR(conn->env->status_vector) )
+	    return return_db_error(L, conn->env->status_vector);
+	}
+	conn->autocommit = on ? 1 : 0;
 
 	lua_pushboolean(L, 1);
 	return 1;
@@ -675,17 +708,17 @@ static void push_column(lua_State *L, int i, cur_data *cur) {
 			break;
 		case SQL_TYPE_TIME:
 			isc_decode_sql_time((ISC_TIME*)(cur->out_sqlda->sqlvar[i].sqldata), &timevar);
-			strftime(timestr, 255, "%X", &timevar);
+			strftime(timestr, 255, "%H:%M:%S", &timevar);
 			lua_pushstring(L, timestr);
 			break;
 		case SQL_TYPE_DATE:
 			isc_decode_sql_date((ISC_DATE*)(cur->out_sqlda->sqlvar[i].sqldata), &timevar);
-			strftime(timestr, 255, "%x", &timevar);
+			strftime(timestr, 255, "%Y-%m-%d", &timevar);
 			lua_pushstring(L, timestr);
 			break;
 		case SQL_TIMESTAMP:
 			isc_decode_timestamp((ISC_TIMESTAMP*)(cur->out_sqlda->sqlvar[i].sqldata), &timevar);
-			strftime(timestr, 255, "%x %X", &timevar);
+			strftime(timestr, 255, "%Y-%m-%d %H:%M:%S", &timevar);
 			lua_pushstring(L, timestr);
 			break;
 		case SQL_BLOB:
@@ -698,15 +731,15 @@ static void push_column(lua_State *L, int i, cur_data *cur) {
 			luaL_buffinit(L, &b);
 			buffer = luaL_prepbuffer(&b);
 
-			blob_stat = isc_get_segment(	cur->env->status_vector,
-											&blob_handle, &actual_seg_len,
-											LUAL_BUFFERSIZE, buffer );
+			blob_stat = isc_get_segment(cur->env->status_vector,
+						    &blob_handle, &actual_seg_len,
+						    LUAL_BUFFERSIZE, buffer );
 			while(blob_stat == 0 || cur->env->status_vector[1] == isc_segment) {
 				luaL_addsize(&b, actual_seg_len);
 				buffer = luaL_prepbuffer(&b);
-				blob_stat = isc_get_segment(	cur->env->status_vector,
-												&blob_handle, &actual_seg_len,
-												LUAL_BUFFERSIZE, buffer );
+				blob_stat = isc_get_segment(cur->env->status_vector,
+							    &blob_handle, &actual_seg_len,
+							    LUAL_BUFFERSIZE, buffer );
 			}
 
 			/* finished, close the BLOB */
@@ -714,6 +747,9 @@ static void push_column(lua_State *L, int i, cur_data *cur) {
 			blob_handle = 0;
 
 			luaL_pushresult(&b);
+			break;
+		case SQL_BOOLEAN:
+			lua_pushboolean(L, *(unsigned char*)(cur->out_sqlda->sqlvar[i].sqldata) != 0);
 			break;
 		default:
 			lua_pushstring(L, "<unsupported data type>");
@@ -867,6 +903,9 @@ static int cur_coltypes (lua_State *L) {
 		case SQL_DOUBLE:
             lua_pushstring(L, "number");
 			break;
+		case SQL_BOOLEAN:
+		  lua_pushstring(L, "boolean");
+		  break;
 		default:
             lua_pushstring(L, "unknown");
 			break;
@@ -963,6 +1002,12 @@ static int env_connect (lua_State *L) {
 	conn.transaction = 0L;
 	conn.lock = 0;
 	conn.autocommit = 0;
+
+	/* the dpb has 256 bytes: 4 bytes header, 2 + user name, 2 + password;
+	   a length byte holds 255 at most */
+	if (strlen(username) > 255 || strlen(password) > 255 ||
+	    4 + 2 + strlen(username) + 2 + strlen(password) > sizeof(conn.dpb_buffer))
+	  return luasql_faildirect(L, "user name or password too long");
 
 	/* Construct a database parameter buffer. */
 	dpb = conn.dpb_buffer;
