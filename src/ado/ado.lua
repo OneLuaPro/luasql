@@ -3,15 +3,15 @@
 ---------------------------------------------------------------------
 
 require"luacom"
+-- Lua strings are UTF-8; luacom defaults to the ANSI code page
+luacom.SetCodepage(65001)
 
 ---------------------------------------------------------------------
 -- luasql table name
 ---------------------------------------------------------------------
-local libName = "luasql"
+local luasql = {}
 
 local Private = {}
-
-luasql = type(_G[libName]) == "table" and _G[libName] or {}
 
 local ADOTypes = {}
 
@@ -26,17 +26,32 @@ do
   end
 end
 
-local metatable = {
-  __metatable = "LuaSQL: you're not allowed to get this metatable"
-}
+-- one metatable per object, so that __tostring can report the state of that object
+local function newmeta(kind, is_closed)
+  return {
+    __metatable = "LuaSQL: you're not allowed to get this metatable",
+    __close = function(obj) obj:close() end,
+    __tostring = function(obj)
+      if is_closed() then
+        return "ADO " .. kind .. " (closed)"
+      end
+      return string.format("ADO %s (%p)", kind, obj)
+    end,
+  }
+end
 
 luasql._COPYRIGHT = "Copyright (C) 2003-2006 Kepler Project"
 luasql._DESCRIPTION = "LuaSQL is a simple interface from Lua to a DBMS"
-luasql._VERSION = "LuaSQL 2.1.1"
+luasql._VERSION = "LuaSQL 2.8.1"
 
 ---------------------------------------------------------------------
 -- function that returns an ADO environment
 ---------------------------------------------------------------------
+-- strip luacom's "COM exception:(file,line):" prefix from error messages
+local function clean(msg)
+  return (tostring(msg):gsub("^COM exception:%b():%s*", ""))
+end
+
 function luasql.ado()
     local isClosed  = false
     local openConns = {}
@@ -44,7 +59,7 @@ function luasql.ado()
 
     local env = {}
 
-    setmetatable(env, metatable)
+    setmetatable(env, newmeta("environment", function() return isClosed end))
 
     env.ADOTypes = ADOTypes
 
@@ -84,10 +99,11 @@ function luasql.ado()
         end
 
         local conn = luacom.CreateObject("ADODB.Connection")
-        local ok, errmsg = pcall(conn.Open, conn, sourcestr, user, pass, opts)
+	if type(opts) ~= "number" then opts = -1 end  -- adConnectUnspecified
+	local ok, errmsg = pcall(conn.Open, conn, sourcestr, user or "", pass or "", opts)
 
         if not ok then
-            return nil, errmsg
+	    return nil, clean(errmsg)
         end
 
         if conn.State == 0 then
@@ -117,7 +133,7 @@ function Private.createConnection(conObj, closeFunc)
 
     local con = {}
 
-    setmetatable(con, metatable)
+    setmetatable(con, newmeta("connection", function() return isClosed end))
 
     local autocommit = true
 
@@ -155,12 +171,12 @@ function Private.createConnection(conObj, closeFunc)
 
         local cond, err = pcall(conObj.CommitTrans, conObj)
         if not cond then
-            return false, err
+            return false, clean(err)
         end
 
         local cond, err = pcall(conObj.BeginTrans, conObj)
         if not cond then
-            return false, err
+            return false, clean(err)
         end
 
         return true
@@ -175,10 +191,11 @@ function Private.createConnection(conObj, closeFunc)
 
         local cond, res, upcount = pcall(conObj.Execute, conObj, sql)
         if not cond then
-            return nil, res
+	    return nil, clean(res)
         end
 
         if not upcount then upcount = 0 end
+	upcount = math.tointeger(upcount) or upcount
 
         if autocommit then
           local cond, err = con:commit()
@@ -207,12 +224,12 @@ function Private.createConnection(conObj, closeFunc)
 
         local cond, err = pcall(conObj.RollbackTrans, conObj)
         if not cond then
-            return false, err
+            return false, clean(err)
         end
 
         local cond, err = pcall(conObj.BeginTrans, conObj)
         if not cond then
-            return false, err
+            return false, clean(err)
         end
 
         return true
@@ -227,14 +244,14 @@ function Private.createConnection(conObj, closeFunc)
 
         local cond, err = pcall(conObj.CommitTrans, conObj)
         if not cond then
-            return false, err
+            return false, clean(err)
         end
 
         autocommit = bool
 
         local cond, err = pcall(conObj.BeginTrans, conObj)
         if not cond then
-            return false, err
+            return false, clean(err)
         end
 
         return true
@@ -254,7 +271,7 @@ function Private.createCursor(rs, con, closeFunc)
     local col_names = nil
     local col_types = nil
 
-    setmetatable(res, metatable)
+    setmetatable(res, newmeta("cursor", function() return isClosed end))
 
     function res:close()
         if not self then error("You must provide a self parameter") end
@@ -280,9 +297,10 @@ function Private.createCursor(rs, con, closeFunc)
 
         local arg_tb = tb
 
-        if cursor.EOF then
-          return nil, "End of cursor reached"
-        end
+	if cursor.EOF then
+	   res:close()
+	   return nil
+	end
 
         if tb == nil or type(tb) ~= "table" then
             tb = {}
@@ -292,6 +310,7 @@ function Private.createCursor(rs, con, closeFunc)
             modestring = "n"
         end
 
+	local ncols = cursor.Fields.Count
         for i = 0, cursor.Fields.Count-1 do
           local fields = cursor.Fields
           local cond, field = pcall(fields.Item, fields, i)
@@ -311,7 +330,7 @@ function Private.createCursor(rs, con, closeFunc)
         end
 
         if modestring == "n" and not arg_tb then
-          return unpack(tb)
+	   return table.unpack(tb, 1, ncols)
         else
           return tb
         end
@@ -367,3 +386,5 @@ function Private.createCursor(rs, con, closeFunc)
 
     return res
 end
+
+return luasql

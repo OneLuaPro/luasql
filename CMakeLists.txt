@@ -71,8 +71,11 @@ set(INSTALL_DATAROOTDIR
 # Lua-specific installation dirs
 set(INSTALL_TOP_CDIR
   ${INSTALL_LIBDIR}/lua/${liblua_VERSION_MAJOR}.${liblua_VERSION_MINOR})
+set(INSTALL_TOP_LDIR
+  ${INSTALL_DATAROOTDIR}/lua/${liblua_VERSION_MAJOR}.${liblua_VERSION_MINOR})
 # Specific luasql paths
 set(INSTALL_LUASQL_CDIR ${INSTALL_TOP_CDIR}/luasql)
+set(INSTALL_LUASQL_LDIR ${INSTALL_TOP_LDIR}/luasql)
 
 # ------------------------------------------------------------------------------
 # Get AWS SDK path and settings
@@ -175,10 +178,8 @@ message(STATUS "Configuring DuckDB...")
 add_luasql_driver(duckdb "src/ls_duckdb.c" "${DUCKDB_INCLUDE_DIR}" "${DUCKDB_LIBRARY}")
 message(STATUS "Configuring LuaSQL-Firebird...")
 add_luasql_driver(firebird "src/ls_firebird.c" "${FIREBIRD_INCLUDE_DIR}" "${FIREBIRD_LIBRARY}")
-
-
-#add_luasql_driver(ado "src/ls_ado.c" "" "")
-
+message(STATUS "Configuring LuaSQL-ADO (pure Lua, needs luacom at runtime)...")
+install(FILES src/ado/ado.lua DESTINATION ${INSTALL_LUASQL_LDIR})
 
 # # 1. ODBC (Nutzt Windows native odbc32.lib)
 # if(WITH_ODBC)

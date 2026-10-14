@@ -846,7 +846,7 @@ if driver == "mysql" and luasql.CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE then
    client_flag = luasql.CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE
 end
 
-assert (luasql, "Could not load driver: no luasql table.")
+assert(type(luasql) == "table", "Could not load driver: module did not return a table")
 io.write (luasql._VERSION.." "..driver)
 if luasql._CLIENTVERSION then
 	io.write (" ("..luasql._CLIENTVERSION..")")
@@ -873,6 +873,7 @@ for i = 1, table.getn (tests) do
 			end
 		end
 		io.write"\nThe test failed!\n"
+		os.exit(1)
 		return
 	end
 	io.write (" OK !\n")
