@@ -870,7 +870,7 @@ function prepared_statements_test ()
 
 	-- closing stmt while cursor is open should fail
 	res, err_ret = stmt:close()
-	assert2 (true, res == false, "closing statement while cursor is open should fail")
+	assert2 (true, res == nil, "closing statement while cursor is open should fail")
 	
 	cur:close()
 	assert (stmt:close())
