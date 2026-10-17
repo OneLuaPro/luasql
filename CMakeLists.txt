@@ -180,6 +180,8 @@ message(STATUS "Configuring LuaSQL-Firebird...")
 add_luasql_driver(firebird "src/ls_firebird.c" "${FIREBIRD_INCLUDE_DIR}" "${FIREBIRD_LIBRARY}")
 message(STATUS "Configuring LuaSQL-ADO (pure Lua, needs luacom at runtime)...")
 install(FILES src/ado/ado.lua DESTINATION ${INSTALL_LUASQL_LDIR})
+message(STATUS "Configuring LuaSQL-Oracle (OCI8)...")
+add_luasql_driver(oci8 "src/ls_oci8.c" "${ORACLE_INCLUDE_DIR}" "${ORACLE_LIBRARY}")
 
 # # 1. ODBC (Nutzt Windows native odbc32.lib)
 # if(WITH_ODBC)
