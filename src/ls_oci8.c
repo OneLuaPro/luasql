@@ -20,6 +20,10 @@
 
 #include "luasql.h"
 
+#ifdef _WIN32
+#define strdup _strdup
+#endif
+
 #define LUASQL_ENVIRONMENT_OCI8 "Oracle environment"
 #define LUASQL_CONNECTION_OCI8 "Oracle connection"
 #define LUASQL_CURSOR_OCI8 "Oracle cursor"
@@ -174,12 +178,13 @@ int checkerr (lua_State *L, sword status, OCIError *errhp) {
 			lua_pushstring (L, LUASQL_PREFIX"OCI_NODATA");
 			break;
 		case OCI_ERROR: {
-			text errbuf[512];
+			text errbuf[OCI_ERROR_MAXMSG_SIZE2];
 			sb4 errcode = 0;
+			errbuf[0] = '\0';
 			OCIErrorGet (errhp, (ub4) 1, (text *) NULL, &errcode,
 				errbuf, (ub4) sizeof (errbuf), OCI_HTYPE_ERROR);
 			lua_pushstring (L, LUASQL_PREFIX);
-			lua_pushstring (L, errbuf);
+			lua_pushstring (L, (const char *)errbuf);
 			lua_concat (L, 2);
 			break;
 		}
@@ -578,7 +583,7 @@ static int cur_fetch (lua_State *L) {
 			for (i = 1; i <= cur->numcols; i++) {
 				column_data *col = &(cur->cols[i-1]);
 				int ret;
-				lua_pushlstring (L, col->name, col->namelen);
+				lua_pushlstring (L, (const char *)col->name, col->namelen);
 				if ((ret = pushvalue (L, cur, i)) != 1)
 					return ret;
 				lua_rawset (L, 2);
@@ -641,7 +646,7 @@ static int cur_getcolnames (lua_State *L) {
 		lua_newtable (L);
 		for (i = 1; i <= cur->numcols; i++) {
 			column_data *col = &(cur->cols[i-1]);
-			lua_pushlstring (L, col->name, col->namelen);
+			lua_pushlstring (L, (const char *)col->name, col->namelen);
 			lua_rawseti (L, -2, i);
 		}
 		lua_pushvalue (L, -1);
@@ -1417,10 +1422,14 @@ static int env_close (lua_State *L) {
 
 	env->closed = 1;
 	/* release resources */
-	if (env->envhp)
-		OCIHandleFree ((dvoid *)env->envhp, OCI_HTYPE_ENV);
-	if (env->errhp)
+	if (env->errhp) {
 		OCIHandleFree ((dvoid *)env->errhp, OCI_HTYPE_ERROR);
+		env->errhp = NULL;
+	}
+	if (env->envhp) {
+		OCIHandleFree ((dvoid *)env->envhp, OCI_HTYPE_ENV);
+		env->envhp = NULL;
+	}
 	lua_pushboolean (L, 1);
 	return 1;
 }
@@ -1438,12 +1447,13 @@ static int create_environment (lua_State *L) {
 	env->envhp = NULL;
 	env->errhp = NULL;
 /* maybe OCI_SHARED and OCI_THREADED ??? */
-	if (OCIEnvCreate ( &(env->envhp), (ub4)OCI_DEFAULT, (dvoid *)0,
+	if (OCIEnvNlsCreate ( &(env->envhp), (ub4)OCI_DEFAULT, (dvoid *)0,
 			(dvoid * (*)(dvoid *, size_t)) 0,
 			(dvoid * (*)(dvoid *, dvoid *, size_t)) 0,
 			(void (*)(dvoid *, dvoid *)) 0,
 			(size_t) 0,
-			(dvoid **) 0))
+			(dvoid **) 0,
+			(ub2) 873, (ub2) 873))
 		luasql_faildirect (L, "couldn't create environment");
 	/* error handler */
 	ASSERT (L, OCIHandleAlloc((dvoid *) env->envhp,
