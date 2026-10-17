@@ -10,6 +10,11 @@
 #include <string.h>
 #include <ctype.h>
 
+#ifdef _WIN32
+#define strdup _strdup
+#include <windows.h>
+#endif
+
 #include "oci.h"
 #include "oratypes.h"
 #include "ociapr.h"
@@ -19,10 +24,6 @@
 #include "lauxlib.h"
 
 #include "luasql.h"
-
-#ifdef _WIN32
-#define strdup _strdup
-#endif
 
 #define LUASQL_ENVIRONMENT_OCI8 "Oracle environment"
 #define LUASQL_CONNECTION_OCI8 "Oracle connection"
@@ -1519,6 +1520,16 @@ static void create_metatables (lua_State *L) {
 ** driver open method.
 */
 LUASQL_API int luaopen_luasql_oci8 (lua_State *L) {
+#ifdef _WIN32
+  /* oci.dll is delay-loaded (see CMakeLists.txt). Probe for it here, so the
+   * user gets a helpful message instead of a generic loader error. */
+  if (LoadLibraryA ("oci.dll") == NULL)
+    return luaL_error (L,
+		       "luasql.oci8: Oracle Instant Client not found (oci.dll, error %d). "
+		       "Copy the DLLs of Oracle Instant Client 23 (64-bit) into the folder "
+		       "'lib\\3rdparty' of your OneLuaPro installation or add its folder "
+		       "to PATH.", (int)GetLastError ());
+#endif
 	struct luaL_Reg driver[] = {
 		{"oci8", create_environment},
 		{NULL, NULL},

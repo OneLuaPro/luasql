@@ -138,6 +138,15 @@ macro(add_luasql_driver DRIVER_NAME SOURCES_LIST EXT_INCLUDES EXT_LIBS)
   )
   
   if(WIN32 AND NOT MinGW)
+    if (${DRIVER_NAME} STREQUAL "oci8")
+      target_link_options(${TARGET_FULL_NAME} PRIVATE
+	"LINKER:/DELAYLOAD:oci.dll"
+	"LINKER:/DEPENDENTLOADFLAG:0x0"
+      )
+      # delayimp.lib provides the delay-load helper (lazy loading of oci.dll)
+      target_link_libraries(${TARGET_FULL_NAME} PRIVATE delayimp.lib)
+    endif()
+
     target_compile_definitions(${TARGET_FULL_NAME} PRIVATE
       LUA_BUILD_AS_DLL LUA_LIB _WINDLL _CRT_SECURE_NO_WARNINGS
       LUASQL_VERSION_NUMBER="${PROJECT_VERSION}"
