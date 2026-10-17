@@ -427,7 +427,8 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 		case SQLT_DAT: {
 			text buf[65];
 			ub4 buflen = sizeof(buf);
-			ASSERT (L, OCIDateToText (cur->errhp, &(col->val.date), NULL, 0, NULL, 0,
+			ASSERT (L, OCIDateToText (cur->errhp, &(col->val.date),
+			        (const oratext *)"YYYY-MM-DD HH24:MI:SS", 21, NULL, 0,
 				&buflen, buf), cur->errhp);
 			lua_pushstring (L, (char *)(buf));
 			break;
@@ -449,8 +450,12 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			env = getenvfromconn (L, conn);
 			text buf[65];
 			ub4 buflen = sizeof(buf);
+			const char *fmt = (col->type == SQLT_TIMESTAMP_TZ)
+			    ? "YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM"
+			    : "YYYY-MM-DD HH24:MI:SS.FF6";
 			ASSERT (L, OCIDateTimeToText (env->envhp, cur->errhp, col->val.datetime,
-				NULL, 0, 6, NULL, 0, &buflen, buf), cur->errhp);
+				(const oratext *)fmt, (ub1)strlen (fmt), 6, NULL, 0, &buflen, buf),
+				cur->errhp);
 			lua_pushstring (L, (char *)(buf));
 			break;
 		}
