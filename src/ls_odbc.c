@@ -375,9 +375,9 @@ static int push_column(lua_State *L, int coltypes, const SQLHSTMT hstmt,
 #if LUA_VERSION_NUM>=503
 		/* iNteger */
 		case 'n': {
-			SQLLEN num;
+			SQLBIGINT num;
 			SQLLEN got;
-			SQLRETURN rc = SQLGetData(hstmt, i, SQL_C_SLONG, &num, 0, &got);
+			SQLRETURN rc = SQLGetData(hstmt, i, SQL_C_SBIGINT, &num, 0, &got);
 			if (error(rc))
 				return fail(L, hSTMT, hstmt);
 			if (got == SQL_NULL_DATA)
@@ -409,10 +409,12 @@ static int push_column(lua_State *L, int coltypes, const SQLHSTMT hstmt,
 			char *buffer;
 			luaL_Buffer b;
 			SQLRETURN rc;
+			int top = lua_gettop(L);
 			luaL_buffinit(L, &b);
 			buffer = luaL_prepbuffer(&b);
 			rc = SQLGetData(hstmt, i, stype, buffer, LUAL_BUFFERSIZE, &got);
 			if (got == SQL_NULL_DATA) {
+			        lua_settop(L, top); /* drop the luaL_Buffer placeholder */
 				lua_pushnil(L);
 				return 0;
 			}
@@ -737,7 +739,7 @@ static int raw_execute(lua_State *L, int istmt)
 		return create_cursor(L, -1, stmt, numcols);
 	} else {
 		/* if action has no results (e.g., UPDATE) */
-		SQLLEN numrows;
+	        SQLLEN numrows = -1;
 		if(error(SQLRowCount(stmt->hstmt, &numrows))) {
 			return fail(L, hSTMT, stmt->hstmt);
 		}
