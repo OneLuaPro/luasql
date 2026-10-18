@@ -19,7 +19,7 @@ local argparse = require("argparse")
 local tiers = { "smoke", "standard", "nightly" }
 
 -- Scenarios in the order they run, each one is scenarios/<name>.lua.
-local scenarioNames = { "cursorLifecycle", "stmtLifecycle" }
+local scenarioNames = { "cursorLifecycle", "stmtLifecycle", "errorPaths" }
 
 -- Exit codes, to be evaluated by the orchestrator later on.
 local exitOk = 0

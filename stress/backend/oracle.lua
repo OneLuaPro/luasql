@@ -20,11 +20,20 @@ return {
    openCursorsQuery = "SELECT s.value FROM v$sesstat s"
       .. " JOIN v$statname n ON n.statistic# = s.statistic#"
       .. " WHERE n.name = 'opened cursors current' AND s.sid = %d",
-    -- Used by prepared statement scenarios, :1 is the first parameter.
-    bindQuery = "SELECT :1 FROM dual",
-    multiRowBindQuery = "SELECT level FROM dual CONNECT BY level <= :1",
-    -- Fixed result types: a bind of another type is converted by the
-    -- server instead of changing the type of the result column.
-    bindNumberQuery = "SELECT CAST(:1 AS NUMBER) FROM dual",
-    bindStringQuery = "SELECT CAST(:1 AS VARCHAR2(4000)) FROM dual",
+   -- Used by prepared statement scenarios, :1 is the first parameter.
+   bindQuery = "SELECT :1 FROM dual",
+   multiRowBindQuery = "SELECT level FROM dual CONNECT BY level <= :1",
+   -- Fixed result types: a bind of another type is converted by the
+   -- server instead of changing the type of the result column.
+   bindNumberQuery = "SELECT CAST(:1 AS NUMBER) FROM dual",
+   bindStringQuery = "SELECT CAST(:1 AS VARCHAR2(4000)) FROM dual",
+   -- Used by the error path scenario.
+   invalidQuery = "SELEC 1 FROM dual",
+   failingBlock = "BEGIN RAISE_APPLICATION_ERROR(-20001, 'stress');"
+      .. " END;",
+   conditionalBlock = "BEGIN IF :1 > 0 THEN"
+      .. " RAISE_APPLICATION_ERROR(-20001, 'stress'); END IF; END;",
+   fetchErrorQuery = "SELECT 1 / (level - 5) FROM dual"
+      .. " CONNECT BY level <= 10",
+   unsupportedTypeQuery = "SELECT CAST(1 AS BINARY_DOUBLE) FROM dual",
 }
