@@ -18,6 +18,9 @@ local argparse = require("argparse")
 
 local tiers = { "smoke", "standard", "nightly" }
 
+-- Scenarios in the order they run, each one is scenarios/<name>.lua.
+local scenarioNames = { "cursorLifecycle" }
+
 -- Exit codes, to be evaluated by the orchestrator later on.
 local exitOk = 0
 local exitFailure = 1
@@ -180,6 +183,36 @@ local function runCleanups(cleanups)
    return allOk
 end
 
+-- Runs all scenarios in order.
+-- Returns true if all of them passed, or nil and an error message.
+local function runScenarios(options, backend, testConn, adminConn)
+   local failed = {}
+   for _, name in ipairs(scenarioNames) do
+      print(string.format("scenario %s:", name))
+      local scenario = require("scenarios." .. name)
+      local ok, result, err = pcall(
+	 scenario.run, {
+	    tier = options.tier,
+	    backend = backend,
+	    testConn = testConn,
+	    adminConn = adminConn,
+      })
+      if not ok then
+	 print("  internal error: " .. tostring(result))
+	 failed[#failed + 1] = name
+      elseif not result then
+	 print("  FAILED: " .. tostring(err))
+	 failed[#failed + 1] = name
+      else
+	 print("  passed")
+      end
+   end
+   if #failed > 0 then
+      return nil, "failed scenarios: " .. table.concat(failed, ", ")
+   end
+   return true
+end
+
 -- Main sequence. Every opened handle is appended to 'handles', so the caller
 -- can close them in any case. Returns true, or nil and an error message.
 local function run(options, handles, cleanups)
@@ -212,6 +245,22 @@ local function run(options, handles, cleanups)
    end
    handles[#handles + 1] = env
 
+   local adminConn
+   if settings.admin then
+      local adminErr
+      adminConn, adminErr = connect(env, backend, settings.admin, "admin")
+      if not adminConn then
+	 return nil, adminErr
+      end
+      handles[#handles + 1] = adminConn
+      print(string.format("admin:  connected as %s", settings.admin.user))
+      local prepOk, prepErr = runPrep(options, config, settings, adminConn,
+				      cleanups)
+      if not prepOk then
+	 return nil, prepErr
+      end
+   end
+
    local testConn, testErr = connect(env, backend, settings.test, "test")
    if not testConn then
       return nil, testErr
@@ -226,21 +275,7 @@ local function run(options, handles, cleanups)
    end
    print(string.format("server: %s", version))
 
-   if settings.admin then
-      local adminConn, adminErr = connect(env, backend, settings.admin, "admin")
-      if not adminConn then
-	 return nil, adminErr
-      end
-      handles[#handles + 1] = adminConn
-      print(string.format("admin:  connected as %s", settings.admin.user))
-      local prepOk, prepErr = runPrep(options, config, settings, adminConn,
-				      cleanups)
-      if not prepOk then
-	 return nil, prepErr
-      end
-   end
-
-   return true
+   return runScenarios(options, backend, testConn, adminConn)
 end
 
 local function main()
