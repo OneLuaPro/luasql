@@ -214,23 +214,20 @@ static void copy_column_name (column_data *col, text *name) {
 		col->name[i] = tolower (col->name[i]);
 }
 
-
 /*
-** Alloc buffers for column values.
+** Define the output buffer for one column.
 */
-static int alloc_column_buffer (lua_State *L, cur_data *cur, int i) {
+static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 	/* column index ranges from 1 to numcols */
 	/* C array index ranges from 0 to numcols-1 */
 	column_data *col = &(cur->cols[i-1]);
-	OCIParam *param;
 	text *name;
 
-	ASSERT (L, OCIParamGet (cur->stmthp, OCI_HTYPE_STMT, cur->errhp,
-		(dvoid **)&param, i), cur->errhp);
 	ASSERT (L, OCIAttrGet (param, OCI_DTYPE_PARAM,
 		(dvoid *)&(name), (ub4 *)&(col->namelen),
 		OCI_ATTR_NAME, cur->errhp), cur->errhp);
 	copy_column_name (col, name);
+
 	ASSERT (L, OCIAttrGet (param, OCI_DTYPE_PARAM,
 		(dvoid *)&(col->type), (ub4 *)0, OCI_ATTR_DATA_TYPE,
 		cur->errhp), cur->errhp);
@@ -343,12 +340,29 @@ static int alloc_column_buffer (lua_State *L, cur_data *cur, int i) {
 			break;
 		}
 		default:
-			luaL_error (L, LUASQL_PREFIX"invalid type %d #%d", col->type, i);
-			break;
+			lua_pushnil (L);
+			lua_pushfstring (L, LUASQL_PREFIX"unsupported column type %d (column %d)",
+				(int)col->type, i);
+			return 2;
 	}
 	return 0;
 }
 
+/*
+** Alloc buffers for column values.
+** The parameter descriptor is released on every path; the column name
+** is copied in define_column before that.
+*/
+static int alloc_column_buffer (lua_State *L, cur_data *cur, int i) {
+	OCIParam *param = NULL;
+	int ret;
+
+	ASSERT (L, OCIParamGet (cur->stmthp, OCI_HTYPE_STMT, cur->errhp,
+		(dvoid **)&param, i), cur->errhp);
+	ret = define_column (L, cur, i, param);
+	OCIDescriptorFree (param, OCI_DTYPE_PARAM);
+	return ret;
+}
 
 /*
 ** Deallocate column buffers.
@@ -376,21 +390,25 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 #endif
 #ifdef SQLT_TIMESTAMP
 		case SQLT_TIMESTAMP:
-			OCIDescriptorFree (col->val.datetime, OCI_DTYPE_TIMESTAMP);
+		        if (col->val.datetime)
+			    OCIDescriptorFree (col->val.datetime, OCI_DTYPE_TIMESTAMP);
 			break;
 #endif
 #ifdef SQLT_TIMESTAMP_TZ
 		case SQLT_TIMESTAMP_TZ:
-			OCIDescriptorFree (col->val.datetime, OCI_DTYPE_TIMESTAMP_TZ);
+		        if (col->val.datetime)
+			    OCIDescriptorFree (col->val.datetime, OCI_DTYPE_TIMESTAMP_TZ);
 			break;
 #endif
 #ifdef SQLT_TIMESTAMP_LTZ
 		case SQLT_TIMESTAMP_LTZ:
-			OCIDescriptorFree (col->val.datetime, OCI_DTYPE_TIMESTAMP_LTZ);
+		        if (col->val.datetime)
+			    OCIDescriptorFree (col->val.datetime, OCI_DTYPE_TIMESTAMP_LTZ);
 			break;
 #endif
 		case SQLT_CLOB:
-			OCIDescriptorFree (col->val.s, OCI_DTYPE_LOB);
+		        if (col->val.s)
+			    OCIDescriptorFree (col->val.s, OCI_DTYPE_LOB);
 			break;
 		default:
 			/* Ignore unknown types during cleanup */
@@ -475,11 +493,16 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 				char *lob_buffer=malloc(lob_len);
 				ub4 amount = lob_len;
 
-				ASSERT(L, OCILobRead(conn->svchp, cur->errhp,
+				sword status = OCILobRead(conn->svchp, cur->errhp,
 					(OCILobLocator *) col->val.s, &amount, (ub4) 1,
 					(dvoid *) lob_buffer, (ub4) lob_len, (dvoid *)0,
 					(sb4 (*) (dvoid *, CONST dvoid *, ub4, ub1)) 0,
-					(ub2) 0, (ub1) SQLCS_IMPLICIT), cur->errhp);
+					(ub2) 0, (ub1) SQLCS_IMPLICIT);
+				if (status) {
+					free (lob_buffer);
+					return checkerr (L, status, cur->errhp);
+				}
+
 				lua_pushlstring (L, lob_buffer, amount);
 				free(lob_buffer);
 			} else {
@@ -765,6 +788,41 @@ static int conn_close (lua_State *L) {
 	return 1;
 }
 
+/*
+** Allocate the error handle and the column buffers of a new cursor.
+** Returns 0 on success, otherwise the number of values pushed on the
+** stack (nil + message). On failure the caller must call cur_nullify.
+*/
+static int setup_cursor (lua_State *L, cur_data *cur, conn_data *conn,
+                         OCIStmt *stmt) {
+	int i;
+	env_data *env = getenvfromconn (L, conn);
+
+	/* error handler */
+	ASSERT (L, OCIHandleAlloc((dvoid *) env->envhp,
+		(dvoid **) &(cur->errhp), (ub4) OCI_HTYPE_ERROR, (size_t) 0,
+		(dvoid **) 0), conn->errhp);
+	/* get number of columns */
+	ASSERT (L, OCIAttrGet ((dvoid *)stmt, (ub4)OCI_HTYPE_STMT,
+		(dvoid *)&cur->numcols, (ub4 *)0, (ub4)OCI_ATTR_PARAM_COUNT,
+		cur->errhp), cur->errhp);
+	cur->cols = (column_data *)calloc (cur->numcols, sizeof (column_data));
+	if (cur->numcols > 0 && cur->cols == NULL) {
+		cur->numcols = 0; /* nothing to free in cur_nullify */
+		lua_pushnil (L);
+		lua_pushstring (L, LUASQL_PREFIX"out of memory");
+		return 2;
+	}
+	/* define output variables */
+	/* Oracle and Lua column indices ranges from 1 to numcols */
+	/* C array indices ranges from 0 to numcols-1 */
+	for (i = 1; i <= cur->numcols; i++) {
+		int ret = alloc_column_buffer (L, cur, i);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
 
 /*
 ** Create a new Cursor object and push it on top of the stack.
@@ -783,8 +841,7 @@ static int conn_close (lua_State *L) {
 */
 static int create_cursor (lua_State *L, int o, conn_data *conn, OCIStmt *stmt,
                           const char *text, int stmt_ref) {
-	int i;
-	env_data *env;
+	int ret;
 	cur_data *cur = (cur_data *)LUASQL_NEWUD(L, sizeof(cur_data));
 	luasql_setmeta (L, LUASQL_CURSOR_OCI8);
 
@@ -804,23 +861,11 @@ static int create_cursor (lua_State *L, int o, conn_data *conn, OCIStmt *stmt,
 	lua_pushvalue (L, o);
 	cur->conn = luaL_ref (L, LUA_REGISTRYINDEX);
 
-	/* error handler */
-	env = getenvfromconn (L, conn);
-	ASSERT (L, OCIHandleAlloc((dvoid *) env->envhp,
-		(dvoid **) &(cur->errhp), (ub4) OCI_HTYPE_ERROR, (size_t) 0,
-		(dvoid **) 0), conn->errhp);
-	/* get number of columns */
-	ASSERT (L, OCIAttrGet ((dvoid *)stmt, (ub4)OCI_HTYPE_STMT,
-		(dvoid *)&cur->numcols, (ub4 *)0, (ub4)OCI_ATTR_PARAM_COUNT,
-		cur->errhp), cur->errhp);
-	cur->cols = (column_data *)malloc (sizeof(column_data) * cur->numcols);
-	/* define output variables */
-	/* Oracle and Lua column indices ranges from 1 to numcols */
-	/* C array indices ranges from 0 to numcols-1 */
-	for (i = 1; i <= cur->numcols; i++) {
-		int ret = alloc_column_buffer (L, cur, i);
-		if (ret)
-			return ret;
+	ret = setup_cursor (L, cur, conn, stmt);
+	if (ret) {
+		/* release everything now instead of waiting for the GC */
+		cur_nullify (L, cur);
+		return ret;
 	}
 
 	return 1;
@@ -1280,15 +1325,8 @@ static int stmt_execute (lua_State *L) {
         int stmt_ref_for_cur = luaL_ref(L, LUA_REGISTRYINDEX);
         stmt->cursor_open = 1;
         int ret = create_cursor(L, conn_idx, conn, stmt->stmthp, "", stmt_ref_for_cur);
-        if (ret != 1) {
-            cur_data *cur = (cur_data *)luaL_checkudata(L, conn_idx + 1, LUASQL_CURSOR_OCI8);
-            if (cur) {
-                cur->stmthp = NULL;
-                cur->stmt_ref = LUA_NOREF;
-            }
-            luaL_unref(L, LUA_REGISTRYINDEX, stmt_ref_for_cur);
-            stmt->cursor_open = 0;
-        }
+	/* on failure create_cursor has already cleaned up the cursor
+           (cursor_open reset, stmt_ref released) */
         lua_remove(L, conn_idx); /* pop conn */
         return ret;
     } else {
