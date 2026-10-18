@@ -167,15 +167,6 @@ local function gcCloseStep(ctx, i)
    end
 end
 
--- TEMPORARY: deliberate leaks to check the memory limits.
-local leakedStrings, leakedNumbers = {}, {}
-local function leakStringsStep(_, i)
-   leakedStrings[#leakedStrings + 1] = string.rep("x", 1024) .. i
-end
-local function leakNumbersStep(_, i)
-   leakedNumbers[#leakedNumbers + 1] = i
-end
-
 local phaseList = {
    { name = "prepareClose", step = prepareCloseStep },
    { name = "reuse", setup = prepareBindQuery, step = reuseStep,
