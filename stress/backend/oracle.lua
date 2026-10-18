@@ -20,4 +20,11 @@ return {
    openCursorsQuery = "SELECT s.value FROM v$sesstat s"
       .. " JOIN v$statname n ON n.statistic# = s.statistic#"
       .. " WHERE n.name = 'opened cursors current' AND s.sid = %d",
+    -- Used by prepared statement scenarios, :1 is the first parameter.
+    bindQuery = "SELECT :1 FROM dual",
+    multiRowBindQuery = "SELECT level FROM dual CONNECT BY level <= :1",
+    -- Fixed result types: a bind of another type is converted by the
+    -- server instead of changing the type of the result column.
+    bindNumberQuery = "SELECT CAST(:1 AS NUMBER) FROM dual",
+    bindStringQuery = "SELECT CAST(:1 AS VARCHAR2(4000)) FROM dual",
 }

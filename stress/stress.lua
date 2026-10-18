@@ -19,7 +19,7 @@ local argparse = require("argparse")
 local tiers = { "smoke", "standard", "nightly" }
 
 -- Scenarios in the order they run, each one is scenarios/<name>.lua.
-local scenarioNames = { "cursorLifecycle" }
+local scenarioNames = { "cursorLifecycle", "stmtLifecycle" }
 
 -- Exit codes, to be evaluated by the orchestrator later on.
 local exitOk = 0
@@ -185,7 +185,7 @@ end
 
 -- Runs all scenarios in order.
 -- Returns true if all of them passed, or nil and an error message.
-local function runScenarios(options, backend, testConn, adminConn)
+local function runScenarios(options, driver, backend, testConn, adminConn)
    local failed = {}
    for _, name in ipairs(scenarioNames) do
       print(string.format("scenario %s:", name))
@@ -196,6 +196,7 @@ local function runScenarios(options, backend, testConn, adminConn)
 	    backend = backend,
 	    testConn = testConn,
 	    adminConn = adminConn,
+	    driver = driver,
       })
       if not ok then
 	 print("  internal error: " .. tostring(result))
@@ -275,7 +276,7 @@ local function run(options, handles, cleanups)
    end
    print(string.format("server: %s", version))
 
-   return runScenarios(options, backend, testConn, adminConn)
+   return runScenarios(options, driver, backend, testConn, adminConn)
 end
 
 local function main()
