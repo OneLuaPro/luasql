@@ -416,6 +416,90 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 	}
 }
 
+/*
+** Reading CLOBs: every OCILobRead2 call asks for at most LOB_CHUNK_CHARS
+** characters and gets a buffer that holds them in any case, so Oracle never
+** has to switch to polling mode. The client character set is AL32UTF8
+** (see OCIEnvNlsCreate in create_environment), at most 4 bytes per character.
+*/
+#define LOB_CHUNK_CHARS 16384
+#define LOB_CHUNK_BYTES ((size_t)LOB_CHUNK_CHARS * 4)
+
+/*
+** Read a whole CLOB/NCLOB and push it as one Lua string.
+** Returns 1 on success, otherwise 2 (nil + message), like pushvalue.
+*/
+static int read_clob (lua_State *L, cur_data *cur, conn_data *conn,
+                      env_data *env, OCILobLocator *loc) {
+	oraub8 lob_len = 0;      /* length in characters */
+	oraub8 offset = 1;       /* position in characters, 1-based */
+	size_t total = 0;        /* bytes collected so far */
+	size_t cap = 0;          /* bytes allocated in out */
+	char *out = NULL;
+	ub1 csfrm = SQLCS_IMPLICIT;
+	sword status;
+
+	status = OCILobGetLength2 (conn->svchp, cur->errhp, loc, &lob_len);
+	if (status)
+		return checkerr (L, status, cur->errhp);
+	if (lob_len == 0) {
+		/* nothing to read; OCILobCharSetForm rejects locators from
+		   EMPTY_CLOB() with ORA-22275 */
+		lua_pushliteral (L, "");
+		return 1;
+	}
+
+	status = OCILobCharSetForm (env->envhp, cur->errhp, loc, &csfrm);
+	if (status)
+		return checkerr (L, status, cur->errhp);
+	while (offset <= lob_len) {
+		oraub8 byte_amt = 0;
+		oraub8 char_amt = LOB_CHUNK_CHARS;
+
+		if (cap - total < LOB_CHUNK_BYTES) {
+			size_t newcap = cap ? cap : LOB_CHUNK_BYTES;
+			char *tmp;
+			while (newcap - total < LOB_CHUNK_BYTES)
+				newcap *= 2;
+			tmp = (char *)realloc (out, newcap);
+			if (tmp == NULL) {
+				free (out);
+				lua_pushnil (L);
+				lua_pushstring (L, LUASQL_PREFIX"out of memory");
+				return 2;
+			}
+			out = tmp;
+			cap = newcap;
+		}
+
+		status = OCILobRead2 (conn->svchp, cur->errhp, loc,
+			&byte_amt, &char_amt, offset, out + total,
+			(oraub8)LOB_CHUNK_BYTES, OCI_ONE_PIECE,
+			(void *)0, (OCICallbackLobRead2)0, (ub2)0, csfrm);
+		if (status == OCI_NEED_DATA) {
+			/* should not happen; leave polling mode so that the session
+			   stays usable */
+			OCIBreak (conn->svchp, cur->errhp);
+			OCIReset (conn->svchp, cur->errhp);
+		}
+		if (status) {
+			free (out);
+			return checkerr (L, status, cur->errhp);
+		}
+		if (char_amt == 0) {
+			free (out);
+			lua_pushnil (L);
+			lua_pushstring (L, LUASQL_PREFIX"LOB read made no progress");
+			return 2;
+		}
+		total += (size_t)byte_amt;
+		offset += char_amt;
+	}
+
+	lua_pushlstring (L, out ? out : "", total);
+	free (out);
+	return 1;
+}
 
 /*
 ** Push a value on top of the stack.
@@ -480,35 +564,13 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 		}
 #endif
 		case SQLT_CLOB: {
-			ub4 lob_len;
 			conn_data *conn;
 			env_data *env;
 			lua_rawgeti (L, LUA_REGISTRYINDEX, cur->conn);
 			conn = lua_touserdata (L, -1);
 			lua_pop (L, 1);
 			env = getenvfromconn (L, conn);
-			ASSERT (L, OCILobGetLength (conn->svchp, cur->errhp,
-				(OCILobLocator *)col->val.s, &lob_len), cur->errhp);
-			if (lob_len > 0) {
-				char *lob_buffer=malloc(lob_len);
-				ub4 amount = lob_len;
-
-				sword status = OCILobRead(conn->svchp, cur->errhp,
-					(OCILobLocator *) col->val.s, &amount, (ub4) 1,
-					(dvoid *) lob_buffer, (ub4) lob_len, (dvoid *)0,
-					(sb4 (*) (dvoid *, CONST dvoid *, ub4, ub1)) 0,
-					(ub2) 0, (ub1) SQLCS_IMPLICIT);
-				if (status) {
-					free (lob_buffer);
-					return checkerr (L, status, cur->errhp);
-				}
-
-				lua_pushlstring (L, lob_buffer, amount);
-				free(lob_buffer);
-			} else {
-				lua_pushstring (L, "");
-			}
-			break;
+			return read_clob (L, cur, conn, env, (OCILobLocator *)col->val.s);
 		}
 		default:
 			luaL_error (L, LUASQL_PREFIX"unexpected error");
