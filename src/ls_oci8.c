@@ -62,6 +62,7 @@ typedef union {
 	lua_Integer     i;
 	char   *s;
 	double  d;
+	ub1     b;
 #ifdef SQLT_DAT
 	OCIDate date;
 #endif
@@ -339,6 +340,14 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 				OCI_DEFAULT), cur->errhp);
 			break;
 		}
+#ifdef SQLT_BOL
+		case SQLT_BOL:
+			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
+				cur->errhp, (ub4)i, &(col->val.b), sizeof(col->val.b),
+				SQLT_BOL, (dvoid *)&(col->null), (ub2 *)0,
+				(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
+			break;
+#endif
 		default:
 			lua_pushnil (L);
 			lua_pushfstring (L, LUASQL_PREFIX"unsupported column type %d (column %d)",
@@ -572,6 +581,11 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			env = getenvfromconn (L, conn);
 			return read_clob (L, cur, conn, env, (OCILobLocator *)col->val.s);
 		}
+#ifdef SQLT_BOL
+		case SQLT_BOL:
+			lua_pushboolean (L, col->val.b != 0);
+			break;
+#endif
 		default:
 			luaL_error (L, LUASQL_PREFIX"unexpected error");
 	}
@@ -779,6 +793,10 @@ static char *getcolumntype (column_data *col) {
 			return "number";
 		case SQLT_CLOB:
 			return "string";
+#ifdef SQLT_BOL
+		case SQLT_BOL:
+			return "boolean";
+#endif
 		default:
 			return "";
 	}
