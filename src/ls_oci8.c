@@ -37,11 +37,16 @@ typedef struct {
 	OCIError     *errhp; /* !!! */
 } env_data;
 
+/* values of the connection option "numbers"; index into number_modes[] */
+#define NUMBER_FLOAT 0  /* legacy: NUMBER read as double */
+#define NUMBER_EXACT 1  /* integer if integral and in range, else exact float */
+static const char *const number_modes[] = { "float", "exact", NULL };
 
 typedef struct {
 	short         closed;
 	short         loggedon;
 	short         auto_commit;        /* 0 for manual commit */
+        int           number_mode;        /* NUMBER_FLOAT or NUMBER_EXACT */
 	int           cur_counter;        /* number of open cursors */
 	int           stmt_counter;       /* number of open statements */
 	int           env;                /* reference to environment */
@@ -63,6 +68,7 @@ typedef union {
 	char   *s;
 	double  d;
 	ub1     b;
+        OCINumber num;
 #ifdef SQLT_DAT
 	OCIDate date;
 #endif
@@ -96,6 +102,7 @@ typedef struct {
 	column_data  *cols;               /* array of columns */
 	int           stmt_ref;           /* registry ref to parent stmt_data when stmthp
 	                                     is borrowed (stmt:execute path), else LUA_NOREF */
+	int           number_mode;        /* copied from the connection at creation */
 } cur_data;
 
 
@@ -320,11 +327,18 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 		case SQLT_NUM:
 		case SQLT_FLT:
 		case SQLT_INT:
-		/* case SQLT_UIN: */
-			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
-				cur->errhp, (ub4)i, &(col->val.d), sizeof(col->val.d),
-				SQLT_FLT, (dvoid *)&(col->null), (ub2 *)0,
-				(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
+		        /* case SQLT_UIN: */
+			if (cur->number_mode == NUMBER_EXACT) {
+				ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
+					cur->errhp, (ub4)i, &(col->val.num), sizeof(col->val.num),
+					SQLT_VNU, (dvoid *)&(col->null), (ub2 *)0,
+					(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
+			} else {
+				ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
+					cur->errhp, (ub4)i, &(col->val.d), sizeof(col->val.d),
+					SQLT_FLT, (dvoid *)&(col->null), (ub2 *)0,
+					(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
+			}
 			break;
 		case SQLT_CLOB: {
 			env_data *env;
@@ -511,6 +525,51 @@ static int read_clob (lua_State *L, cur_data *cur, conn_data *conn,
 	return 1;
 }
 
+
+/*
+** Push a NUMBER read in exact mode: a Lua integer if the value is integral
+** and fits into lua_Integer, otherwise a float converted from the decimal
+** text, which gives the correctly rounded double.
+** Returns 1 on success, otherwise 2 (nil + message), like pushvalue.
+*/
+static int push_number_exact (lua_State *L, cur_data *cur,
+                              const OCINumber *num) {
+	/* fixed decimal point, independent of the session's NLS settings */
+	static const char fmt[] = "TM9";
+	static const char nls[] = "NLS_NUMERIC_CHARACTERS='.,'";
+	text buf[65];                    /* TM9 yields at most 64 characters */
+	ub4 buflen = sizeof(buf) - 1;
+	boolean is_int = 0;
+
+	ASSERT (L, OCINumberIsInt (cur->errhp, num, &is_int), cur->errhp);
+	if (is_int) {
+		lua_Integer iv;
+		if (OCINumberToInt (cur->errhp, num, (uword)sizeof(iv),
+				OCI_NUMBER_SIGNED, (void *)&iv) == OCI_SUCCESS) {
+			lua_pushinteger (L, iv);
+			return 1;
+		}
+		/* outside the integer range: continue with the text conversion */
+	}
+	ASSERT (L, OCINumberToText (cur->errhp, num,
+		(const oratext *)fmt, (ub4)(sizeof(fmt) - 1),
+		(const oratext *)nls, (ub4)(sizeof(nls) - 1),
+		&buflen, buf), cur->errhp);
+	buf[buflen] = '\0';
+#if LUA_VERSION_NUM >= 503
+	if (lua_stringtonumber (L, (const char *)buf) == 0) {
+		lua_pushnil (L);
+		lua_pushfstring (L, LUASQL_PREFIX"cannot convert NUMBER '%s'",
+			(const char *)buf);
+		return 2;
+	}
+#else
+	lua_pushnumber (L, (lua_Number)strtod ((const char *)buf, NULL));
+#endif
+	return 1;
+}
+
+
 /*
 ** Push a value on top of the stack.
 */
@@ -527,6 +586,8 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 		case SQLT_NUM:
 		case SQLT_INT:
 		case SQLT_FLT:
+			if (cur->number_mode == NUMBER_EXACT)
+				return push_number_exact (L, cur, &(col->val.num));
 			lua_pushnumber (L, col->val.d);
 			break;
 		case SQLT_CHR:
@@ -937,6 +998,7 @@ static int create_cursor (lua_State *L, int o, conn_data *conn, OCIStmt *stmt,
 	cur->errhp = NULL;
 	cur->cols = NULL;
 	cur->stmt_ref = stmt_ref;  /* LUA_NOREF or ref to parent stmt_data */
+	cur->number_mode = conn->number_mode;
 	cur->text = strdup (text); /* Stores the statement. For prepared statement, 
 	                              let's just pass empty string. */
 	lua_pushvalue (L, o);
@@ -1488,6 +1550,51 @@ static int conn_setautocommit (lua_State *L) {
 
 
 /*
+** Set a driver option of the connection. Affects cursors created afterwards.
+** Returns true, or nil plus an error message for an unknown option or value.
+*/
+static int conn_setoption (lua_State *L) {
+	conn_data *conn = getconnection (L);
+	const char *name = luaL_checkstring (L, 2);
+	const char *value = luaL_checkstring (L, 3);
+	if (strcmp (name, "numbers") == 0) {
+		int i;
+		for (i = 0; number_modes[i] != NULL; i++) {
+			if (strcmp (value, number_modes[i]) == 0) {
+				conn->number_mode = i;
+				lua_pushboolean (L, 1);
+				return 1;
+			}
+		}
+		lua_pushnil (L);
+		lua_pushfstring (L, LUASQL_PREFIX"invalid value '%s' for option 'numbers'",
+			value);
+		return 2;
+	}
+	lua_pushnil (L);
+	lua_pushfstring (L, LUASQL_PREFIX"unknown option '%s'", name);
+	return 2;
+}
+
+
+/*
+** Return the current value of a driver option of the connection,
+** or nil plus an error message for an unknown option.
+*/
+static int conn_getoption (lua_State *L) {
+	conn_data *conn = getconnection (L);
+	const char *name = luaL_checkstring (L, 2);
+	if (strcmp (name, "numbers") == 0) {
+		lua_pushstring (L, number_modes[conn->number_mode]);
+		return 1;
+	}
+	lua_pushnil (L);
+	lua_pushfstring (L, LUASQL_PREFIX"unknown option '%s'", name);
+	return 2;
+}
+
+
+/*
 ** Connects to a data source.
 */
 static int env_connect (lua_State *L) {
@@ -1507,6 +1614,7 @@ static int env_connect (lua_State *L) {
 	conn->env = LUA_NOREF;
 	conn->closed = 1;
 	conn->auto_commit = 1;
+	conn->number_mode = NUMBER_FLOAT;
 	conn->cur_counter = 0;
 	conn->stmt_counter = 0;
 	conn->loggedon = 0;
@@ -1617,6 +1725,8 @@ static void create_metatables (lua_State *L) {
 		{"commit", conn_commit},
 		{"rollback", conn_rollback},
 		{"setautocommit", conn_setautocommit},
+		{"setoption", conn_setoption},
+		{"getoption", conn_getoption},
 		{NULL, NULL},
 	};
 	struct luaL_Reg cursor_methods[] = {
