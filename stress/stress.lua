@@ -19,7 +19,9 @@ local argparse = require("argparse")
 local tiers = { "smoke", "standard", "nightly" }
 
 -- Scenarios in the order they run, each one is scenarios/<name>.lua.
-local scenarioNames = { "cursorLifecycle", "stmtLifecycle", "errorPaths" }
+local scenarioNames = {
+   "cursorLifecycle", "stmtLifecycle", "errorPaths", "dataTypes",
+}
 
 -- Exit codes, to be evaluated by the orchestrator later on.
 local exitOk = 0
@@ -138,6 +140,20 @@ local function closeAll(handles)
 	 io.stderr:write("warning: close failed: ", tostring(err), "\n")
       end
    end
+end
+
+-- Switches a connection to exact numbers if the driver supports it:
+-- integral values come back as Lua integers, all others as correctly
+-- rounded floats. Returns the mode in use, or nil and an error message.
+local function useExactNumbers(conn)
+   if conn.setoption == nil then
+      return "driver default (no setoption)"
+   end
+   local ok, err = conn:setoption("numbers", "exact")
+   if not ok then
+      return nil, "cannot switch to exact numbers: " .. tostring(err)
+   end
+   return "exact"
 end
 
 -- Runs prep/<dbms>.lua, if there is one, and registers its teardown in
@@ -269,6 +285,12 @@ local function run(options, handles, cleanups)
    handles[#handles + 1] = testConn
    print(string.format("test:   connected as %s to %s", settings.test.user,
 		       backend.sourceName(settings.test)))
+
+   local numbers, numbersErr = useExactNumbers(testConn)
+   if not numbers then
+      return nil, numbersErr
+   end
+   print(string.format("numbers: %s", numbers))
 
    local version, versionErr = queryValue(testConn, backend.versionQuery)
    if not version then

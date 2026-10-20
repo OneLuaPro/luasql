@@ -36,4 +36,38 @@ return {
    fetchErrorQuery = "SELECT 1 / (level - 5) FROM dual"
       .. " CONNECT BY level <= 10",
    unsupportedTypeQuery = "SELECT CAST(1 AS BINARY_DOUBLE) FROM dual",
+   -- Used by the data type scenario: test table, its columns (a case
+   -- for a missing column is skipped) and statements; %s is a column
+   -- name or an expression.
+   typesTableCreate = "CREATE TABLE luastress_types ("
+      .. "id NUMBER PRIMARY KEY, n NUMBER, s VARCHAR2(4000 BYTE),"
+      .. " d DATE, ts TIMESTAMP(6), tstz TIMESTAMP(6) WITH TIME ZONE,"
+      .. " b BOOLEAN, c CLOB)",
+   typesTableDrop = "DROP TABLE IF EXISTS luastress_types PURGE",
+   typesColumns = { "n", "s", "d", "ts", "tstz", "b", "c" },
+   typesInsert = "INSERT INTO luastress_types (id, %s) VALUES (:1, :2)",
+   typesSelect = "SELECT %s FROM luastress_types WHERE id = :1",
+   -- %s is a number column; its exact value as text with a decimal
+   -- point, independent of the session locale.
+   numberAsText = "TO_CHAR(%s, 'TM9', 'NLS_NUMERIC_CHARACTERS = ''.,''')",
+   -- Cases whose expected result differs from standard SQL.
+   typeCaseOverrides = {
+      -- Oracle stores an empty string as NULL.
+      emptyString = { nullResult = true },
+   },
+   -- Session settings the data type scenario changes and restores.
+   sessionSettings = {
+      timeZone = {
+	 query = "SELECT SESSIONTIMEZONE FROM dual",
+	 set = "ALTER SESSION SET TIME_ZONE = '%s'",
+      },
+      -- Number, date and boolean cases run once per test value.
+      locale = {
+	 label = "NLS_TERRITORY",
+	 query = "SELECT value FROM nls_session_parameters"
+	    .. " WHERE parameter = 'NLS_TERRITORY'",
+	 set = "ALTER SESSION SET NLS_TERRITORY = '%s'",
+	 testValues = { "AMERICA", "GERMANY" },
+      },
+   },
 }
