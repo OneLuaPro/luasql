@@ -78,6 +78,7 @@ typedef struct {
 	ub4           namelen; /* column name length */
 	ub2           max;     /* maximum size */
 	sb2           null;    /* is null? */
+	ub2           rlen;    /* returned length (string columns) */
 	OCIDefine    *define;  /* define handle */
 	column_value  val;
 } column_data;
@@ -243,7 +244,7 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 			col->val.s = calloc (col->max + 1, sizeof(col->val.s));
 			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
 				cur->errhp, (ub4)i, col->val.s, col->max+1,
-				SQLT_STR /*col->type*/, (dvoid *)&(col->null), (ub2 *)0,
+				SQLT_CHR, (dvoid *)&(col->null), &(col->rlen),
 				(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
 			break;
 		case SQLT_CHR:
@@ -254,7 +255,7 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 				col->val.s = calloc (col->max * 2 + 1, sizeof(col->val.s));
 			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
 				cur->errhp, (ub4)i, col->val.s, col->max * 2 + 1,
-				SQLT_STR /*col->type*/, (dvoid *)&(col->null), (ub2 *)0,
+				SQLT_CHR, (dvoid *)&(col->null), &(col->rlen),
 				(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
 			break;
 #ifdef SQLT_DAT
@@ -533,7 +534,7 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 		case SQLT_VCS:
 		case SQLT_AFC:
 		case SQLT_AVC:
-			lua_pushstring (L, (char *)(col->val.s));
+			lua_pushlstring (L, (char *)(col->val.s), col->rlen);
 			break;
 #ifdef SQLT_DAT
 		case SQLT_DAT: {
@@ -1200,12 +1201,21 @@ static int stmt_bind (lua_State *L, stmt_data *stmt, int num_params, int is_name
                     bind_type = SQLT_CHR;
                     break;
                 case LUASQL_TYPE_STRING:
-                case LUASQL_TYPE_TIME:
-                    bind_values[param_idx].s = (char *)lua_tostring(L, -1);
+	        case LUASQL_TYPE_TIME: {
+		    size_t len;
+                    bind_values[param_idx].s = (char *)lua_tolstring(L, -1, &len);
                     bind_ptr = bind_values[param_idx].s;
-                    bind_size = strlen(bind_values[param_idx].s) + 1;
-                    bind_type = SQLT_STR;
+                    if (memchr(bind_values[param_idx].s, '\0', len) != NULL) {
+                        /* embedded zero: SQLT_STR would stop there,
+                           SQLT_AFC passes the buffer unchanged */
+                        bind_size = (sb4)len;
+                        bind_type = SQLT_AFC;
+                    } else {
+                        bind_size = (sb4)len + 1;
+                        bind_type = SQLT_STR;
+                    }
                     break;
+		}
                 case LUASQL_TYPE_TIMESTAMP: {
                     const char *date_str = lua_tostring(L, -1);
 #ifdef SQLT_TIMESTAMP
