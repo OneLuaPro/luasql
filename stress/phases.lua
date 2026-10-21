@@ -1,7 +1,7 @@
 -- phases.lua
 -- Runs the phases of a scenario and checks the server counters of the
--- connection. Checks every result and that the server counters of the
--- test session (open cursors, temp lobs) do not grow.
+-- test session (backend.serverCounters, e.g. open cursors) before and
+-- after each phase.
 --
 -- A phase is a table with these fields:
 --   name    shown in the output

@@ -59,18 +59,37 @@ return {
    typesTableCreate = "CREATE TABLE luastress_types ("
       .. "id NUMBER PRIMARY KEY, n NUMBER, s VARCHAR2(4000 BYTE),"
       .. " d DATE, ts TIMESTAMP(6), tstz TIMESTAMP(6) WITH TIME ZONE,"
-      .. " b BOOLEAN, c CLOB)",
+      .. " tsltz TIMESTAMP(6) WITH LOCAL TIME ZONE, b BOOLEAN, c CLOB,"
+      .. " ns NVARCHAR2(2000), nc NCLOB)",
    typesTableDrop = "DROP TABLE IF EXISTS luastress_types PURGE",
-   typesColumns = { "n", "s", "d", "ts", "tstz", "b", "c" },
+   typesColumns = {
+      "n", "s", "d", "ts", "tstz", "tsltz", "b", "c", "ns", "nc",
+   },
    typesInsert = "INSERT INTO luastress_types (id, %s) VALUES (:1, :2)",
    typesSelect = "SELECT %s FROM luastress_types WHERE id = :1",
+   -- First %s is the column, second one an SQL literal.
+   typesInsertLiteral = "INSERT INTO luastress_types (id, %s)"
+      .. " VALUES (:1, %s)",
    -- %s is a number column; its exact value as text with a decimal
    -- point, independent of the session locale.
    numberAsText = "TO_CHAR(%s, 'TM9', 'NLS_NUMERIC_CHARACTERS = ''.,''')",
-   -- Cases whose expected result differs from standard SQL.
+   -- Known limitations of Oracle and OCI; each text is the reason shown
+   -- in the output and meant for the documentation.
+   limits = {
+      -- luasql.type.number binds go as SQLT_FLT; OCI converts the double
+      -- to NUMBER with DBL_DIG significant digits.
+      numberBindDigits = 15,
+      numberBind = "number binds keep 15 significant digits (SQLT_FLT,"
+         .. " DBL_DIG); bind integers as luasql.type.int",
+      floatRead = "numbers = \"float\": OCI converts NUMBER to double,"
+         .. " not always correctly rounded; use numbers = \"exact\"",
+   },
+   -- Cases whose result differs from standard SQL.
    typeCaseOverrides = {
-      -- Oracle stores an empty string as NULL.
-      emptyString = { nullResult = true },
+      emptyString = {
+         limitNull = true,
+         limitReason = "Oracle stores an empty string as NULL",
+      },
    },
    -- Session settings the data type scenario changes and restores.
    sessionSettings = {

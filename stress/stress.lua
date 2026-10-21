@@ -221,7 +221,7 @@ local function runScenarios(options, driver, backend, testConn, adminConn)
 	 print("  FAILED: " .. tostring(err))
 	 failed[#failed + 1] = name
       else
-	 print("  passed")
+	 print("  passed" .. (err and (" (" .. err .. ")") or ""))
       end
    end
    if #failed > 0 then

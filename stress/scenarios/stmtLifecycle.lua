@@ -1,7 +1,7 @@
 -- scenarios/stmtLifecycle.lua
 -- Prepares, executes and closes many prepared statements on the test
--- connection. Checks every result and that the number of open cursors
--- on the server does not grow.
+-- connection. Checks every result and that the server counters of the
+-- test session (open cursors, temp lobs) do not grow.
 --
 -- Phases:
 --   prepareClose  prepare, execute, fetch, close the statement
