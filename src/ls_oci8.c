@@ -103,6 +103,8 @@ typedef struct {
 	int           stmt_ref;           /* registry ref to parent stmt_data when stmthp
 	                                     is borrowed (stmt:execute path), else LUA_NOREF */
 	int           number_mode;        /* copied from the connection at creation */
+  	short         has_lobs;           /* 1 if there is a CLOB/NCLOB column */
+	short         lobs_held;          /* 1 while the current row may hold temporary LOBs */
 } cur_data;
 
 
@@ -353,6 +355,7 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 				cur->errhp, (ub4)i, &(col->val.s), (sb4)sizeof(dvoid *),
 				SQLT_CLOB, (dvoid *)&(col->null), (ub2 *)0, (ub2 *)0,
 				OCI_DEFAULT), cur->errhp);
+			cur->has_lobs = 1;
 			break;
 		}
 #ifdef SQLT_BOL
@@ -654,6 +657,38 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 	return 1;
 }
 
+/*
+** Free the temporary LOBs of the current row. Expressions such as
+** TO_CLOB(...) or RPAD(clob, ...) deliver temporary LOBs, which live until
+** they are freed explicitly or the session ends; the next fetch would
+** overwrite the locator and orphan them. Best effort: errors are ignored.
+*/
+static void free_temp_lobs (lua_State *L, cur_data *cur) {
+	conn_data *conn;
+	env_data *env;
+	int i;
+
+	if (!cur->lobs_held)
+		return;
+	cur->lobs_held = 0;
+	lua_rawgeti (L, LUA_REGISTRYINDEX, cur->conn);
+	conn = (conn_data *)lua_touserdata (L, -1);
+	lua_pop (L, 1);
+	if (conn == NULL || conn->closed)
+		return;   /* session gone: the server has dropped its temporary LOBs */
+	env = getenvfromconn (L, conn);
+	for (i = 0; i < cur->numcols; i++) {
+		column_data *col = &(cur->cols[i]);
+		boolean is_temp = 0;
+		if (col->type != SQLT_CLOB || col->null || col->val.s == NULL)
+			continue;
+		if (OCILobIsTemporary (env->envhp, cur->errhp,
+				(OCILobLocator *)col->val.s, &is_temp) == OCI_SUCCESS
+				&& is_temp)
+			OCILobFreeTemporary (conn->svchp, cur->errhp,
+				(OCILobLocator *)col->val.s);
+	}
+}
 
 /*
 ** Closes the cursor and nullify all structure fields.
@@ -661,6 +696,9 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 static void cur_nullify (lua_State *L, cur_data *cur) {
 	int i;
 	conn_data *conn;
+
+	/* temporary LOBs need the connection, so free them first */
+	free_temp_lobs (L, cur);
 
 	/* Deallocate buffers. */
 	for (i = 1; i <= cur->numcols; i++) {
@@ -721,7 +759,10 @@ static void cur_nullify (lua_State *L, cur_data *cur) {
 */
 static int cur_fetch (lua_State *L) {
 	cur_data *cur = getcursor (L);
-	sword status = OCIStmtFetch (cur->stmthp, cur->errhp, 1,
+	sword status;
+
+	free_temp_lobs (L, cur);   /* those of the previous row */
+	status = OCIStmtFetch (cur->stmthp, cur->errhp, 1,
 		OCI_FETCH_NEXT, OCI_DEFAULT);
 
 	if (status == OCI_NO_DATA) {
@@ -733,6 +774,8 @@ static int cur_fetch (lua_State *L) {
 		/* Error */
 		return checkerr (L, status, cur->errhp);
 	}
+
+	cur->lobs_held = cur->has_lobs;
 
 	if (lua_istable (L, 2)) {
 		int i;
@@ -1001,6 +1044,8 @@ static int create_cursor (lua_State *L, int o, conn_data *conn, OCIStmt *stmt,
 	cur->number_mode = conn->number_mode;
 	cur->text = strdup (text); /* Stores the statement. For prepared statement, 
 	                              let's just pass empty string. */
+	cur->has_lobs = 0;
+	cur->lobs_held = 0;
 	lua_pushvalue (L, o);
 	cur->conn = luaL_ref (L, LUA_REGISTRYINDEX);
 
