@@ -12,8 +12,12 @@
 --   rebindString  one statement, binds strings of changing length and
 --                 null in turn
 --   gcClose       prepare, execute, drop both; only the GC closes them
+--   clobRead      one statement, temporary CLOBs of changing length and
+--                 NULL in turn
+--   clobRows      one statement, several temporary CLOBs per cursor
 --
--- Skipped if the driver has no prepare().
+-- Skipped if the driver has no prepare(). A phase is skipped if the
+-- backend lacks the query it needs.
 
 local phases = require("phases")
 
@@ -38,6 +42,14 @@ local utf8Text = "\u{E4}\u{F6}\u{FC}\u{20AC}"
 -- Repeats of utf8Text (9 bytes each) for string binds. The byte lengths
 -- cross the server's bind length steps at 32, 128 and 2000 bytes.
 local stringRepeats = { 1, 3, 4, 14, 15, 222, 223, 440 }
+
+-- CLOB lengths in characters, multiples of the 4 characters of utf8Text.
+-- The larger ones need several read pieces in the driver.
+local clobLengths = { 4, 1000, 4000, 8192, 40000 }
+
+-- Rows per cursor and characters added per row in phase clobRows.
+local clobRowCount = 10
+local clobRowChars = 400
 
 -- Raises an error if a LuaSQL call failed, otherwise returns its result.
 local function check(value, err, what)
@@ -80,11 +92,18 @@ local function fetchSingle(cur)
    return row[1]
 end
 
+-- Short readable form of a value for messages; long strings are cut.
+local function describe(value)
+   if type(value) == "string" and #value > 40 then
+      return string.format("%q... (%d bytes)", value:sub(1, 40), #value)
+   end
+   return string.format("%s (%s)", tostring(value), type(value))
+end
+
 local function expectValue(actual, expected)
    if actual ~= expected then
-      error(string.format("expected %s (%s), got %s (%s)",
-                          tostring(expected), type(expected),
-                          tostring(actual), type(actual)), 0)
+      error(string.format("expected %s, got %s",
+                          describe(expected), describe(actual)), 0)
    end
 end
 
@@ -102,6 +121,14 @@ end
 
 local function prepareMultiRowQuery(ctx)
    return prepare(ctx.testConn, ctx.backend.multiRowBindQuery)
+end
+
+local function prepareClobQuery(ctx)
+   return prepare(ctx.testConn, ctx.backend.clobQuery)
+end
+
+local function prepareClobRowsQuery(ctx)
+   return prepare(ctx.testConn, ctx.backend.clobRowsQuery)
 end
 
 local function finishStatement(_, stmt)
@@ -167,6 +194,54 @@ local function gcCloseStep(ctx, i)
    end
 end
 
+-- CLOBs of changing length and NULL in turn. Every result is a
+-- temporary LOB on the server that has to be freed again.
+local function clobReadStep(ctx, i, stmt)
+   local types = ctx.types
+   local pad = { utf8Text, types.string }
+   local slot = i % (#clobLengths + 1)
+   local params, expected
+   if slot == 0 then
+      params = { types.null, { 4, types.int }, pad }
+   else
+      local length = clobLengths[slot]
+      params = { { utf8Text, types.string }, { length, types.int }, pad }
+      expected = utf8Text:rep(length // 4)
+   end
+   expectValue(fetchSingle(execute(stmt, params)), expected)
+end
+
+-- Several temporary CLOBs per cursor, all read into the same locator.
+-- Every second cursor is closed after a few rows, so the driver has to
+-- free the LOB of the current row when the cursor is closed.
+local function clobRowsStep(ctx, i, stmt)
+   local types = ctx.types
+   local cur = execute(stmt, {
+      { utf8Text, types.string }, { clobRowChars, types.int },
+      { utf8Text, types.string }, { clobRowCount, types.int },
+   })
+   local stopAfter = (i % 2 == 0) and clobRowCount or 3
+   local rows = 0
+   local row, err = cur:fetch({})
+   while row ~= nil do
+      rows = rows + 1
+      expectValue(row[1], utf8Text:rep(rows * clobRowChars // 4))
+      if rows == stopAfter and rows < clobRowCount then
+         local ok, closeErr = cur:close()
+         check(ok, closeErr, "close cursor")
+         return
+      end
+      row, err = cur:fetch({})
+   end
+   if err ~= nil then
+      error("fetch: " .. tostring(err), 0)
+   end
+   if rows ~= clobRowCount then
+      error(string.format("expected %d rows, got %d",
+                          clobRowCount, rows), 0)
+   end
+end
+
 local phaseList = {
    { name = "prepareClose", step = prepareCloseStep },
    { name = "reuse", setup = prepareBindQuery, step = reuseStep,
@@ -178,6 +253,10 @@ local phaseList = {
    { name = "rebindString", setup = prepareStringQuery,
      step = rebindStringStep, finish = finishStatement },
    { name = "gcClose", step = gcCloseStep },
+   { name = "clobRead", setup = prepareClobQuery, step = clobReadStep,
+     finish = finishStatement, needs = "clobQuery" },
+   { name = "clobRows", setup = prepareClobRowsQuery, step = clobRowsStep,
+     finish = finishStatement, needs = "clobRowsQuery" },
 }
 
 -- ctx: tier, driver, backend, testConn, adminConn (may be nil)
@@ -197,7 +276,16 @@ function stmtLifecycle.run(ctx)
       adminConn = ctx.adminConn,
       types = ctx.driver.type,
    }
-   return phases.run(phaseCtx, phaseList, count)
+   local list = {}
+   for _, phase in ipairs(phaseList) do
+      if phase.needs and ctx.backend[phase.needs] == nil then
+         print(string.format("  %-14s skipped: backend has no %s",
+                             phase.name, phase.needs))
+      else
+         list[#list + 1] = phase
+      end
+   end
+   return phases.run(phaseCtx, list, count)
 end
 
 return stmtLifecycle

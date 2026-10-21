@@ -1,6 +1,7 @@
 -- phases.lua
--- Runs the phases of a scenario and checks the open cursors of the test
--- session on the server before and after each phase.
+-- Runs the phases of a scenario and checks the server counters of the
+-- connection. Checks every result and that the server counters of the
+-- test session (open cursors, temp lobs) do not grow.
 --
 -- A phase is a table with these fields:
 --   name    shown in the output
@@ -54,26 +55,31 @@ function phases.sessionId(ctx)
    return sid
 end
 
--- Returns the number of open cursors of the test session on the server,
--- or nil without admin connection. Raises an error on failure.
-local function serverCursors(ctx, sid)
+-- Reads the server counters of the test session in the order of
+-- backend.serverCounters. Returns the list of values, or nil without
+-- admin connection. Raises an error on failure.
+local function readServerCounters(ctx, sid)
    if not ctx.adminConn then
       return nil
    end
    -- One round trip on the test connection first, so the client hands
-   -- pending cursor closes over to the server. Done the same way before
-   -- and after each phase, so both counts are comparable.
+   -- pending closes over to the server. Done the same way before and
+   -- after each phase, so both readings are comparable.
    local _, err = dbutil.queryValue(ctx.testConn, ctx.backend.singleRowQuery)
    if err then
       error("sync query: " .. err, 0)
    end
-   local value
-   value, err = dbutil.queryValue(ctx.adminConn,
-      string.format(ctx.backend.openCursorsQuery, sid))
-   if not value then
-      error("reading open cursors: " .. err, 0)
+   local values = {}
+   for i, counter in ipairs(ctx.backend.serverCounters) do
+      local value
+      value, err = dbutil.queryValue(ctx.adminConn,
+         string.format(counter.query, sid))
+      if not value then
+         error("reading " .. counter.label .. ": " .. err, 0)
+      end
+      values[i] = math.tointeger(tonumber(value))
    end
-   return math.tointeger(tonumber(value))
+   return values
 end
 
 -- Returns the resident memory of this process in bytes (nil without
@@ -87,7 +93,7 @@ end
 
 -- Runs one phase and returns a short summary. Raises an error on failure.
 local function runPhase(ctx, phase, count, sid)
-   local before = serverCursors(ctx, sid)
+   local before = readServerCounters(ctx, sid)
 
    local shared
    if phase.setup then
@@ -116,11 +122,16 @@ local function runPhase(ctx, phase, count, sid)
    -- first one may keep another one reachable until the second, e.g. a
    -- cursor keeps its prepared statement alive.
    local rssAfter, luaAfter = memoryUsage()
-   local after = serverCursors(ctx, sid)
+   local after = readServerCounters(ctx, sid)
 
-   if before ~= nil and after > before then
-      error(string.format("open cursors grew from %d to %d",
-                          before, after), 0)
+   local counters = ctx.backend.serverCounters
+   if before then
+      for i, counter in ipairs(counters) do
+         if after[i] > before[i] then
+            error(string.format("%s grew from %d to %d",
+                                counter.label, before[i], after[i]), 0)
+         end
+      end
    end
 
    if rssBefore then
@@ -139,8 +150,10 @@ local function runPhase(ctx, phase, count, sid)
    if before == nil then
       parts[#parts + 1] = "server check skipped"
    else
-      parts[#parts + 1] = string.format("open cursors %d -> %d",
-                                        before, after)
+      for i, counter in ipairs(counters) do
+         parts[#parts + 1] = string.format("%s %d -> %d", counter.label,
+                                           before[i], after[i])
+      end
    end
    if rssBefore then
       parts[#parts + 1] = string.format("rss %+.0f KB",

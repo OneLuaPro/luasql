@@ -15,11 +15,23 @@ return {
    singleRowQuery = "SELECT 1 FROM dual",
    multiRowQuery = "SELECT level FROM dual CONNECT BY level <= 10",
    sessionIdQuery = "SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual",
-   -- Runs on the admin connection, %d is the session id of the test
-   -- connection. Counts the cursors that count against open_cursors.
-   openCursorsQuery = "SELECT s.value FROM v$sesstat s"
-      .. " JOIN v$statname n ON n.statistic# = s.statistic#"
-      .. " WHERE n.name = 'opened cursors current' AND s.sid = %d",
+   -- Read on the admin connection before and after each phase, %d is the
+   -- session id of the test connection. A phase fails if one grows.
+   serverCounters = {
+      -- The cursors that count against open_cursors.
+      {
+         label = "open cursors",
+         query = "SELECT s.value FROM v$sesstat s"
+            .. " JOIN v$statname n ON n.statistic# = s.statistic#"
+            .. " WHERE n.name = 'opened cursors current' AND s.sid = %d",
+      },
+      -- Temporary LOBs, e.g. CLOB results of SQL functions.
+      {
+         label = "temp lobs",
+         query = "SELECT NVL(SUM(cache_lobs + nocache_lobs"
+            .. " + abstract_lobs), 0) FROM v$temporary_lobs WHERE sid = %d",
+      },
+   },
    -- Used by prepared statement scenarios, :1 is the first parameter.
    bindQuery = "SELECT :1 FROM dual",
    multiRowBindQuery = "SELECT level FROM dual CONNECT BY level <= :1",
@@ -27,6 +39,11 @@ return {
    -- server instead of changing the type of the result column.
    bindNumberQuery = "SELECT CAST(:1 AS NUMBER) FROM dual",
    bindStringQuery = "SELECT CAST(:1 AS VARCHAR2(4000)) FROM dual",
+   -- Temporary CLOBs: :1 padded with :3 to :2 characters; the rows query
+   -- returns :4 rows, row k has k * :2 characters.
+   clobQuery = "SELECT RPAD(TO_CLOB(:1), :2, :3) FROM dual",
+   clobRowsQuery = "SELECT RPAD(TO_CLOB(:1), level * :2, :3) FROM dual"
+      .. " CONNECT BY level <= :4",
    -- Used by the error path scenario.
    invalidQuery = "SELEC 1 FROM dual",
    failingBlock = "BEGIN RAISE_APPLICATION_ERROR(-20001, 'stress');"
