@@ -17,6 +17,7 @@
 -- it, or if the backend lacks a query the phase needs.
 
 local phases = require("phases")
+local report = require("report")
 
 local errorPaths = {}
 
@@ -238,7 +239,8 @@ function errorPaths.run(ctx)
    for _, phase in ipairs(phaseList) do
       local missing = missingRequirement(phaseCtx, phase)
       if missing then
-         print(string.format("  %-14s skipped: %s", phase.name, missing))
+         report.print(string.format("  %-14s ", phase.name),
+                      "skipped: " .. missing)
       else
          list[#list + 1] = phase
       end

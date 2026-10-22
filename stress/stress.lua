@@ -15,6 +15,7 @@ local scriptDir = arg[0]:match("^(.*[/\\])") or ""
 package.path = scriptDir .. "?.lua;" .. package.path
 
 local argparse = require("argparse")
+local report = require("report")
 
 local tiers = { "smoke", "standard", "nightly" }
 
@@ -215,10 +216,10 @@ local function runScenarios(options, driver, backend, testConn, adminConn)
 	    driver = driver,
       })
       if not ok then
-	 print("  internal error: " .. tostring(result))
+	 report.print("  internal error: ", result)
 	 failed[#failed + 1] = name
       elseif not result then
-	 print("  FAILED: " .. tostring(err))
+	 report.print("  FAILED: ", err)
 	 failed[#failed + 1] = name
       else
 	 print("  passed" .. (err and (" (" .. err .. ")") or ""))

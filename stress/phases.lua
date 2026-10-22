@@ -19,6 +19,7 @@
 -- one-time allocations do not count as growth.
 
 local dbutil = require("dbutil")
+local report = require("report")
 
 -- luv is optional, without it only the Lua heap is measured.
 local hasUv, uv = pcall(require, "luv")
@@ -174,11 +175,11 @@ function phases.run(ctx, list, count)
    local failed = {}
    for _, phase in ipairs(list) do
       local phaseOk, result = pcall(runPhase, ctx, phase, count, sid)
+      local prefix = string.format("  %-14s ", phase.name)
       if phaseOk then
-         print(string.format("  %-14s %s", phase.name, result))
+         report.print(prefix, result)
       else
-         print(string.format("  %-14s FAILED: %s", phase.name,
-                             tostring(result)))
+         report.print(prefix, "FAILED: " .. tostring(result))
          failed[#failed + 1] = phase.name
       end
    end
