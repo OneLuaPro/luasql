@@ -51,6 +51,25 @@ return {
    clobQuery = "SELECT RPAD(TO_CLOB(:1), :2, :3) FROM dual",
    clobRowsQuery = "SELECT RPAD(TO_CLOB(:1), level * :2, :3) FROM dual"
       .. " CONNECT BY level <= :4",
+   -- Temporary BLOBs: the bytes of hex text :1, padded with those of :3
+   -- to :2 bytes (at most 2000); the rows query returns :4 rows, row k
+   -- has k * :2 bytes.
+   blobQuery = "SELECT TO_BLOB(HEXTORAW(RPAD(:1, 2 * :2, :3))) FROM dual",
+   blobRowsQuery = "SELECT TO_BLOB(HEXTORAW(RPAD(:1, 2 * level * :2, :3)))"
+      .. " FROM dual CONNECT BY level <= :4",
+   -- Checked before a LOB phase: 1 if the expression of its query gives
+   -- temporary LOBs, so the phase tests their release. Keys are phase
+   -- names.
+   tempLobChecks = {
+      clobRead = "SELECT DBMS_LOB.ISTEMPORARY(RPAD(TO_CLOB('ab'), 8, 'cd'))"
+         .. " FROM dual",
+      clobRows = "SELECT DBMS_LOB.ISTEMPORARY(RPAD(TO_CLOB('ab'), 8, 'cd'))"
+         .. " FROM dual",
+      blobRead = "SELECT DBMS_LOB.ISTEMPORARY(TO_BLOB(HEXTORAW("
+         .. "RPAD('AB', 8, 'CD')))) FROM dual",
+      blobRows = "SELECT DBMS_LOB.ISTEMPORARY(TO_BLOB(HEXTORAW("
+         .. "RPAD('AB', 8, 'CD')))) FROM dual",
+   },
    -- Used by the error path scenario.
    invalidQuery = "SELEC 1 FROM dual",
    failingBlock = "BEGIN RAISE_APPLICATION_ERROR(-20001, 'stress');"
@@ -70,11 +89,11 @@ return {
       .. " tsltz TIMESTAMP(6) WITH LOCAL TIME ZONE, b BOOLEAN, c CLOB,"
       .. " ns NVARCHAR2(2000), nc NCLOB, bf BINARY_FLOAT,"
       .. " bd BINARY_DOUBLE, ch CHAR(10 CHAR), nch NCHAR(10), r UROWID,"
-      .. " rw RAW(2000))",
+      .. " rw RAW(2000), bl BLOB)",
    typesTableDrop = "DROP TABLE IF EXISTS luastress_types PURGE",
    typesColumns = {
       "n", "s", "d", "ts", "tstz", "tsltz", "b", "c", "ns", "nc",
-      "bf", "bd", "ch", "nch", "r", "rw",
+      "bf", "bd", "ch", "nch", "r", "rw", "bl",
    },
    typesInsert = "INSERT INTO luastress_types (id, %s) VALUES (:1, :2)",
    typesSelect = "SELECT %s FROM luastress_types WHERE id = :1",
@@ -90,6 +109,17 @@ return {
       .. " ORGANIZATION INDEX",
    iotTableDrop = "DROP TABLE IF EXISTS luastress_iot PURGE",
    iotInsert = "INSERT INTO luastress_iot (id) VALUES (:1)",
+   -- Writes row :1 with a BLOB of :3 copies of the bytes of hex text :2,
+   -- larger than a RAW can be. A PL/SQL block binds each name once, in
+   -- the order of first use.
+   blobLargeInsert = "DECLARE newId NUMBER := :1;"
+      .. " piece RAW(2000) := HEXTORAW(:2); copies PLS_INTEGER := :3;"
+      .. " lob BLOB; BEGIN DBMS_LOB.CREATETEMPORARY(lob, TRUE);"
+      .. " FOR i IN 1 .. copies LOOP"
+      .. " DBMS_LOB.WRITEAPPEND(lob, UTL_RAW.LENGTH(piece), piece);"
+      .. " END LOOP;"
+      .. " INSERT INTO luastress_types (id, bl) VALUES (newId, lob);"
+      .. " DBMS_LOB.FREETEMPORARY(lob); END;",
    -- First %s is the column, second one an SQL literal.
    typesInsertLiteral = "INSERT INTO luastress_types (id, %s)"
       .. " VALUES (:1, %s)",

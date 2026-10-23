@@ -4,11 +4,14 @@
 -- after each phase.
 --
 -- A phase is a table with these fields:
---   name    shown in the output
---   setup   optional, function(ctx), its result is passed to step and
---           finish
---   step    function(ctx, i, shared), raises an error on failure
---   finish  optional, function(ctx, shared), raises an error on failure
+--   name      shown in the output
+--   precheck  optional, function(ctx, phase), runs first; returns why
+--             the phase would not test anything, or nil
+--   setup     optional, function(ctx), its result is passed to step and
+--             finish
+--   step      function(ctx, i, shared), raises an error on failure
+--   finish    optional, function(ctx, shared), raises an error on
+--             failure
 --
 -- ctx needs testConn and backend; adminConn is optional. Without it the
 -- phases still run, but the server side check is skipped.
@@ -94,6 +97,12 @@ end
 
 -- Runs one phase and returns a short summary. Raises an error on failure.
 local function runPhase(ctx, phase, count, sid)
+   if phase.precheck then
+      local problem = phase.precheck(ctx, phase)
+      if problem then
+         error("invalid: " .. problem, 0)
+      end
+   end
    local before = readServerCounters(ctx, sid)
 
    local shared

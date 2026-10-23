@@ -17,7 +17,7 @@
 --   raw                       binary data, written as hex text, read
 --                             as bytes; also checked as hex on the
 --                             server
---   clob                      last: a failed LOB read may leave the
+--   clob, blob                last: a failed LOB read may leave the
 --                             session unusable
 --
 -- Number cases also read the stored value as text on the server and
@@ -76,7 +76,8 @@ local zeroClob = "ab\0cd" .. asciiClob
 -- needs (backend keys the case needs), rowid (ROWID case, see
 -- runRowidCase; with iot and store), checkHex (also check the bytes
 -- stored on the server; set for all raw cases), expectedLength (value
--- made on the server: expect the stored bytes of this length).
+-- made on the server: expect the stored bytes of this length), write
+-- (backend key of a statement that writes row :1, with writeParams).
 -- Backend overrides may add limitReason with limitNull (NULL read back)
 -- or limitError (Lua pattern of an expected write error).
 local function makeCases(t)
@@ -266,6 +267,20 @@ local function makeCases(t)
    add("rawFetchNa", "raw", "rw", { "00FF4100", t.string }, bytes,
        { fetchMode = "na" })
 
+   -- BLOB: written as hex text or RAW, read as bytes.
+   add("blobLiteral", "blob", "bl", nil, bytes,
+       { literal = "HEXTORAW('00FF4100')" })
+   add("blobHexBind", "blob", "bl", { "00FF4100", t.string }, bytes)
+   add("blobEmpty", "blob", "bl", nil, "", { literal = "EMPTY_BLOB()" })
+   add("blobNull", "blob", "bl", t.null, nil, null)
+   add("blobFetchNa", "blob", "bl", { "00FF4100", t.string }, bytes,
+       { fetchMode = "na" })
+   -- 100000 bytes, more than one read piece in the driver.
+   add("blobLarge", "blob", "bl", nil,
+       string.rep("\xDE\xAD\xBE\xEF", 25000),
+       { write = "blobLargeInsert", needs = { "blobLargeInsert" },
+         writeParams = { { "DEADBEEF", t.string }, { 25000, t.int } } })
+
    add("clobAscii", "clob", "c", { asciiClob, t.string }, asciiClob)
    add("clobNull", "clob", "c", t.null, nil, null)
    add("clobUtf8", "clob", "c", { utf8Clob, t.string }, utf8Clob)
@@ -384,6 +399,9 @@ local function writeValue(ctx, id, case)
       sql = string.format(ctx.backend.typesInsertLiteral, case.column,
                           case.literal)
       params = { { id, ctx.types.int } }
+   elseif case.write then
+      sql = ctx.backend[case.write]
+      params = { { id, ctx.types.int }, table.unpack(case.writeParams) }
    else
       sql = string.format(ctx.backend.typesInsert, case.column)
       params = { { id, ctx.types.int }, case.param }
@@ -796,6 +814,7 @@ local function runBlocks(ctx, cases)
       restoreSetting(ctx, "timeZone", oldTimeZone)
    end
    failed = failed + runBlock(ctx, "clob", cases, { clob = true })
+   failed = failed + runBlock(ctx, "blob", cases, { blob = true })
    return failed
 end
 

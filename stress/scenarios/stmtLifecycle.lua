@@ -15,10 +15,15 @@
 --   clobRead      one statement, temporary CLOBs of changing length and
 --                 NULL in turn
 --   clobRows      one statement, several temporary CLOBs per cursor
+--   blobRead      as clobRead, with temporary BLOBs
+--   blobRows      as clobRows, with temporary BLOBs
 --
 -- Skipped if the driver has no prepare(). A phase is skipped if the
--- backend lacks the query it needs.
+-- backend lacks the query it needs. A LOB phase fails as invalid if
+-- the backend check (backend.tempLobChecks) shows that its query gives
+-- no temporary LOBs, since the phase would then test nothing.
 
+local dbutil = require("dbutil")
 local phases = require("phases")
 
 local stmtLifecycle = {}
@@ -50,6 +55,18 @@ local clobLengths = { 4, 1000, 4000, 8192, 40000 }
 -- Rows per cursor and characters added per row in phase clobRows.
 local clobRowCount = 10
 local clobRowChars = 400
+
+-- BLOB content: the bytes of blobHex, repeated.
+local blobHex = "DEADBEEF"
+local blobBytes = "\xDE\xAD\xBE\xEF"
+
+-- BLOB lengths in bytes, multiples of the 4 bytes of blobBytes; at most
+-- 2000, the largest RAW in SQL.
+local blobLengths = { 4, 100, 1000, 2000 }
+
+-- Rows per cursor and bytes added per row in phase blobRows.
+local blobRowCount = 10
+local blobRowBytes = 200
 
 -- Raises an error if a LuaSQL call failed, otherwise returns its result.
 local function check(value, err, what)
@@ -92,8 +109,16 @@ local function fetchSingle(cur)
    return row[1]
 end
 
--- Short readable form of a value for messages; long strings are cut.
+-- Short readable form of a value for messages; long strings are cut,
+-- binary data (not valid UTF-8) is shown as hex digits.
 local function describe(value)
+   if type(value) == "string" and not utf8.len(value) then
+      local hex = value:sub(1, 20):gsub(".", function(byte)
+         return string.format("%02X", byte:byte())
+      end)
+      return string.format("0x%s%s (%d bytes)", hex,
+                           #value > 20 and "..." or "", #value)
+   end
    if type(value) == "string" and #value > 40 then
       return string.format("%q... (%d bytes)", value:sub(1, 40), #value)
    end
@@ -131,8 +156,33 @@ local function prepareClobRowsQuery(ctx)
    return prepare(ctx.testConn, ctx.backend.clobRowsQuery)
 end
 
+local function prepareBlobQuery(ctx)
+   return prepare(ctx.testConn, ctx.backend.blobQuery)
+end
+
+local function prepareBlobRowsQuery(ctx)
+   return prepare(ctx.testConn, ctx.backend.blobRowsQuery)
+end
+
 local function finishStatement(_, stmt)
    closeStatement(stmt)
+end
+
+-- Precheck of the LOB phases. Returns why the phase would test nothing,
+-- or nil; also nil if the backend has no check for the phase.
+local function checkTempLobs(ctx, phase)
+   local sql = (ctx.backend.tempLobChecks or {})[phase.name]
+   if sql == nil then
+      return nil
+   end
+   local value, err = dbutil.queryValue(ctx.testConn, sql)
+   if value == nil then
+      return "temporary LOB check failed: " .. tostring(err)
+   end
+   if tonumber(value) ~= 1 then
+      return "query gives no temporary LOBs"
+   end
+   return nil
 end
 
 local function prepareCloseStep(ctx, i)
@@ -211,22 +261,18 @@ local function clobReadStep(ctx, i, stmt)
    expectValue(fetchSingle(execute(stmt, params)), expected)
 end
 
--- Several temporary CLOBs per cursor, all read into the same locator.
--- Every second cursor is closed after a few rows, so the driver has to
--- free the LOB of the current row when the cursor is closed.
-local function clobRowsStep(ctx, i, stmt)
-   local types = ctx.types
-   local cur = execute(stmt, {
-      { utf8Text, types.string }, { clobRowChars, types.int },
-      { utf8Text, types.string }, { clobRowCount, types.int },
-   })
-   local stopAfter = (i % 2 == 0) and clobRowCount or 3
+-- Fetches a cursor with one temporary LOB per row, all read into the
+-- same locator; row k must be expectedRow(k). Every second cursor is
+-- closed after a few rows, so the driver has to free the LOB of the
+-- current row when the cursor is closed.
+local function fetchLobRows(cur, i, rowCount, expectedRow)
+   local stopAfter = (i % 2 == 0) and rowCount or 3
    local rows = 0
    local row, err = cur:fetch({})
    while row ~= nil do
       rows = rows + 1
-      expectValue(row[1], utf8Text:rep(rows * clobRowChars // 4))
-      if rows == stopAfter and rows < clobRowCount then
+      expectValue(row[1], expectedRow(rows))
+      if rows == stopAfter and rows < rowCount then
          local ok, closeErr = cur:close()
          check(ok, closeErr, "close cursor")
          return
@@ -236,10 +282,47 @@ local function clobRowsStep(ctx, i, stmt)
    if err ~= nil then
       error("fetch: " .. tostring(err), 0)
    end
-   if rows ~= clobRowCount then
-      error(string.format("expected %d rows, got %d",
-                          clobRowCount, rows), 0)
+   if rows ~= rowCount then
+      error(string.format("expected %d rows, got %d", rowCount, rows), 0)
    end
+end
+
+local function clobRowsStep(ctx, i, stmt)
+   local types = ctx.types
+   local cur = execute(stmt, {
+      { utf8Text, types.string }, { clobRowChars, types.int },
+      { utf8Text, types.string }, { clobRowCount, types.int },
+   })
+   fetchLobRows(cur, i, clobRowCount, function(rows)
+      return utf8Text:rep(rows * clobRowChars // 4)
+   end)
+end
+
+-- BLOBs of changing length and NULL in turn, as in clobReadStep.
+local function blobReadStep(ctx, i, stmt)
+   local types = ctx.types
+   local pad = { blobHex, types.string }
+   local slot = i % (#blobLengths + 1)
+   local params, expected
+   if slot == 0 then
+      params = { types.null, { 4, types.int }, pad }
+   else
+      local length = blobLengths[slot]
+      params = { { blobHex, types.string }, { length, types.int }, pad }
+      expected = blobBytes:rep(length // 4)
+   end
+   expectValue(fetchSingle(execute(stmt, params)), expected)
+end
+
+local function blobRowsStep(ctx, i, stmt)
+   local types = ctx.types
+   local cur = execute(stmt, {
+      { blobHex, types.string }, { blobRowBytes, types.int },
+      { blobHex, types.string }, { blobRowCount, types.int },
+   })
+   fetchLobRows(cur, i, blobRowCount, function(rows)
+      return blobBytes:rep(rows * blobRowBytes // 4)
+   end)
 end
 
 local phaseList = {
@@ -253,10 +336,16 @@ local phaseList = {
    { name = "rebindString", setup = prepareStringQuery,
      step = rebindStringStep, finish = finishStatement },
    { name = "gcClose", step = gcCloseStep },
-   { name = "clobRead", setup = prepareClobQuery, step = clobReadStep,
-     finish = finishStatement, needs = "clobQuery" },
-   { name = "clobRows", setup = prepareClobRowsQuery, step = clobRowsStep,
+   { name = "clobRead", precheck = checkTempLobs, setup = prepareClobQuery,
+     step = clobReadStep, finish = finishStatement, needs = "clobQuery" },
+   { name = "clobRows", precheck = checkTempLobs,
+     setup = prepareClobRowsQuery, step = clobRowsStep,
      finish = finishStatement, needs = "clobRowsQuery" },
+   { name = "blobRead", precheck = checkTempLobs, setup = prepareBlobQuery,
+     step = blobReadStep, finish = finishStatement, needs = "blobQuery" },
+   { name = "blobRows", precheck = checkTempLobs,
+     setup = prepareBlobRowsQuery, step = blobRowsStep,
+     finish = finishStatement, needs = "blobRowsQuery" },
 }
 
 -- ctx: tier, driver, backend, testConn, adminConn (may be nil)
