@@ -80,7 +80,14 @@ return {
       -- to NUMBER with DBL_DIG significant digits.
       numberBindDigits = 15,
       numberBind = "number binds keep 15 significant digits (SQLT_FLT,"
-         .. " DBL_DIG); bind integers as luasql.type.int",
+         .. " DBL_DIG)",
+      -- Added for integral values within the integer range.
+      numberBindHint = "bind integers as luasql.type.int",
+      -- Float mode, the result is the nearest double: a limit of the
+      -- type double, not of OCI.
+      doubleInteger = "a double cannot hold integers above 2^53;"
+         .. " use numbers = \"exact\"",
+      -- Float mode, the result is not the nearest double.
       floatRead = "numbers = \"float\": OCI converts NUMBER to double,"
          .. " not always correctly rounded; use numbers = \"exact\"",
    },

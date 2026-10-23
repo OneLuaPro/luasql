@@ -178,6 +178,11 @@ local function makeCases(t)
    return list
 end
 
+-- Count with a noun, singular for 1: "1 limit", "2 limits".
+local function plural(count, noun)
+   return string.format("%d %s%s", count, noun, count == 1 and "" or "s")
+end
+
 -- Short readable form of a value for messages.
 local function describe(value)
    if type(value) == "number" then
@@ -322,7 +327,12 @@ local function numberBindLimit(ctx, case, stored, expected)
    if stored.value ~= cut then
       return nil
    end
-   return string.format("%s; server has %s", limits.numberBind, stored.text)
+   local reason = limits.numberBind
+   -- The hint only helps for values that luasql.type.int can hold.
+   if limits.numberBindHint and math.tointeger(expected) then
+      reason = reason .. "; " .. limits.numberBindHint
+   end
+   return string.format("%s; server has %s", reason, stored.text)
 end
 
 -- Runs one case. Returns "pass", or "limit" or "fail" and a message.
@@ -370,8 +380,15 @@ local function runCase(ctx, id, case)
    if match and storedOk then
       if match == "close" then
          local limits = ctx.backend.limits or {}
-         local reason = string.format("%s; got %s",
-            limits.floatRead or "float mode: not exact", describe(value))
+         local reason = limits.floatRead or "float mode: not exact"
+         -- The nearest double to an integer is a limit of the type, not
+         -- a rounding error of the client library.
+         local exact = stored and stored.value or expected
+         if limits.doubleInteger and math.type(expected) == "integer"
+            and value == exact + 0.0 then
+            reason = limits.doubleInteger
+         end
+         reason = string.format("%s; got %s", reason, describe(value))
          limitReason = limitReason and (limitReason .. "; " .. reason)
             or reason
       end
@@ -447,8 +464,8 @@ local function runBlock(ctx, title, cases, blocks)
          end
       end
    end
-   print(string.format("    %d passed, %d limits, %d failed, %d skipped",
-                       passed, limits, failed, skipped))
+   print(string.format("    %d passed, %s, %d failed, %d skipped",
+                       passed, plural(limits, "limit"), failed, skipped))
    ctx.limitCount = ctx.limitCount + limits
    return failed
 end
@@ -603,11 +620,10 @@ function dataTypes.run(ctx)
       return nil, tostring(result)
    end
    if result > 0 then
-      return nil, string.format("%d cases failed", result)
+      return nil, plural(result, "case") .. " failed"
    end
    if typesCtx.limitCount > 0 then
-      return true, string.format("%d known limitations",
-                                 typesCtx.limitCount)
+      return true, plural(typesCtx.limitCount, "known limitation")
    end
    return true
 end
