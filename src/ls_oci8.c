@@ -360,6 +360,7 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 					(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
 			}
 			break;
+		case SQLT_BLOB:
 		case SQLT_CLOB: {
 			env_data *env;
 			conn_data *conn;
@@ -371,7 +372,7 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 				OCI_DTYPE_LOB, (size_t)0, (dvoid **)0), cur->errhp);
 			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
 				cur->errhp, (ub4)i, &(col->val.s), (sb4)sizeof(dvoid *),
-				SQLT_CLOB, (dvoid *)&(col->null), (ub2 *)0, (ub2 *)0,
+				col->type, (dvoid *)&(col->null), (ub2 *)0, (ub2 *)0,
 				OCI_DEFAULT), cur->errhp);
 			cur->has_lobs = 1;
 			break;
@@ -469,6 +470,7 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 			    OCIDescriptorFree (col->val.datetime, OCI_DTYPE_TIMESTAMP_LTZ);
 			break;
 #endif
+		case SQLT_BLOB:
 		case SQLT_CLOB:
 		        if (col->val.s)
 			    OCIDescriptorFree (col->val.s, OCI_DTYPE_LOB);
@@ -497,13 +499,17 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 #define LOB_CHUNK_BYTES ((size_t)LOB_CHUNK_CHARS * CLIENT_MAX_CHAR_BYTES)
 
 /*
-** Read a whole CLOB/NCLOB and push it as one Lua string.
+** Read a whole LOB and push it as one Lua string. CLOB/NCLOB: length and
+** offset count characters, each call asks for LOB_CHUNK_CHARS characters.
+** BLOB (binary != 0): they count bytes, each call asks for LOB_CHUNK_BYTES
+** bytes, and there is no character set form. In both cases the buffer
+** holds the requested amount, so Oracle never switches to polling mode.
 ** Returns 1 on success, otherwise 2 (nil + message), like pushvalue.
 */
-static int read_clob (lua_State *L, cur_data *cur, conn_data *conn,
-                      env_data *env, OCILobLocator *loc) {
-	oraub8 lob_len = 0;      /* length in characters */
-	oraub8 offset = 1;       /* position in characters, 1-based */
+static int read_lob (lua_State *L, cur_data *cur, conn_data *conn,
+                     env_data *env, OCILobLocator *loc, int binary) {
+	oraub8 lob_len = 0;      /* length in characters (CLOB) or bytes (BLOB) */
+	oraub8 offset = 1;       /* position in the same unit, 1-based */
 	size_t total = 0;        /* bytes collected so far */
 	size_t cap = 0;          /* bytes allocated in out */
 	char *out = NULL;
@@ -520,12 +526,15 @@ static int read_clob (lua_State *L, cur_data *cur, conn_data *conn,
 		return 1;
 	}
 
-	status = OCILobCharSetForm (env->envhp, cur->errhp, loc, &csfrm);
-	if (status)
-		return checkerr (L, status, cur->errhp);
+	if (!binary) {
+		status = OCILobCharSetForm (env->envhp, cur->errhp, loc, &csfrm);
+		if (status)
+			return checkerr (L, status, cur->errhp);
+	}
 	while (offset <= lob_len) {
-		oraub8 byte_amt = 0;
-		oraub8 char_amt = LOB_CHUNK_CHARS;
+		oraub8 byte_amt = binary ? (oraub8)LOB_CHUNK_BYTES : 0;
+		oraub8 char_amt = binary ? 0 : LOB_CHUNK_CHARS;
+		oraub8 step;
 
 		if (cap - total < LOB_CHUNK_BYTES) {
 			size_t newcap = cap ? cap : LOB_CHUNK_BYTES;
@@ -557,14 +566,15 @@ static int read_clob (lua_State *L, cur_data *cur, conn_data *conn,
 			free (out);
 			return checkerr (L, status, cur->errhp);
 		}
-		if (char_amt == 0) {
+		step = binary ? byte_amt : char_amt;   /* progress in offset units */
+		if (step == 0) {
 			free (out);
 			lua_pushnil (L);
 			lua_pushstring (L, LUASQL_PREFIX"LOB read made no progress");
 			return 2;
 		}
 		total += (size_t)byte_amt;
-		offset += char_amt;
+		offset += step;
 	}
 
 	lua_pushlstring (L, out ? out : "", total);
@@ -685,6 +695,7 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			break;
 		}
 #endif
+		case SQLT_BLOB:
 		case SQLT_CLOB: {
 			conn_data *conn;
 			env_data *env;
@@ -692,7 +703,8 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			conn = lua_touserdata (L, -1);
 			lua_pop (L, 1);
 			env = getenvfromconn (L, conn);
-			return read_clob (L, cur, conn, env, (OCILobLocator *)col->val.s);
+			return read_lob (L, cur, conn, env, (OCILobLocator *)col->val.s,
+				col->type == SQLT_BLOB);
 		}
 #ifdef SQLT_IBFLOAT
 		case SQLT_IBFLOAT:
@@ -736,7 +748,8 @@ static void free_temp_lobs (lua_State *L, cur_data *cur) {
 	for (i = 0; i < cur->numcols; i++) {
 		column_data *col = &(cur->cols[i]);
 		boolean is_temp = 0;
-		if (col->type != SQLT_CLOB || col->null || col->val.s == NULL)
+		if ((col->type != SQLT_CLOB && col->type != SQLT_BLOB)
+				|| col->null || col->val.s == NULL)
 			continue;
 		if (OCILobIsTemporary (env->envhp, cur->errhp,
 				(OCILobLocator *)col->val.s, &is_temp) == OCI_SUCCESS
@@ -956,6 +969,7 @@ static char *getcolumntype (column_data *col) {
 		/* case SQLT_UIN: */
 			return "number";
 		case SQLT_BIN:
+		case SQLT_BLOB:
 			return "binary";
 		case SQLT_CLOB:
 			return "string";
