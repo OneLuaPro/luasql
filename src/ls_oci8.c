@@ -273,6 +273,18 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 				(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
 			break;
 		}
+		case SQLT_BIN:
+			/* RAW: OCI_ATTR_DATA_SIZE is the maximum length in bytes;
+			   no character set conversion */
+			ASSERT (L, OCIAttrGet (param, OCI_DTYPE_PARAM,
+				(dvoid *)&(col->max), 0, OCI_ATTR_DATA_SIZE,
+				cur->errhp), cur->errhp);
+			col->val.s = calloc ((size_t)col->max + 1, 1);
+			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
+				cur->errhp, (ub4)i, col->val.s, (sb4)col->max,
+				SQLT_BIN, (dvoid *)&(col->null), &(col->rlen),
+				(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
+			break;
 #ifdef SQLT_DAT
 		case SQLT_DAT:
 			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
@@ -428,6 +440,7 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 		case SQLT_RID:
 		case SQLT_RDD:
 		case OCI8_UROWID:
+		case SQLT_BIN:
 		case SQLT_STR:
 		case SQLT_VCS:
 		case SQLT_AFC:
@@ -628,6 +641,7 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 		case SQLT_RID:
 		case SQLT_RDD:
 		case OCI8_UROWID:
+		case SQLT_BIN:
 		case SQLT_STR:
 		case SQLT_VCS:
 		case SQLT_AFC:
@@ -941,6 +955,8 @@ static char *getcolumntype (column_data *col) {
 		case SQLT_INT:
 		/* case SQLT_UIN: */
 			return "number";
+		case SQLT_BIN:
+			return "binary";
 		case SQLT_CLOB:
 			return "string";
 #ifdef SQLT_IBFLOAT
