@@ -6,6 +6,12 @@ local function sourceName(settings)
    return string.format("%s:%d/%s", settings.host, settings.port, settings.name)
 end
 
+-- Case override: Oracle stores an empty string as NULL, also in CHAR.
+local emptyAsNull = {
+   limitNull = true,
+   limitReason = "Oracle stores an empty string as NULL",
+}
+
 return {
    sourceName = sourceName,
    -- Readable by every user, no extra privileges needed.
@@ -52,7 +58,8 @@ return {
       .. " RAISE_APPLICATION_ERROR(-20001, 'stress'); END IF; END;",
    fetchErrorQuery = "SELECT 1 / (level - 5) FROM dual"
       .. " CONNECT BY level <= 10",
-   unsupportedTypeQuery = "SELECT CAST(1 AS BINARY_DOUBLE) FROM dual",
+   -- BFILE is not supported by luasql.oci8 on purpose.
+   unsupportedTypeQuery = "SELECT BFILENAME('X', 'y') FROM dual",
    -- Used by the data type scenario: test table, its columns (a case
    -- for a missing column is skipped) and statements; %s is a column
    -- name or an expression.
@@ -60,10 +67,12 @@ return {
       .. "id NUMBER PRIMARY KEY, n NUMBER, s VARCHAR2(4000 BYTE),"
       .. " d DATE, ts TIMESTAMP(6), tstz TIMESTAMP(6) WITH TIME ZONE,"
       .. " tsltz TIMESTAMP(6) WITH LOCAL TIME ZONE, b BOOLEAN, c CLOB,"
-      .. " ns NVARCHAR2(2000), nc NCLOB)",
+      .. " ns NVARCHAR2(2000), nc NCLOB, bf BINARY_FLOAT,"
+      .. " bd BINARY_DOUBLE, ch CHAR(10 CHAR), nch NCHAR(10))",
    typesTableDrop = "DROP TABLE IF EXISTS luastress_types PURGE",
    typesColumns = {
       "n", "s", "d", "ts", "tstz", "tsltz", "b", "c", "ns", "nc",
+      "bf", "bd", "ch", "nch",
    },
    typesInsert = "INSERT INTO luastress_types (id, %s) VALUES (:1, :2)",
    typesSelect = "SELECT %s FROM luastress_types WHERE id = :1",
@@ -91,12 +100,18 @@ return {
       floatRead = "numbers = \"float\": OCI converts NUMBER to double,"
          .. " not always correctly rounded; use numbers = \"exact\"",
    },
-   -- Cases whose result differs from standard SQL.
+   -- Cases whose result differs from standard SQL or that hit a limit
+   -- of the client library.
    typeCaseOverrides = {
-      emptyString = {
-         limitNull = true,
-         limitReason = "Oracle stores an empty string as NULL",
+      -- A number bind goes through NUMBER, even for BINARY_DOUBLE.
+      bdoubleInfBind = {
+         limitError = "ORA%-01426",
+         limitReason = "number binds go through NUMBER (SQLT_FLT):"
+            .. " infinity overflows (ORA-01426), also for BINARY_DOUBLE"
+            .. " columns",
       },
+      emptyString = emptyAsNull,
+      charEmpty = emptyAsNull,
    },
    -- Session settings the data type scenario changes and restores.
    sessionSettings = {

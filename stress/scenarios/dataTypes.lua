@@ -10,7 +10,7 @@
 --   numbers, float mode       again with conn:setoption("numbers",
 --                             "float"), if the driver has it
 --   strings                   multibyte, length limit, empty, \0,
---                             national character set
+--                             national character set, fixed length
 --   clob                      last: a failed LOB read may leave the
 --                             session unusable
 --
@@ -18,7 +18,10 @@
 -- convert it with tonumber. That tells whether a wrong result was lost
 -- while binding or while reading. In exact mode a number must also have
 -- the expected subtype (integer or float); in float mode every number
--- must be a float close to the expected value.
+-- must be a float close to the expected value. Binary floating point
+-- columns (BINARY_FLOAT, BINARY_DOUBLE) hold IEEE values that the client
+-- library does not convert: their cases must be exact in every mode and
+-- skip the server text check.
 --
 -- A case that hits a documented limit of the DBMS or its client library
 -- counts as "limit", not as failure: it is listed with its reason, but
@@ -63,7 +66,9 @@ local zeroClob = "ab\0cd" .. asciiClob
 -- expectError, errorAllowed (an error is fine, a wrong value is not),
 -- needsTimeZone, checkServer (also check the value stored on the
 -- server), literal (SQL literal written instead of param), fetchMode
--- ("a", "na" or "multi").
+-- ("a", "na" or "multi"), exactRead (exact in float mode, too).
+-- Backend overrides may add limitReason with limitNull (NULL read back)
+-- or limitError (Lua pattern of an expected write error).
 local function makeCases(t)
    local list = {}
    local function add(name, block, column, param, expected, extra)
@@ -81,6 +86,13 @@ local function makeCases(t)
    end
    local null = { nullResult = true }
    local fails = { expectError = true }
+   -- Binary floating point: no server text check, exact in every mode.
+   local function native(extra)
+      extra = extra or {}
+      extra.checkServer = false
+      extra.exactRead = true
+      return extra
+   end
 
    add("intSmall", "numbers", "n", { 42, t.int }, 42)
    add("intNegative", "numbers", "n", { -7, t.int }, -7)
@@ -112,6 +124,28 @@ local function makeCases(t)
        { fetchMode = "na" })
    add("floatFetchMulti", "numbers", "n", { 0.25, t.number }, 0.25,
        { fetchMode = "multi" })
+   -- 0.1 rounded to single precision, as BINARY_FLOAT stores it.
+   local float32 = string.unpack("f", string.pack("f", 0.1))
+   add("bfloat", "numbers", "bf", nil, float32, native({ literal = "0.1f" }))
+   add("bfloatBind", "numbers", "bf", { 0.1, t.number }, float32, native())
+   add("bfloatInf", "numbers", "bf", nil, math.huge,
+       native({ literal = "BINARY_FLOAT_INFINITY" }))
+   add("bdouble", "numbers", "bd", nil, 0.1 + 0.2,
+       native({ literal = "0.1d + 0.2d" }))
+   add("bdoubleHuge", "numbers", "bd", nil, 1e300,
+       native({ literal = "1e300d" }))
+   add("bdoubleInf", "numbers", "bd", nil, -math.huge,
+       native({ literal = "-BINARY_DOUBLE_INFINITY" }))
+   add("bdoubleNan", "numbers", "bd", nil, 0 / 0,
+       native({ literal = "BINARY_DOUBLE_NAN" }))
+   add("bdoubleBind", "numbers", "bd", { 0.1 + 0.2, t.number }, 0.1 + 0.2,
+       native())
+   add("bdoubleInfBind", "numbers", "bd", { math.huge, t.number },
+       math.huge, native())
+   add("bdoubleNanBind", "numbers", "bd", { 0 / 0, t.number }, 0 / 0,
+       native())
+   add("bdoubleNull", "numbers", "bd", t.null, nil,
+       native({ nullResult = true }))
 
    add("date", "dates", "d", { "2026-10-19", t.date },
        "2026-10-19 00:00:00")
@@ -165,6 +199,27 @@ local function makeCases(t)
    add("nvarcharLong", "strings", "ns", { maxBytesText, t.string },
        maxBytesText)
    add("nvarcharNull", "strings", "ns", t.null, nil, null)
+   -- Fixed length columns of 10 characters, padded with spaces.
+   add("charPadded", "strings", "ch", { "abc", t.string },
+       "abc" .. string.rep(" ", 7))
+   add("charFull", "strings", "ch", { string.rep("\u{20AC}", 10), t.string },
+       string.rep("\u{20AC}", 10))
+   add("charTooLong", "strings", "ch", { "abcdefghijk", t.string }, nil,
+       fails)
+   add("charEmpty", "strings", "ch", { "", t.string },
+       string.rep(" ", 10))
+   add("charNull", "strings", "ch", t.null, nil, null)
+   -- 10 euro signs: 20 bytes in AL16UTF16, 30 bytes in UTF-8.
+   add("ncharEuro", "strings", "nch",
+       { string.rep("\u{20AC}", 10), t.string },
+       string.rep("\u{20AC}", 10))
+   -- 5 emojis: 2 UTF-16 code units each, so the column is full.
+   add("ncharEmoji", "strings", "nch",
+       { string.rep("\u{1F600}", 5), t.string },
+       string.rep("\u{1F600}", 5))
+   add("ncharPadded", "strings", "nch", { "\u{E4}", t.string },
+       "\u{E4}" .. string.rep(" ", 9))
+   add("ncharNull", "strings", "nch", t.null, nil, null)
 
    add("clobAscii", "clob", "c", { asciiClob, t.string }, asciiClob)
    add("clobNull", "clob", "c", t.null, nil, null)
@@ -206,6 +261,10 @@ end
 local function compare(mode, value, expected)
    if type(value) ~= "number" or type(expected) ~= "number" then
       return value == expected and "exact" or nil
+   end
+   -- NaN is not equal to anything, not even to itself.
+   if expected ~= expected then
+      return value ~= value and "exact" or nil
    end
    if mode == "float" then
       if math.type(value) ~= "float" then
@@ -342,6 +401,9 @@ local function runCase(ctx, id, case)
       if case.expectError or case.errorAllowed then
          return "pass"
       end
+      if case.limitError and err:find(case.limitError) then
+         return "limit", case.limitReason
+      end
       return "fail", "write: " .. err
    end
    if case.expectError then
@@ -370,12 +432,22 @@ local function runCase(ctx, id, case)
       expected = nil
    end
    -- At a known bind limit the read is judged against the stored value.
-   local limitReason = numberBindLimit(ctx, case, stored, expected)
+   -- Without conversion by the client library, the read value is the
+   -- stored one.
+   local bindStored = stored
+   if case.exactRead and type(value) == "number" then
+      bindStored = { value = value, text = string.format("%.17g", value) }
+   end
+   local limitReason = numberBindLimit(ctx, case, bindStored, expected)
    if limitReason then
-      expected = stored.value
+      expected = bindStored.value
    end
 
    local match = compare(ctx.numberMode, value, expected)
+   -- Values the client library does not convert must be exact.
+   if match == "close" and case.exactRead then
+      match = nil
+   end
    local storedOk = stored == nil or stored.value == expected
    if match and storedOk then
       if match == "close" then
