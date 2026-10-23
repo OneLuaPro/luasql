@@ -14,6 +14,9 @@
 --   rowids                    ROWIDs read as strings must find their
 --                             row again, also logical ROWIDs and
 --                             ROWIDs stored in a column
+--   raw                       binary data, written as hex text, read
+--                             as bytes; also checked as hex on the
+--                             server
 --   clob                      last: a failed LOB read may leave the
 --                             session unusable
 --
@@ -71,7 +74,9 @@ local zeroClob = "ab\0cd" .. asciiClob
 -- server), literal (SQL literal written instead of param), fetchMode
 -- ("a", "na" or "multi"), exactRead (exact in float mode, too),
 -- needs (backend keys the case needs), rowid (ROWID case, see
--- runRowidCase; with iot and store).
+-- runRowidCase; with iot and store), checkHex (also check the bytes
+-- stored on the server; set for all raw cases), expectedLength (value
+-- made on the server: expect the stored bytes of this length).
 -- Backend overrides may add limitReason with limitNull (NULL read back)
 -- or limitError (Lua pattern of an expected write error).
 local function makeCases(t)
@@ -83,6 +88,9 @@ local function makeCases(t)
       if block == "numbers" and type(expected) == "number"
          and math.abs(expected) ~= math.huge then
          case.checkServer = true
+      end
+      if block == "raw" then
+         case.checkHex = true
       end
       for key, value in pairs(extra or {}) do
          case[key] = value
@@ -238,6 +246,26 @@ local function makeCases(t)
        { rowid = true, iot = true, store = true, needs = iotNeeds })
    add("urowidNull", "rowids", "r", t.null, nil, null)
 
+   -- RAW: string binds and literals are hex text, reads give the bytes.
+   local bytes = "\0\255A\0"
+   add("rawLiteral", "raw", "rw", nil, bytes,
+       { literal = "HEXTORAW('00FF4100')" })
+   add("rawHexBind", "raw", "rw", { "00FF4100", t.string }, bytes)
+   add("rawHexLower", "raw", "rw", { "deadbeef", t.string },
+       "\xDE\xAD\xBE\xEF")
+   add("rawLarge", "raw", "rw", nil, string.rep("\xDE\xAD\xBE\xEF", 500),
+       { literal = "UTL_RAW.COPIES(HEXTORAW('DEADBEEF'), 500)" })
+   add("rawGuid", "raw", "rw", nil, nil,
+       { literal = "SYS_GUID()", expectedLength = 16,
+         needs = { "rawAsHex" } })
+   add("rawTooLong", "raw", "rw", { string.rep("AB", 2001), t.string },
+       nil, fails)
+   add("rawInvalidHex", "raw", "rw", { "XYZ", t.string }, nil, fails)
+   add("rawEmpty", "raw", "rw", { "", t.string }, "")
+   add("rawNull", "raw", "rw", t.null, nil, null)
+   add("rawFetchNa", "raw", "rw", { "00FF4100", t.string }, bytes,
+       { fetchMode = "na" })
+
    add("clobAscii", "clob", "c", { asciiClob, t.string }, asciiClob)
    add("clobNull", "clob", "c", t.null, nil, null)
    add("clobUtf8", "clob", "c", { utf8Clob, t.string }, utf8Clob)
@@ -255,13 +283,28 @@ local function plural(count, noun)
    return string.format("%d %s%s", count, noun, count == 1 and "" or "s")
 end
 
--- Short readable form of a value for messages.
+-- Bytes of a string of hex digits.
+local function fromHex(hex)
+   local bytes = hex:gsub("%x%x", function(digits)
+      return string.char(tonumber(digits, 16))
+   end)
+   return bytes
+end
+
+-- Short readable form of a value for messages; binary data (not valid
+-- UTF-8) as hex digits.
 local function describe(value)
    if type(value) == "number" then
       if math.type(value) == "integer" then
          return string.format("%d (integer)", value)
       end
       return string.format("%.17g (float)", value)
+   elseif type(value) == "string" and not utf8.len(value) then
+      local hex = value:sub(1, 12):gsub(".", function(byte)
+         return string.format("%02X", byte:byte())
+      end)
+      return string.format("0x%s%s (%d bytes)", hex,
+                           #value > 12 and "..." or "", #value)
    elseif type(value) == "string" then
       local shown = value
       if #shown > 24 then
@@ -520,10 +563,28 @@ local function runCase(ctx, id, case)
          stored = { text = "unknown (" .. tostring(text) .. ")" }
       end
    end
+   if case.checkHex and ctx.backend.rawAsHex then
+      local hexOk, hex = readValue(ctx, id,
+         string.format(ctx.backend.rawAsHex, case.column))
+      if hexOk then
+         local bytes = hex and fromHex(hex)
+         stored = { text = describe(bytes), value = bytes }
+      else
+         stored = { text = "unknown (" .. tostring(hex) .. ")" }
+      end
+   end
 
    local expected = case.expected
    if case.nullResult then
       expected = nil
+   end
+   -- A value made on the server is known only from there.
+   if case.expectedLength and stored then
+      expected = stored.value
+      if type(expected) ~= "string" or #expected ~= case.expectedLength then
+         return "fail", string.format("expected %d bytes, server has %s",
+                                      case.expectedLength, stored.text)
+      end
    end
    -- At a known bind limit the read is judged against the stored value.
    -- Without conversion by the client library, the read value is the
@@ -563,7 +624,8 @@ local function runCase(ctx, id, case)
       end
       return "pass"
    end
-   if case.limitNull and value == nil and storedOk then
+   if case.limitNull and value == nil
+      and (stored == nil or stored.value == nil) then
       return "limit", case.limitReason
    end
 
@@ -729,6 +791,7 @@ local function runBlocks(ctx, cases)
 
    failed = failed + runBlock(ctx, "strings", cases, { strings = true })
    failed = failed + runBlock(ctx, "rowids", cases, { rowids = true })
+   failed = failed + runBlock(ctx, "raw", cases, { raw = true })
    if oldTimeZone then
       restoreSetting(ctx, "timeZone", oldTimeZone)
    end

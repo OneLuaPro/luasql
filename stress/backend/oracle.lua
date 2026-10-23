@@ -6,7 +6,8 @@ local function sourceName(settings)
    return string.format("%s:%d/%s", settings.host, settings.port, settings.name)
 end
 
--- Case override: Oracle stores an empty string as NULL, also in CHAR.
+-- Case override: Oracle stores an empty string as NULL, also in CHAR
+-- and RAW columns.
 local emptyAsNull = {
    limitNull = true,
    limitReason = "Oracle stores an empty string as NULL",
@@ -68,14 +69,17 @@ return {
       .. " d DATE, ts TIMESTAMP(6), tstz TIMESTAMP(6) WITH TIME ZONE,"
       .. " tsltz TIMESTAMP(6) WITH LOCAL TIME ZONE, b BOOLEAN, c CLOB,"
       .. " ns NVARCHAR2(2000), nc NCLOB, bf BINARY_FLOAT,"
-      .. " bd BINARY_DOUBLE, ch CHAR(10 CHAR), nch NCHAR(10), r UROWID)",
+      .. " bd BINARY_DOUBLE, ch CHAR(10 CHAR), nch NCHAR(10), r UROWID,"
+      .. " rw RAW(2000))",
    typesTableDrop = "DROP TABLE IF EXISTS luastress_types PURGE",
    typesColumns = {
       "n", "s", "d", "ts", "tstz", "tsltz", "b", "c", "ns", "nc",
-      "bf", "bd", "ch", "nch", "r",
+      "bf", "bd", "ch", "nch", "r", "rw",
    },
    typesInsert = "INSERT INTO luastress_types (id, %s) VALUES (:1, :2)",
    typesSelect = "SELECT %s FROM luastress_types WHERE id = :1",
+   -- %s is a RAW column; its bytes as hex digits.
+   rawAsHex = "RAWTOHEX(%s)",
    -- ROWID cases; %s is the table. Rows of the index organized table
    -- have logical ROWIDs.
    typesTable = "luastress_types",
@@ -122,6 +126,7 @@ return {
       },
       emptyString = emptyAsNull,
       charEmpty = emptyAsNull,
+      rawEmpty = emptyAsNull,
    },
    -- Session settings the data type scenario changes and restores.
    sessionSettings = {
