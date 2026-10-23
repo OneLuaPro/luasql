@@ -71,6 +71,7 @@ typedef union {
 	char   *s;
 	double  d;
 	ub1     b;
+	float   f;
         OCINumber num;
 #ifdef SQLT_DAT
 	OCIDate date;
@@ -358,6 +359,20 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 			cur->has_lobs = 1;
 			break;
 		}
+#ifdef SQLT_IBFLOAT
+		case SQLT_IBFLOAT:
+			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
+				cur->errhp, (ub4)i, &(col->val.f), sizeof(col->val.f),
+				SQLT_BFLOAT, (dvoid *)&(col->null), (ub2 *)0,
+				(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
+			break;
+		case SQLT_IBDOUBLE:
+			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
+				cur->errhp, (ub4)i, &(col->val.d), sizeof(col->val.d),
+				SQLT_BDOUBLE, (dvoid *)&(col->null), (ub2 *)0,
+				(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
+			break;
+#endif
 #ifdef SQLT_BOL
 		case SQLT_BOL:
 			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
@@ -646,6 +661,14 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			env = getenvfromconn (L, conn);
 			return read_clob (L, cur, conn, env, (OCILobLocator *)col->val.s);
 		}
+#ifdef SQLT_IBFLOAT
+		case SQLT_IBFLOAT:
+			lua_pushnumber (L, (lua_Number)col->val.f);
+			break;
+		case SQLT_IBDOUBLE:
+			lua_pushnumber (L, (lua_Number)col->val.d);
+			break;
+#endif
 #ifdef SQLT_BOL
 		case SQLT_BOL:
 			lua_pushboolean (L, col->val.b != 0);
@@ -898,6 +921,11 @@ static char *getcolumntype (column_data *col) {
 			return "number";
 		case SQLT_CLOB:
 			return "string";
+#ifdef SQLT_IBFLOAT
+		case SQLT_IBFLOAT:
+		case SQLT_IBDOUBLE:
+			return "number";
+#endif
 #ifdef SQLT_BOL
 		case SQLT_BOL:
 			return "boolean";
