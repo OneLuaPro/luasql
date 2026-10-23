@@ -29,6 +29,9 @@
 #define LUASQL_CONNECTION_OCI8 "Oracle connection"
 #define LUASQL_CURSOR_OCI8 "Oracle cursor"
 #define LUASQL_STATEMENT_OCI8 "Oracle statement"
+/* client character set is AL32UTF8 (see create_environment):
+   at most 4 bytes per character */
+#define CLIENT_MAX_CHAR_BYTES 4
 
 typedef struct {
 	short         closed;
@@ -247,26 +250,23 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 		case SQLT_VCS:
 		case SQLT_AFC:
 		case SQLT_AVC:
-			ASSERT (L, OCIAttrGet (param, OCI_DTYPE_PARAM,
-				(dvoid *)&(col->max), 0, OCI_ATTR_DATA_SIZE,
-				cur->errhp), cur->errhp);
-			col->val.s = calloc (col->max + 1, sizeof(col->val.s));
-			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
-				cur->errhp, (ub4)i, col->val.s, col->max+1,
-				SQLT_CHR, (dvoid *)&(col->null), &(col->rlen),
-				(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
-			break;
 		case SQLT_CHR:
-		case SQLT_STR:
+		case SQLT_STR: {
+			/* OCI_ATTR_DATA_SIZE counts bytes in the server's (national)
+			   character set, so a value has at most that many characters;
+			   each needs at most CLIENT_MAX_CHAR_BYTES on the client */
+			sb4 bufsize;
 			ASSERT (L, OCIAttrGet (param, OCI_DTYPE_PARAM,
 				(dvoid *)&(col->max), 0, OCI_ATTR_DATA_SIZE,
 				cur->errhp), cur->errhp);
-				col->val.s = calloc (col->max * 2 + 1, sizeof(col->val.s));
+			bufsize = (sb4)col->max * CLIENT_MAX_CHAR_BYTES;
+			col->val.s = calloc (bufsize + 1, 1);
 			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
-				cur->errhp, (ub4)i, col->val.s, col->max * 2 + 1,
+				cur->errhp, (ub4)i, col->val.s, bufsize,
 				SQLT_CHR, (dvoid *)&(col->null), &(col->rlen),
 				(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
 			break;
+		}
 #ifdef SQLT_DAT
 		case SQLT_DAT:
 			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
@@ -450,7 +450,7 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 ** (see OCIEnvNlsCreate in create_environment), at most 4 bytes per character.
 */
 #define LOB_CHUNK_CHARS 16384
-#define LOB_CHUNK_BYTES ((size_t)LOB_CHUNK_CHARS * 4)
+#define LOB_CHUNK_BYTES ((size_t)LOB_CHUNK_CHARS * CLIENT_MAX_CHAR_BYTES)
 
 /*
 ** Read a whole CLOB/NCLOB and push it as one Lua string.
