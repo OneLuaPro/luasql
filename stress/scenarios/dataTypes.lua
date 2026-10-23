@@ -11,6 +11,9 @@
 --                             "float"), if the driver has it
 --   strings                   multibyte, length limit, empty, \0,
 --                             national character set, fixed length
+--   rowids                    ROWIDs read as strings must find their
+--                             row again, also logical ROWIDs and
+--                             ROWIDs stored in a column
 --   clob                      last: a failed LOB read may leave the
 --                             session unusable
 --
@@ -66,7 +69,9 @@ local zeroClob = "ab\0cd" .. asciiClob
 -- expectError, errorAllowed (an error is fine, a wrong value is not),
 -- needsTimeZone, checkServer (also check the value stored on the
 -- server), literal (SQL literal written instead of param), fetchMode
--- ("a", "na" or "multi"), exactRead (exact in float mode, too).
+-- ("a", "na" or "multi"), exactRead (exact in float mode, too),
+-- needs (backend keys the case needs), rowid (ROWID case, see
+-- runRowidCase; with iot and store).
 -- Backend overrides may add limitReason with limitNull (NULL read back)
 -- or limitError (Lua pattern of an expected write error).
 local function makeCases(t)
@@ -221,6 +226,18 @@ local function makeCases(t)
        "\u{E4}" .. string.rep(" ", 9))
    add("ncharNull", "strings", "nch", t.null, nil, null)
 
+   local rowidNeeds = { "rowidSelect", "rowidLookup" }
+   local iotNeeds = { "rowidSelect", "rowidLookup", "iotTableCreate" }
+   add("rowid", "rowids", nil, nil, nil,
+       { rowid = true, needs = rowidNeeds })
+   add("rowidLogical", "rowids", nil, nil, nil,
+       { rowid = true, iot = true, needs = iotNeeds })
+   add("urowid", "rowids", "r", nil, nil,
+       { rowid = true, store = true, needs = rowidNeeds })
+   add("urowidLogical", "rowids", "r", nil, nil,
+       { rowid = true, iot = true, store = true, needs = iotNeeds })
+   add("urowidNull", "rowids", "r", t.null, nil, null)
+
    add("clobAscii", "clob", "c", { asciiClob, t.string }, asciiClob)
    add("clobNull", "clob", "c", t.null, nil, null)
    add("clobUtf8", "clob", "c", { utf8Clob, t.string }, utf8Clob)
@@ -304,6 +321,18 @@ local function closeStatement(stmt)
    end
 end
 
+-- Executes a statement with parameters.
+-- Returns true, or nil and an error message.
+local function executeStatement(ctx, sql, params)
+   local stmt = prepare(ctx.testConn, sql)
+   local result, err = stmt:execute(params)
+   closeStatement(stmt)
+   if result == nil then
+      return nil, tostring(err)
+   end
+   return true
+end
+
 -- Writes the value of a case into row id.
 -- Returns true, or nil and an error message.
 local function writeValue(ctx, id, case)
@@ -316,13 +345,7 @@ local function writeValue(ctx, id, case)
       sql = string.format(ctx.backend.typesInsert, case.column)
       params = { { id, ctx.types.int }, case.param }
    end
-   local stmt = prepare(ctx.testConn, sql)
-   local result, err = stmt:execute(params)
-   closeStatement(stmt)
-   if result == nil then
-      return nil, tostring(err)
-   end
-   return true
+   return executeStatement(ctx, sql, params)
 end
 
 -- Fetches the only row of a cursor with the given fetch mode (nil for
@@ -355,21 +378,89 @@ local function fetchValue(cur, fetchMode, name)
    return true, row[1]
 end
 
--- Reads an expression of row id. Returns true and the value (nil for
--- NULL), or nil and an error message.
-local function readValue(ctx, id, expression, fetchMode)
-   local stmt = prepare(ctx.testConn,
-      string.format(ctx.backend.typesSelect, expression))
-   local cur, err = stmt:execute({ { id, ctx.types.int } })
+-- Runs a query with parameters and fetches the only row (see
+-- fetchValue). Returns true and the value, or nil and an error message.
+local function queryValue(ctx, sql, params, fetchMode, name)
+   local stmt = prepare(ctx.testConn, sql)
+   local cur, err = stmt:execute(params)
    if not cur then
       closeStatement(stmt)
       return nil, tostring(err)
    end
-   local ok, value = fetchValue(cur, fetchMode, expression)
+   local ok, value = fetchValue(cur, fetchMode, name)
    -- Closes a cursor that is still open; the result does not matter.
    cur:close()
    closeStatement(stmt)
    return ok, value
+end
+
+-- Reads an expression of row id. Returns true and the value (nil for
+-- NULL), or nil and an error message.
+local function readValue(ctx, id, expression, fetchMode)
+   local sql = string.format(ctx.backend.typesSelect, expression)
+   return queryValue(ctx, sql, { { id, ctx.types.int } }, fetchMode,
+                     expression)
+end
+
+-- Runs a ROWID case: inserts row id, reads its ROWID and finds the row
+-- again with it. With case.iot the row goes into the index organized
+-- table (logical ROWID); with case.store the ROWID is written into the
+-- column of the case first and read back from there.
+-- Returns "pass", or "fail" and a message.
+local function runRowidCase(ctx, id, case)
+   local backend = ctx.backend
+   local int, str = ctx.types.int, ctx.types.string
+   local tableName = case.iot and backend.iotTable or backend.typesTable
+   local ok, err
+   if case.iot then
+      ok, err = executeStatement(ctx, backend.iotInsert, { { id, int } })
+   else
+      ok, err = executeStatement(ctx, string.format(backend.typesInsert,
+         "n"), { { id, int }, { 1, int } })
+   end
+   if not ok then
+      return "fail", "insert: " .. err
+   end
+   local rowid
+   ok, rowid = queryValue(ctx, string.format(backend.rowidSelect,
+      tableName), { { id, int } })
+   if not ok then
+      return "fail", "read ROWID: " .. rowid
+   end
+   if type(rowid) ~= "string" or rowid == "" then
+      return "fail", "ROWID read as " .. describe(rowid)
+   end
+
+   if case.store then
+      ctx.nextId = ctx.nextId + 1
+      local storeId = ctx.nextId
+      ok, err = executeStatement(ctx, string.format(backend.typesInsert,
+         case.column), { { storeId, int }, { rowid, str } })
+      if not ok then
+         return "fail", "write: " .. err
+      end
+      local stored
+      ok, stored = readValue(ctx, storeId, case.column)
+      if not ok then
+         return "fail", "read: " .. stored
+      end
+      if stored ~= rowid then
+         return "fail", string.format("wrote %s, read back %s", rowid,
+                                      describe(stored))
+      end
+   end
+
+   local found
+   ok, found = queryValue(ctx, string.format(backend.rowidLookup,
+      tableName), { { rowid, str } })
+   if not ok then
+      return "fail", "find by ROWID " .. rowid .. ": " .. found
+   end
+   if found ~= id then
+      return "fail", string.format("ROWID %s finds %s, not row %d", rowid,
+                                   describe(found), id)
+   end
+   return "pass"
 end
 
 -- Returns the reason if the stored value of a number bind is the
@@ -396,6 +487,9 @@ end
 
 -- Runs one case. Returns "pass", or "limit" or "fail" and a message.
 local function runCase(ctx, id, case)
+   if case.rowid then
+      return runRowidCase(ctx, id, case)
+   end
    local ok, err = writeValue(ctx, id, case)
    if not ok then
       if case.expectError or case.errorAllowed then
@@ -493,8 +587,13 @@ local function skipReason(ctx, case)
    if case.skip then
       return case.skip
    end
-   if not ctx.columns[case.column] then
+   if case.column and not ctx.columns[case.column] then
       return "backend has no column " .. case.column
+   end
+   for _, key in ipairs(case.needs or {}) do
+      if not ctx.backend[key] then
+         return "backend has no " .. key
+      end
    end
    if case.needsTimeZone and not ctx.timeZoneSet then
       return "session time zone not set"
@@ -629,6 +728,7 @@ local function runBlocks(ctx, cases)
    end
 
    failed = failed + runBlock(ctx, "strings", cases, { strings = true })
+   failed = failed + runBlock(ctx, "rowids", cases, { rowids = true })
    if oldTimeZone then
       restoreSetting(ctx, "timeZone", oldTimeZone)
    end
@@ -675,18 +775,30 @@ function dataTypes.run(ctx)
       end
    end
 
-   -- A table left behind by an aborted run is dropped first.
-   dbutil.exec(conn, backend.typesTableDrop)
-   local ok, err = dbutil.exec(conn, backend.typesTableCreate)
-   if not ok then
-      return nil, "creating test table: " .. err
+   -- Tables left behind by an aborted run are dropped first.
+   local tables = { { backend.typesTableCreate, backend.typesTableDrop } }
+   if backend.iotTableCreate then
+      tables[2] = { backend.iotTableCreate, backend.iotTableDrop }
+   end
+   local function dropTables()
+      for _, statements in ipairs(tables) do
+         local ok, err = dbutil.exec(conn, statements[2])
+         if not ok then
+            report.print("  warning: ", "cannot drop test table: " .. err)
+         end
+      end
+   end
+   for _, statements in ipairs(tables) do
+      dbutil.exec(conn, statements[2])
+      local ok, err = dbutil.exec(conn, statements[1])
+      if not ok then
+         dropTables()
+         return nil, "creating test table: " .. err
+      end
    end
 
    local runOk, result = pcall(runBlocks, typesCtx, cases)
-   ok, err = dbutil.exec(conn, backend.typesTableDrop)
-   if not ok then
-      report.print("  warning: ", "cannot drop test table: " .. err)
-   end
+   dropTables()
 
    if not runOk then
       return nil, tostring(result)
