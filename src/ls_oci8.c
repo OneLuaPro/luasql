@@ -32,6 +32,8 @@
 /* client character set is AL32UTF8 (see create_environment):
    at most 4 bytes per character */
 #define CLIENT_MAX_CHAR_BYTES 4
+/* internal type code of UROWID columns; ocidfn.h has no SQLT_ name for it */
+#define OCI8_UROWID 208
 
 typedef struct {
 	short         closed;
@@ -252,6 +254,9 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 		case SQLT_AFC:
 		case SQLT_AVC:
 		case SQLT_CHR:
+		case SQLT_RID:
+		case SQLT_RDD:
+		case OCI8_UROWID:
 		case SQLT_STR: {
 			/* OCI_ATTR_DATA_SIZE counts bytes in the server's (national)
 			   character set, so a value has at most that many characters;
@@ -420,6 +425,9 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 		case SQLT_NUM:
 			break;
 		case SQLT_CHR:
+		case SQLT_RID:
+		case SQLT_RDD:
+		case OCI8_UROWID:
 		case SQLT_STR:
 		case SQLT_VCS:
 		case SQLT_AFC:
@@ -463,6 +471,14 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 ** characters and gets a buffer that holds them in any case, so Oracle never
 ** has to switch to polling mode. The client character set is AL32UTF8
 ** (see OCIEnvNlsCreate in create_environment), at most 4 bytes per character.
+**
+** The value of LOB_CHUNK_CHARS does not affect correctness, only performance:
+** each OCILobRead2 call is one round trip to the server, and the result
+** buffer grows in steps of at least LOB_CHUNK_BYTES. 16384 characters
+** (64 KiB per step) is a compromise between few round trips for large LOBs
+** (a 75000 character CLOB needs 5 calls) and little overallocation for short
+** ones. Oracle recommends multiples of OCILobGetChunkSize for best
+** performance; this has not been measured here and is not used.
 */
 #define LOB_CHUNK_CHARS 16384
 #define LOB_CHUNK_BYTES ((size_t)LOB_CHUNK_CHARS * CLIENT_MAX_CHAR_BYTES)
@@ -609,6 +625,9 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			lua_pushnumber (L, col->val.d);
 			break;
 		case SQLT_CHR:
+		case SQLT_RID:
+		case SQLT_RDD:
+		case OCI8_UROWID:
 		case SQLT_STR:
 		case SQLT_VCS:
 		case SQLT_AFC:
@@ -895,6 +914,9 @@ static int cur_getcolnames (lua_State *L) {
 static char *getcolumntype (column_data *col) {
 	switch (col->type) {
 		case SQLT_CHR:
+		case SQLT_RID:
+		case SQLT_RDD:
+		case OCI8_UROWID:
 		case SQLT_STR:
 		case SQLT_VCS:
 		case SQLT_AFC:
