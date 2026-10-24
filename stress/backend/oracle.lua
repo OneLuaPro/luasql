@@ -102,6 +102,42 @@ return {
       "bf", "bd", "ch", "nch", "r", "rw", "bl", "iym", "ids", "iym4",
       "ids3",
    },
+   -- Column types as luasql.oci8 reports them (cur:getcoltypes()); the
+   -- names are driver specific. rowid is the ROWID pseudo column.
+   columnTypes = {
+      n = "number", s = "string", d = "date", ts = "timestamp",
+      tstz = "timestamp", tsltz = "timestamp", b = "boolean",
+      c = "string", ns = "string", nc = "string", bf = "number",
+      bd = "number", ch = "string", nch = "string", r = "string",
+      rw = "binary", bl = "binary", iym = "interval", ids = "interval",
+      iym4 = "interval", ids3 = "interval", rowid = "string",
+   },
+   -- Column types luasql.oci8 does not support on purpose: reading such
+   -- a column must fail with an error matching errorPattern. Each one
+   -- has its own table, created and dropped with the test table.
+   unsupportedTypes = {
+      long = {
+         create = "CREATE TABLE luastress_long (id NUMBER PRIMARY KEY,"
+            .. " l LONG)",
+         drop = "DROP TABLE IF EXISTS luastress_long PURGE",
+         insert = "INSERT INTO luastress_long (id, l) VALUES (:1, 'x')",
+         select = "SELECT l FROM luastress_long WHERE id = :1",
+         errorPattern = "unsupported column type",
+         reason = "LONG is not supported by luasql.oci8 (deprecated"
+            .. " type); use CLOB",
+      },
+      longRaw = {
+         create = "CREATE TABLE luastress_longraw (id NUMBER PRIMARY KEY,"
+            .. " lr LONG RAW)",
+         drop = "DROP TABLE IF EXISTS luastress_longraw PURGE",
+         insert = "INSERT INTO luastress_longraw (id, lr)"
+            .. " VALUES (:1, HEXTORAW('00FF'))",
+         select = "SELECT lr FROM luastress_longraw WHERE id = :1",
+         errorPattern = "unsupported column type",
+         reason = "LONG RAW is not supported by luasql.oci8 (deprecated"
+            .. " type); use BLOB",
+      },
+   },
    typesInsert = "INSERT INTO luastress_types (id, %s) VALUES (:1, :2)",
    typesSelect = "SELECT %s FROM luastress_types WHERE id = :1",
    -- Interval binds: strings converted on the server; %s is the column.
@@ -171,6 +207,8 @@ return {
       emptyString = emptyAsNull,
       charEmpty = emptyAsNull,
       rawEmpty = emptyRawAsNull,
+      -- A difference of timestamps is an interval.
+      dsDifference = { columnType = "interval" },
    },
    -- Session settings the data type scenario changes and restores.
    sessionSettings = {

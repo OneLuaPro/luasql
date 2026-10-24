@@ -20,6 +20,12 @@
 --                             server
 --   clob, blob                last: a failed LOB read may leave the
 --                             session unusable
+--   unsupported               column types the driver does not support
+--                             on purpose: reading must fail cleanly; a
+--                             known limitation
+--
+-- Every read also checks the column type the driver reports
+-- (cur:getcoltypes()) against backend.columnTypes, if given.
 --
 -- Number cases also read the stored value as text on the server and
 -- convert it with tonumber. That tells whether a wrong result was lost
@@ -81,7 +87,8 @@ local zeroClob = "ab\0cd" .. asciiClob
 -- (backend key of a statement that writes row :1, with writeParams; %s
 -- is the column), checkText (backend key of an expression that gives
 -- the text of the value on the server; %s is the column), readExpression
--- (read instead of the column).
+-- (read instead of the column), columnType (expected column type, for a
+-- readExpression), unsupported (key in backend.unsupportedTypes).
 -- Backend overrides may add limitReason with limitNull (NULL read back)
 -- or limitError (Lua pattern of an expected write error).
 local function makeCases(t)
@@ -340,6 +347,20 @@ local function makeCases(t)
    add("nclobUtf8", "clob", "nc", { utf8Clob, t.string }, utf8Clob)
    add("nclobNull", "clob", "nc", t.null, nil, null)
    add("clobLarge", "clob", "c", { largeClob, t.string }, largeClob)
+   -- An emoji takes two UTF-16 code units, which LOB lengths and offsets
+   -- count. 40001 code units cross the driver's read pieces of 16384
+   -- several times; with the leading "a" each piece border falls into a
+   -- pair, without it between two pairs.
+   local pairsText = string.rep("\u{1F600}", 20000)
+   add("clobPairSplit", "clob", "c", { "a" .. pairsText, t.string },
+       "a" .. pairsText)
+   add("clobPairs", "clob", "c", { pairsText, t.string }, pairsText)
+   add("nclobPairSplit", "clob", "nc", { "a" .. pairsText, t.string },
+       "a" .. pairsText)
+   add("nclobPairs", "clob", "nc", { pairsText, t.string }, pairsText)
+
+   add("long", "unsupported", nil, nil, nil, { unsupported = "long" })
+   add("longRaw", "unsupported", nil, nil, nil, { unsupported = "longRaw" })
    return list
 end
 
@@ -491,6 +512,7 @@ end
 
 -- Runs a query with parameters and fetches the only row (see
 -- fetchValue). Returns true and the value, or nil and an error message.
+-- The third result is the column type the driver reports.
 local function queryValue(ctx, sql, params, fetchMode, name)
    local stmt = prepare(ctx.testConn, sql)
    local cur, err = stmt:execute(params)
@@ -498,15 +520,27 @@ local function queryValue(ctx, sql, params, fetchMode, name)
       closeStatement(stmt)
       return nil, tostring(err)
    end
+   local columnTypes = cur.getcoltypes and cur:getcoltypes()
    local ok, value = fetchValue(cur, fetchMode, name)
    -- Closes a cursor that is still open; the result does not matter.
    cur:close()
    closeStatement(stmt)
-   return ok, value
+   return ok, value, columnTypes and columnTypes[1]
+end
+
+-- Returns a message if the reported column type is not the expected
+-- one, nil if it matches or nothing is expected.
+local function columnTypeProblem(expected, actual)
+   if expected == nil or actual == expected then
+      return nil
+   end
+   return string.format("column type %s, expected %s", tostring(actual),
+                        expected)
 end
 
 -- Reads an expression of row id. Returns true and the value (nil for
 -- NULL), or nil and an error message.
+-- The third result is the column type the driver reports.
 local function readValue(ctx, id, expression, fetchMode)
    local sql = string.format(ctx.backend.typesSelect, expression)
    return queryValue(ctx, sql, { { id, ctx.types.int } }, fetchMode,
@@ -532,14 +566,19 @@ local function runRowidCase(ctx, id, case)
    if not ok then
       return "fail", "insert: " .. err
    end
-   local rowid
-   ok, rowid = queryValue(ctx, string.format(backend.rowidSelect,
+   local columnTypes = backend.columnTypes or {}
+   local rowid, rowidType
+   ok, rowid, rowidType = queryValue(ctx, string.format(backend.rowidSelect,
       tableName), { { id, int } })
    if not ok then
       return "fail", "read ROWID: " .. rowid
    end
    if type(rowid) ~= "string" or rowid == "" then
       return "fail", "ROWID read as " .. describe(rowid)
+   end
+   local problem = columnTypeProblem(columnTypes.rowid, rowidType)
+   if problem then
+      return "fail", "ROWID: " .. problem
    end
 
    if case.store then
@@ -550,10 +589,14 @@ local function runRowidCase(ctx, id, case)
       if not ok then
          return "fail", "write: " .. err
       end
-      local stored
-      ok, stored = readValue(ctx, storeId, case.column)
+      local stored, storedType
+      ok, stored, storedType = readValue(ctx, storeId, case.column)
       if not ok then
          return "fail", "read: " .. stored
+      end
+      problem = columnTypeProblem(columnTypes[case.column], storedType)
+      if problem then
+         return "fail", problem
       end
       if stored ~= rowid then
          return "fail", string.format("wrote %s, read back %s", rowid,
@@ -596,10 +639,34 @@ local function numberBindLimit(ctx, case, stored, expected)
    return string.format("%s; server has %s", reason, stored.text)
 end
 
+-- Runs a case for a column type the driver does not support on purpose:
+-- reading must fail with the expected error, not return a value.
+-- Returns "limit" and the reason, or "fail" and a message.
+local function runUnsupportedCase(ctx, id, case)
+   local spec = ctx.backend.unsupportedTypes[case.unsupported]
+   local params = { { id, ctx.types.int } }
+   local ok, err = executeStatement(ctx, spec.insert, params)
+   if not ok then
+      return "fail", "insert: " .. err
+   end
+   local value
+   ok, value = queryValue(ctx, spec.select, params)
+   if ok then
+      return "fail", "read " .. describe(value) .. ", expected an error"
+   end
+   if not value:find(spec.errorPattern, 1, true) then
+      return "fail", "unexpected error: " .. value
+   end
+   return "limit", spec.reason
+end
+
 -- Runs one case. Returns "pass", or "limit" or "fail" and a message.
 local function runCase(ctx, id, case)
    if case.rowid then
       return runRowidCase(ctx, id, case)
+   end
+   if case.unsupported then
+      return runUnsupportedCase(ctx, id, case)
    end
    local ok, err = writeValue(ctx, id, case)
    if not ok then
@@ -617,9 +684,18 @@ local function runCase(ctx, id, case)
 
    local value
    local expression = case.readExpression or case.column
-   ok, value = readValue(ctx, id, expression, case.fetchMode)
+   local columnType
+   ok, value, columnType = readValue(ctx, id, expression, case.fetchMode)
    if not ok then
       return "fail", "read: " .. value
+   end
+   local expectedType = case.columnType
+   if expectedType == nil and case.readExpression == nil then
+      expectedType = (ctx.backend.columnTypes or {})[case.column]
+   end
+   local problem = columnTypeProblem(expectedType, columnType)
+   if problem then
+      return "fail", problem
    end
 
    local stored
@@ -735,6 +811,10 @@ local function skipReason(ctx, case)
       if not ctx.backend[key] then
          return "backend has no " .. key
       end
+   end
+   if case.unsupported
+      and not (ctx.backend.unsupportedTypes or {})[case.unsupported] then
+      return "backend has no unsupported type " .. case.unsupported
    end
    if case.needsTimeZone and not ctx.timeZoneSet then
       return "session time zone not set"
@@ -876,6 +956,8 @@ local function runBlocks(ctx, cases)
    end
    failed = failed + runBlock(ctx, "clob", cases, { clob = true })
    failed = failed + runBlock(ctx, "blob", cases, { blob = true })
+   failed = failed + runBlock(ctx, "unsupported", cases,
+                              { unsupported = true })
    return failed
 end
 
@@ -921,7 +1003,10 @@ function dataTypes.run(ctx)
    -- Tables left behind by an aborted run are dropped first.
    local tables = { { backend.typesTableCreate, backend.typesTableDrop } }
    if backend.iotTableCreate then
-      tables[2] = { backend.iotTableCreate, backend.iotTableDrop }
+      tables[#tables + 1] = { backend.iotTableCreate, backend.iotTableDrop }
+   end
+   for _, spec in pairs(backend.unsupportedTypes or {}) do
+      tables[#tables + 1] = { spec.create, spec.drop }
    end
    local function dropTables()
       for _, statements in ipairs(tables) do
