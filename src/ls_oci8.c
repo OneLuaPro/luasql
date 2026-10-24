@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
 #ifdef _WIN32
 #define strdup _strdup
@@ -1499,6 +1500,22 @@ static int stmt_bind (lua_State *L, stmt_data *stmt, int num_params, int is_name
                     bind_ptr = &bind_values[param_idx].d;
                     bind_size = sizeof(double);
                     bind_type = SQLT_FLT;
+                    if (isnan(bind_values[param_idx].d)
+                            || isinf(bind_values[param_idx].d)) {
+#ifdef SQLT_BDOUBLE
+                        /* SQLT_FLT is converted to NUMBER on the client,
+                           which stores NaN as an invalid NUMBER; SQLT_BDOUBLE
+                           carries NaN and infinity, and the server converts
+                           them: exact for BINARY_DOUBLE, ORA-03087 (NaN) or
+                           ORA-01426 (infinity) for NUMBER */
+                        bind_type = SQLT_BDOUBLE;
+#else
+                        lua_pop(L, 1); /* pop value from lua_rawgeti(L, -1, 1) */
+                        lua_pushnil(L);
+                        lua_pushstring(L, LUASQL_PREFIX"NaN and infinity cannot be bound as number");
+                        return 2;
+#endif
+                    }
                     break;
                 case LUASQL_TYPE_BOOLEAN:
                     bind_values[param_idx].s = lua_toboolean(L, -1) ? "1" : "0";
