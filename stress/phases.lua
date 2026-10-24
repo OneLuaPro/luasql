@@ -124,7 +124,8 @@ end
 -- the run, e.g. a scenario. The note tells cursors the DBMS keeps (e.g.
 -- recursive SQL) from cursors left open by the driver. Only cursors of
 -- a type starting with "OPEN" are listed, those count as open; cached
--- ones are only counted.
+-- ones are only counted. Open cursors of the first snapshot that are no
+-- longer open are listed as well, so the list adds up to the counter.
 function phases.reportGrowth(ctx, before, after, what)
    local grown = {}
    for i, counter in ipairs(serverCounters(ctx)) do
@@ -143,13 +144,20 @@ function phases.reportGrowth(ctx, before, after, what)
    for _, entry in ipairs(before.cursors) do
       seen[entry] = (seen[entry] or 0) + 1
    end
+   -- The sync query of the snapshot is the last statement on the test
+   -- connection, its cursor is closed with the next round trip.
+   local syncQuery = "OPEN: " .. tostring(ctx.backend.singleRowQuery)
+   local function show(entry)
+      report.print("        ", entry .. (entry == syncQuery
+                      and " (sync query of this check)" or ""))
+   end
    local open, cached = 0, 0
    for _, entry in ipairs(after.cursors) do
       if (seen[entry] or 0) > 0 then
          seen[entry] = seen[entry] - 1
       elseif entry:find("^OPEN") then
          open = open + 1
-         report.print("        ", entry)
+         show(entry)
       else
          cached = cached + 1
       end
@@ -159,6 +167,20 @@ function phases.reportGrowth(ctx, before, after, what)
    end
    if cached > 0 then
       print(string.format("        (plus %d cached, not counted)", cached))
+   end
+   -- Entries of the first snapshot left in 'seen' are gone now.
+   local gone = {}
+   for _, entry in ipairs(before.cursors) do
+      if (seen[entry] or 0) > 0 and entry:find("^OPEN") then
+         seen[entry] = seen[entry] - 1
+         gone[#gone + 1] = entry
+      end
+   end
+   if #gone > 0 then
+      print("        no longer open:")
+      for _, entry in ipairs(gone) do
+         show(entry)
+      end
    end
 end
 

@@ -134,12 +134,6 @@ return {
          .. " transaction (luasql.oci8)",
       ddlCommits = "Oracle commits an open transaction implicitly at"
          .. " DDL, also with autocommit off",
-      closeCommits = "Oracle commits an open transaction when the session"
-         .. " ends; conn:close() does not roll back",
-      gcCommits = "Oracle commits an open transaction when the session"
-         .. " ends; closing by the GC does not roll back",
-      rowCountFloat = "row counts are floats (lua_pushnumber), not"
-         .. " integers",
    },
    typesTableCreate = "CREATE TABLE luastress_types ("
       .. "id NUMBER PRIMARY KEY, n NUMBER, s VARCHAR2(4000 BYTE),"

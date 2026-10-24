@@ -22,15 +22,16 @@
 --   rowCounts            row counts of INSERT, UPDATE, DELETE, also 0
 --   rowCountType         row counts are integers
 --   plsqlAutocommit      a PL/SQL block with DML is committed
---   closeOpen            conn:close() with an open transaction
---   gcOpen               the GC closes a connection with an open
---                        transaction
+--   closeOpen            conn:close() with an open transaction rolls it
+--                        back
+--   gcOpen               so does closing by the GC
+--   closeVariable        and closing a to-be-closed variable
 --
 -- "Another session" is the admin connection; cases that need it are
--- skipped without one. closeOpen and gcOpen open a connection of their
--- own. Behavior of the DBMS or the driver that differs from what a user
--- would expect counts as a known limitation with its reason
--- (backend.transactionLimits).
+-- skipped without one. closeOpen, gcOpen and closeVariable open a
+-- connection of their own. Behavior of the DBMS or the driver that
+-- differs from what a user would expect counts as a known limitation
+-- with its reason (backend.transactionLimits).
 --
 -- Phases:
 --   insertCommit    insert, commit
@@ -332,11 +333,8 @@ local function rowCountType(ctx)
       error(fromStatement, 0)
    end
    for _, value in ipairs({ fromExecute, fromStatement }) do
-      if math.type(value) == "float" then
-         return "limit", ctx.backend.transactionLimits.rowCountFloat
-      end
-      expect(math.type(value) == "integer",
-             "row count is a " .. type(value))
+      expect(math.type(value) == "integer", "row count is a "
+                .. (math.type(value) or type(value)))
    end
 end
 
@@ -363,16 +361,19 @@ local function openWithTransaction(ctx, id)
    return conn
 end
 
--- The open transaction is either committed or rolled back when the
--- connection is closed; a commit keeps changes the user never
--- committed.
+-- Closing a connection rolls back its open transaction, so only
+-- explicitly committed changes are kept (the DBMS may commit at logoff,
+-- the driver has to roll back first).
+local function expectRolledBack(ctx, how)
+   expect(countOther(ctx, 1) == 0,
+          "open transaction committed when " .. how)
+end
+
 local function closeOpen(ctx)
    local conn = openWithTransaction(ctx, 1)
    local ok, err = conn:close()
    check(ok, err, "close connection")
-   if countOther(ctx, 1) == 1 then
-      return "limit", ctx.backend.transactionLimits.closeCommits
-   end
+   expectRolledBack(ctx, "closing the connection")
 end
 
 -- Leaves the connection to the GC; a separate function, so no stack
@@ -385,9 +386,18 @@ local function gcOpen(ctx)
    dropWithTransaction(ctx, 1)
    collectgarbage("collect")
    collectgarbage("collect")
-   if countOther(ctx, 1) == 1 then
-      return "limit", ctx.backend.transactionLimits.gcCommits
-   end
+   expectRolledBack(ctx, "the GC closed the connection")
+end
+
+-- Leaves the scope of a to-be-closed variable holding the connection.
+local function closeAtScopeEnd(ctx, id)
+   local conn <close> = openWithTransaction(ctx, id)
+   expect(conn ~= nil, "no connection")
+end
+
+local function closeVariable(ctx)
+   closeAtScopeEnd(ctx, 1)
+   expectRolledBack(ctx, "a to-be-closed variable closed the connection")
 end
 
 local caseList = {
@@ -411,6 +421,8 @@ local caseList = {
    { name = "closeOpen", run = closeOpen, needsAdmin = true,
      needsConnect = true },
    { name = "gcOpen", run = gcOpen, needsAdmin = true,
+     needsConnect = true },
+   { name = "closeVariable", run = closeVariable, needsAdmin = true,
      needsConnect = true },
 }
 
