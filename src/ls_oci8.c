@@ -726,10 +726,18 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			break;
 #ifdef SQLT_DAT
 		case SQLT_DAT: {
+			/* YYYY drops the sign of BC years, SYYYY adds a blank to AD
+			   years, so SYYYY is used for BC years only */
 			text buf[65];
 			ub4 buflen = sizeof(buf);
+			sb2 year;
+			ub1 month, day;
+			const char *fmt;
+			OCIDateGetDate (&(col->val.date), &year, &month, &day);
+			fmt = (year < 0) ? "SYYYY-MM-DD HH24:MI:SS"
+			                 : "YYYY-MM-DD HH24:MI:SS";
 			ASSERT (L, OCIDateToText (cur->errhp, &(col->val.date),
-			        (const oratext *)"YYYY-MM-DD HH24:MI:SS", 21, NULL, 0,
+			        (const oratext *)fmt, (ub1)strlen (fmt), NULL, 0,
 				&buflen, buf), cur->errhp);
 			lua_pushstring (L, (char *)(buf));
 			break;
@@ -751,9 +759,18 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			env = getenvfromconn (L, conn);
 			text buf[65];
 			ub4 buflen = sizeof(buf);
-			const char *fmt = (col->type == SQLT_TIMESTAMP_TZ)
-			    ? "YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM"
-			    : "YYYY-MM-DD HH24:MI:SS.FF6";
+			sb2 year = 0;
+			ub1 month, day;
+			const char *fmt;
+			/* sign only for BC years, as for DATE */
+			ASSERT (L, OCIDateTimeGetDate (env->envhp, cur->errhp,
+				col->val.datetime, &year, &month, &day), cur->errhp);
+			if (col->type == SQLT_TIMESTAMP_TZ)
+				fmt = (year < 0) ? "SYYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM"
+				                 : "YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM";
+			else
+				fmt = (year < 0) ? "SYYYY-MM-DD HH24:MI:SS.FF6"
+				                 : "YYYY-MM-DD HH24:MI:SS.FF6";
 			ASSERT (L, OCIDateTimeToText (env->envhp, cur->errhp, col->val.datetime,
 				(const oratext *)fmt, (ub1)strlen (fmt), 6, NULL, 0, &buflen, buf),
 				cur->errhp);
@@ -1517,7 +1534,9 @@ static int stmt_bind (lua_State *L, stmt_data *stmt, int num_params, int is_name
                                 env->envhp,
                                 stmt->errhp,
                                 (const oratext *)date_str, (size_t)strlen(date_str),
-                                (const oratext *)"YYYY-MM-DD HH24:MI:SS", 21,
+                                /* same form as read; fraction and time
+                                   may be left out, S takes a minus sign */
+                                (const oratext *)"SYYYY-MM-DD HH24:MI:SS.FF", 25,
                                 NULL, 0,
                                 bind_values[param_idx].datetime
                             );
@@ -1554,14 +1573,16 @@ static int stmt_bind (lua_State *L, stmt_data *stmt, int num_params, int is_name
                         sword rc = OCIDateFromText(
                             stmt->errhp,
                             (const oratext *)date_str, (ub4)strlen(date_str),
-                            (const oratext *)"YYYY-MM-DD", 10,
+                            /* same form as read; the time may be left
+                               out, S takes a minus sign */
+                            (const oratext *)"SYYYY-MM-DD HH24:MI:SS", 22,
                             NULL, 0,
                             &bind_values[param_idx].date
                         );
                         if (rc != OCI_SUCCESS) {
                             lua_pop(L, 1); /* pop value from lua_rawgeti(L, -1, 1) */
                             lua_pushnil(L);
-                            lua_pushstring(L, LUASQL_PREFIX"invalid date format, expected YYYY-MM-DD");
+                            lua_pushstring(L, LUASQL_PREFIX"invalid date format, expected YYYY-MM-DD [HH24:MI:SS]");
                             return 2;
                         }
                     }
