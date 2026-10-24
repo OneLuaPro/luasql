@@ -17,6 +17,12 @@
 --   clobRows      one statement, several temporary CLOBs per cursor
 --   blobRead      as clobRead, with temporary BLOBs
 --   blobRows      as clobRows, with temporary BLOBs
+--   jsonRead      as clobRead, with JSON objects holding the CLOBs; the
+--                 driver reads JSON through a CLOB define, which leaves
+--                 no temporary LOBs on the server (checked: also without
+--                 the driver freeing them). The phase checks that JSON
+--                 fetches do not pile up temporary LOBs or client memory,
+--                 not the release by the driver; so it has no precheck.
 --
 -- Skipped if the driver has no prepare(). A phase is skipped if the
 -- backend lacks the query it needs. A LOB phase fails as invalid if
@@ -162,6 +168,10 @@ end
 
 local function prepareBlobRowsQuery(ctx)
    return prepare(ctx.testConn, ctx.backend.blobRowsQuery)
+end
+
+local function prepareJsonQuery(ctx)
+   return prepare(ctx.testConn, ctx.backend.jsonQuery)
 end
 
 local function finishStatement(_, stmt)
@@ -325,6 +335,24 @@ local function blobRowsStep(ctx, i, stmt)
    end)
 end
 
+-- JSON objects {"t":"..."} with the values of clobReadStep; a NULL value
+-- gives {"t":null}.
+local function jsonReadStep(ctx, i, stmt)
+   local types = ctx.types
+   local pad = { utf8Text, types.string }
+   local slot = i % (#clobLengths + 1)
+   local params, expected
+   if slot == 0 then
+      params = { types.null, { 4, types.int }, pad }
+      expected = '{"t":null}'
+   else
+      local length = clobLengths[slot]
+      params = { { utf8Text, types.string }, { length, types.int }, pad }
+      expected = '{"t":"' .. utf8Text:rep(length // 4) .. '"}'
+   end
+   expectValue(fetchSingle(execute(stmt, params)), expected)
+end
+
 local phaseList = {
    { name = "prepareClose", step = prepareCloseStep },
    { name = "reuse", setup = prepareBindQuery, step = reuseStep,
@@ -346,6 +374,8 @@ local phaseList = {
    { name = "blobRows", precheck = checkTempLobs,
      setup = prepareBlobRowsQuery, step = blobRowsStep,
      finish = finishStatement, needs = "blobRowsQuery" },
+   { name = "jsonRead", setup = prepareJsonQuery, step = jsonReadStep,
+     finish = finishStatement, needs = "jsonQuery" },
 }
 
 -- ctx: tier, driver, backend, testConn, adminConn (may be nil)

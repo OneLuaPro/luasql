@@ -61,6 +61,11 @@ return {
    blobQuery = "SELECT TO_BLOB(HEXTORAW(RPAD(:1, 2 * :2, :3))) FROM dual",
    blobRowsQuery = "SELECT TO_BLOB(HEXTORAW(RPAD(:1, 2 * level * :2, :3)))"
       .. " FROM dual CONNECT BY level <= :4",
+   -- JSON object {"t":"<clobQuery value>"}, {"t":null} for a NULL :1.
+   -- Fetching it leaves no temporary LOB, so there is no tempLobChecks
+   -- entry for phase jsonRead.
+   jsonQuery = "SELECT JSON_OBJECT('t' VALUE RPAD(TO_CLOB(:1), :2, :3)"
+      .. " RETURNING JSON) FROM dual",
    -- Checked before a LOB phase: 1 if the expression of its query gives
    -- temporary LOBs, so the phase tests their release. Keys are phase
    -- names.
@@ -95,12 +100,12 @@ return {
       .. " bd BINARY_DOUBLE, ch CHAR(10 CHAR), nch NCHAR(10), r UROWID,"
       .. " rw RAW(2000), bl BLOB, iym INTERVAL YEAR TO MONTH,"
       .. " ids INTERVAL DAY TO SECOND, iym4 INTERVAL YEAR(4) TO MONTH,"
-      .. " ids3 INTERVAL DAY(3) TO SECOND(2))",
+      .. " ids3 INTERVAL DAY(3) TO SECOND(2), js JSON)",
    typesTableDrop = "DROP TABLE IF EXISTS luastress_types PURGE",
    typesColumns = {
       "n", "s", "d", "ts", "tstz", "tsltz", "b", "c", "ns", "nc",
       "bf", "bd", "ch", "nch", "r", "rw", "bl", "iym", "ids", "iym4",
-      "ids3",
+      "ids3", "js",
    },
    -- Column types as luasql.oci8 reports them (cur:getcoltypes()); the
    -- names are driver specific. rowid is the ROWID pseudo column.
@@ -110,7 +115,8 @@ return {
       c = "string", ns = "string", nc = "string", bf = "number",
       bd = "number", ch = "string", nch = "string", r = "string",
       rw = "binary", bl = "binary", iym = "interval", ids = "interval",
-      iym4 = "interval", ids3 = "interval", rowid = "string",
+      iym4 = "interval", ids3 = "interval", js = "json",
+      rowid = "string",
    },
    -- Column types luasql.oci8 does not support on purpose: reading such
    -- a column must fail with an error matching errorPattern. Each one
@@ -149,6 +155,8 @@ return {
    intervalAsText = "TO_CHAR(%s)",
    -- %s is a RAW column; its bytes as hex digits.
    rawAsHex = "RAWTOHEX(%s)",
+   -- %s is a JSON column; its compact text on the server.
+   jsonAsText = "JSON_SERIALIZE(%s RETURNING CLOB)",
    -- ROWID cases; %s is the table. Rows of the index organized table
    -- have logical ROWIDs.
    typesTable = "luastress_types",
@@ -209,6 +217,7 @@ return {
       rawEmpty = emptyRawAsNull,
       -- A difference of timestamps is an interval.
       dsDifference = { columnType = "interval" },
+      jsonEmpty = emptyAsNull,
    },
    -- Session settings the data type scenario changes and restores.
    sessionSettings = {

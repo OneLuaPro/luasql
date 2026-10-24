@@ -18,8 +18,9 @@
 --   raw                       binary data, written as hex text, read
 --                             as bytes; also checked as hex on the
 --                             server
---   clob, blob                last: a failed LOB read may leave the
---                             session unusable
+--   clob, blob, json          last: a failed LOB read may leave the
+--                             session unusable; the driver reads JSON
+--                             through a CLOB
 --   unsupported               column types the driver does not support
 --                             on purpose: reading must fail cleanly; a
 --                             known limitation
@@ -337,6 +338,39 @@ local function makeCases(t)
        string.rep("\xDE\xAD\xBE\xEF", 25000),
        { write = "blobLargeInsert", needs = { "blobLargeInsert" },
          writeParams = { { "DEADBEEF", t.string }, { 25000, t.int } } })
+
+   -- JSON: written as text, read as compact text (key order kept,
+   -- numbers normalized, \u escapes as UTF-8) and compared with the
+   -- text of the server.
+   local function json(extra)
+      extra = extra or {}
+      extra.checkText = "jsonAsText"
+      return extra
+   end
+   local jsonLong = '{"t":"' .. string.rep("x", 20000) .. '"}'
+   add("jsonCompact", "json", "js",
+       { '{"b" : 1.0, "a" : [1, 2e2, -0.5, true, null],'
+            .. ' "s" : "\\u00e4\\u20ac"}', t.string },
+       '{"b":1,"a":[1,200,-0.5,true,null],"s":"\u{E4}\u{20AC}"}', json())
+   add("jsonUtf8", "json", "js", { '{"s" : "' .. utf8Text .. '"}', t.string },
+       '{"s":"' .. utf8Text .. '"}', json())
+   add("jsonLiteral", "json", "js", nil, '{"x":[true,false]}',
+       json({ literal = "JSON('{\"x\" : [true, false]}')" }))
+   -- More than one read piece of 16384 characters.
+   add("jsonLarge", "json", "js", nil,
+       '{"t":"ab' .. string.rep("cd", 9999) .. '"}',
+       json({ literal = "JSON_OBJECT('t' VALUE RPAD(TO_CLOB('ab'), 20000,"
+                 .. " 'cd') RETURNING JSON)" }))
+   add("jsonLargeBind", "json", "js", { jsonLong, t.string }, jsonLong,
+       json())
+   add("jsonDuplicate", "json", "js", { '{"a":1,"a":2}', t.string }, nil,
+       json({ expectError = true }))
+   add("jsonInvalid", "json", "js", { '{"a":', t.string }, nil,
+       json({ expectError = true }))
+   add("jsonEmpty", "json", "js", { "", t.string }, "", json())
+   add("jsonNull", "json", "js", t.null, nil, json({ nullResult = true }))
+   add("jsonFetchNa", "json", "js", { '{"a" : 1}', t.string }, '{"a":1}',
+       json({ fetchMode = "na" }))
 
    add("clobAscii", "clob", "c", { asciiClob, t.string }, asciiClob)
    add("clobNull", "clob", "c", t.null, nil, null)
@@ -956,6 +990,7 @@ local function runBlocks(ctx, cases)
    end
    failed = failed + runBlock(ctx, "clob", cases, { clob = true })
    failed = failed + runBlock(ctx, "blob", cases, { blob = true })
+   failed = failed + runBlock(ctx, "json", cases, { json = true })
    failed = failed + runBlock(ctx, "unsupported", cases,
                               { unsupported = true })
    return failed
