@@ -540,6 +540,12 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 ** (a 75000 character CLOB needs 5 calls) and little overallocation for short
 ** ones. Oracle recommends multiples of OCILobGetChunkSize for best
 ** performance; this has not been measured here and is not used.
+**
+** For CLOB/NCLOB, Oracle counts lengths and offsets in UTF-16 code units,
+** so a surrogate pair counts as 2 and a chunk boundary can fall inside one.
+** OCILobRead2 does not split the pair, and read_lob advances by the amount
+** actually read (char_amt), not by the amount requested (tested with
+** emojis across the 16384 boundary in test_oci8.lua).
 */
 #define LOB_CHUNK_CHARS 16384
 #define LOB_CHUNK_BYTES ((size_t)LOB_CHUNK_CHARS * CLIENT_MAX_CHAR_BYTES)
