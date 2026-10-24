@@ -23,7 +23,7 @@ local tiers = { "smoke", "standard", "nightly" }
 -- Scenarios in the order they run, each one is scenarios/<name>.lua.
 local scenarioNames = {
    "cursorLifecycle", "stmtLifecycle", "errorPaths", "dataTypes",
-   "transactions",
+   "transactions", "volume",
 }
 
 -- Exit codes, to be evaluated by the orchestrator later on.
@@ -213,6 +213,7 @@ local function runScenarios(options, driver, backend, testConn, adminConn,
       local ctx = {
 	 tier = options.tier,
 	 testUser = extra.testUser,
+	 smallTablespace = extra.smallTablespace,
 	 openTestConnection = extra.openTestConnection,
 	 backend = backend,
 	 testConn = testConn,
@@ -324,6 +325,8 @@ local function run(options, handles, cleanups)
    -- credentials.
    local extra = {
       testUser = settings.test.user,
+      -- The small tablespace of the prep step, if it ran.
+      smallTablespace = settings.admin and config.tablespaceName or nil,
       openTestConnection = function()
 	 return connect(env, backend, settings.test, "extra test")
       end,

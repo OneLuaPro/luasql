@@ -92,6 +92,36 @@ return {
    -- Used by the data type scenario: test table, its columns (a case
    -- for a missing column is skipped) and statements; %s is a column
    -- name or an expression.
+   -- Used by the volume scenario.
+   volTableCreate = "CREATE TABLE luastress_vol (id NUMBER PRIMARY KEY,"
+      .. " n NUMBER, s VARCHAR2(100))",
+   volTableDrop = "DROP TABLE IF EXISTS luastress_vol PURGE",
+   volInsert = "INSERT INTO luastress_vol (id, n, s) VALUES (:1, :2, :3)",
+   volSelect = "SELECT id, n, s FROM luastress_vol ORDER BY id",
+   volCount = "SELECT COUNT(*) FROM luastress_vol",
+   volLobTableCreate = "CREATE TABLE luastress_vollob"
+      .. " (id NUMBER PRIMARY KEY, c CLOB)",
+   volLobTableDrop = "DROP TABLE IF EXISTS luastress_vollob PURGE",
+   volLobInsert = "INSERT INTO luastress_vollob (id, c) VALUES (:1, :2)",
+   volLobSelect = "SELECT id, c FROM luastress_vollob ORDER BY id",
+   -- Full tablespace cases; %s (twice) is the small tablespace. fullFill
+   -- inserts %d rows of 4000 bytes; it runs up to fullFillSteps times.
+   fullTableCreate = "CREATE TABLE luastress_full (id NUMBER,"
+      .. " s VARCHAR2(4000), c CLOB) TABLESPACE %s"
+      .. " LOB (c) STORE AS (TABLESPACE %s)",
+   fullTableDrop = "DROP TABLE IF EXISTS luastress_full PURGE",
+   fullTruncate = "TRUNCATE TABLE luastress_full",
+   fullFill = "INSERT INTO luastress_full (id, s)"
+      .. " SELECT level, RPAD('x', 4000, 'x') FROM dual CONNECT BY level <= %d",
+   fullFillRows = 500,
+   fullFillSteps = 100,
+   fullInsert = "INSERT INTO luastress_full (id, s) VALUES (:1, :2)",
+   -- A CLOB of %d characters, made on the server.
+   fullInsertLob = "INSERT INTO luastress_full (id, c)"
+      .. " VALUES (0, RPAD(TO_CLOB('x'), %d, 'x'))",
+   -- Errors of a full tablespace: ORA-01653 (table), ORA-01654 (index),
+   -- ORA-01691 (LOB segment) and relatives.
+   fullErrorPattern = "ORA%-016",
    -- Used by the transaction scenario; %d is an id. txCountOther counts
    -- in another session, its %s is the owner of the table.
    txTableCreate = "CREATE TABLE luastress_tx (id NUMBER PRIMARY KEY,"

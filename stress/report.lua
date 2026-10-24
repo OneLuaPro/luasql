@@ -15,18 +15,22 @@ local minTextWidth = 20
 -- Wraps text into lines of at most 'width' bytes. Line breaks in the
 -- text (e.g. in server error messages) become spaces, white space at the
 -- end is dropped. Breaks after "; " if that fills at least half of the
--- line, otherwise at the last space; a word longer than a line stays
--- whole. Returns a list.
+-- line, then after ", ", otherwise at the last space; a word longer than
+-- a line stays whole. Returns a list.
 local function wrap(text, width)
    text = text:gsub("[ \t]*\r?\n[ \t]*", " "):gsub("%s+$", "")
    local lines = {}
    while #text > width do
       local head = text:sub(1, width + 1)
-      -- Position of the last "; " whose ";" still fits on the line.
+      -- Position of the last "; " or ", " whose ";" or "," still fits
+      -- on the line.
       local semi = head:match("^.*();% ")
+      local comma = head:match("^.*(),% ")
       local cut
       if semi and semi >= width // 2 then
          cut = semi + 1
+      elseif comma and comma >= width // 2 then
+         cut = comma + 1
       else
          -- Position of the last space within the first width + 1 bytes.
          cut = head:match("^.*() ")
