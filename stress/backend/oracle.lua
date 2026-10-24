@@ -145,6 +145,13 @@ return {
       },
    },
    typesInsert = "INSERT INTO luastress_types (id, %s) VALUES (:1, :2)",
+   -- Several columns at once: first %s the column list, second one the
+   -- placeholders :2, :3, ...
+   typesInsertColumns = "INSERT INTO luastress_types (id, %s)"
+      .. " VALUES (:1, %s)",
+   -- Rows :1 to :2 in order; %s is the column list.
+   typesRangeSelect = "SELECT %s FROM luastress_types"
+      .. " WHERE id BETWEEN :1 AND :2 ORDER BY id",
    typesSelect = "SELECT %s FROM luastress_types WHERE id = :1",
    -- Interval binds: strings converted on the server; %s is the column.
    ymIntervalInsert = "INSERT INTO luastress_types (id, %s)"
@@ -205,19 +212,29 @@ return {
    -- Cases whose result differs from standard SQL or that hit a limit
    -- of the client library.
    typeCaseOverrides = {
-      -- A number bind goes through NUMBER, even for BINARY_DOUBLE.
-      bdoubleInfBind = {
-         limitError = "ORA%-01426",
-         limitReason = "number binds go through NUMBER (SQLT_FLT):"
-            .. " infinity overflows (ORA-01426), also for BINARY_DOUBLE"
-            .. " columns",
-      },
       emptyString = emptyAsNull,
       charEmpty = emptyAsNull,
       rawEmpty = emptyRawAsNull,
       -- A difference of timestamps is an interval.
       dsDifference = { columnType = "interval" },
       jsonEmpty = emptyAsNull,
+      -- The TIMESTAMP bind has no time zone (ORA-01830).
+      tsBindZone = {
+         limitError = "ORA%-01830",
+         limitReason = "timestamp binds have no time zone; a TIMESTAMP"
+            .. " WITH TIME ZONE value as read cannot be bound back",
+      },
+      -- Oracle has no TIME type: the string is converted by NLS.
+      timeInDate = {
+         limitError = "ORA%-01843",
+         limitReason = "luasql.type.time is bound as a string; Oracle has"
+            .. " no TIME type and converts it with NLS_DATE_FORMAT",
+      },
+      -- NUMBER cannot hold NaN; the server rejects it.
+      nanNumber = {
+         limitError = "ORA%-03087",
+         limitReason = "NUMBER has no NaN (ORA-03087)",
+      },
    },
    -- Session settings the data type scenario changes and restores.
    sessionSettings = {

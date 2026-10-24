@@ -21,6 +21,9 @@
 --   clob, blob, json          last: a failed LOB read may leave the
 --                             session unusable; the driver reads JSON
 --                             through a CLOB
+--   rows                      several rows in one cursor: changing
+--                             lengths, NULL between values, several
+--                             columns at once
 --   unsupported               column types the driver does not support
 --                             on purpose: reading must fail cleanly; a
 --                             known limitation
@@ -89,7 +92,8 @@ local zeroClob = "ab\0cd" .. asciiClob
 -- is the column), checkText (backend key of an expression that gives
 -- the text of the value on the server; %s is the column), readExpression
 -- (read instead of the column), columnType (expected column type, for a
--- readExpression), unsupported (key in backend.unsupportedTypes).
+-- readExpression), unsupported (key in backend.unsupportedTypes),
+-- columns and rows (rows case, see runRowsCase).
 -- Backend overrides may add limitReason with limitNull (NULL read back)
 -- or limitError (Lua pattern of an expected write error).
 local function makeCases(t)
@@ -145,11 +149,32 @@ local function makeCases(t)
    add("floatOverflow", "numbers", "n", { 1e200, t.number }, nil, fails)
    add("infinity", "numbers", "n", { math.huge, t.number }, math.huge,
        { errorAllowed = true })
+   add("infinityNeg", "numbers", "n", { -math.huge, t.number }, -math.huge,
+       { errorAllowed = true })
    add("numberNull", "numbers", "n", t.null, nil, null)
    add("intFetchNa", "numbers", "n", { 42, t.int }, 42,
        { fetchMode = "na" })
    add("floatFetchMulti", "numbers", "n", { 0.25, t.number }, 0.25,
        { fetchMode = "multi" })
+   -- Written as SQL literals, so the read path for 16 and 17 digits is
+   -- not hidden by the bind limit; the expected values are hex float
+   -- literals, which Lua parses exactly.
+   add("litPi", "numbers", "n", nil, 0x1.921fb54442d18p+1,
+       { literal = "3.141592653589793" })
+   add("litSum", "numbers", "n", nil, 0x1.3333333333334p-2,
+       { literal = "0.30000000000000004" })
+   add("litE", "numbers", "n", nil, -0x1.5bf0a8b145769p+1,
+       { literal = "-2.718281828459045" })
+   -- 40 digits on the server.
+   add("litThird", "numbers", "n", nil, 0x1.5555555555555p-2,
+       { literal = "1/3" })
+   -- Largest and smallest NUMBER, read in scientific notation.
+   add("litMax", "numbers", "n", nil, 0x1.7a2ecc414a03fp+418,
+       { literal = "9.999999999999999999999999999999999999999E125" })
+   add("litTiny", "numbers", "n", nil, 0x1.1bebdf578b2f4p-432,
+       { literal = "1E-130" })
+   add("nanNumber", "numbers", "n", { 0 / 0, t.number }, 0 / 0,
+       { checkServer = false })
    -- 0.1 rounded to single precision, as BINARY_FLOAT stores it.
    local float32 = string.unpack("f", string.pack("f", 0.1))
    add("bfloat", "numbers", "bf", nil, float32, native({ literal = "0.1f" }))
@@ -168,6 +193,8 @@ local function makeCases(t)
        native())
    add("bdoubleInfBind", "numbers", "bd", { math.huge, t.number },
        math.huge, native())
+   add("bdoubleNegInfBind", "numbers", "bd", { -math.huge, t.number },
+       -math.huge, native())
    add("bdoubleNanBind", "numbers", "bd", { 0 / 0, t.number }, 0 / 0,
        native())
    add("bdoubleNull", "numbers", "bd", t.null, nil,
@@ -198,6 +225,39 @@ local function makeCases(t)
        { "2026-10-19 13:45:30", t.timestamp },
        "2026-10-19 13:45:30.000000", { needsTimeZone = true })
    add("dateNull", "dates", "d", t.null, nil, null)
+   -- Bind formats: DATE with optional time, TIMESTAMP with optional
+   -- fraction; years before Christ with a minus sign.
+   add("dateBindTime", "dates", "d", { "2026-10-19 13:45:30", t.date },
+       "2026-10-19 13:45:30")
+   add("dateBindFraction", "dates", "d",
+       { "2026-10-19 13:45:30.5", t.date }, nil, fails)
+   add("tsBindFraction", "dates", "ts",
+       { "2026-10-19 13:45:30.123456", t.timestamp },
+       "2026-10-19 13:45:30.123456")
+   add("tsBindZone", "dates", "tstz",
+       { "2026-10-19 13:45:30 +02:00", t.timestamp }, nil,
+       { needsTimeZone = true })
+   add("dateMin", "dates", "d", { "0001-01-01", t.date },
+       "0001-01-01 00:00:00")
+   add("dateMax", "dates", "d", { "9999-12-31 23:59:59", t.date },
+       "9999-12-31 23:59:59")
+   add("dateOld", "dates", "d", { "1900-03-01", t.date },
+       "1900-03-01 00:00:00")
+   add("dateBc", "dates", "d", { "-4712-01-01", t.date },
+       "-4712-01-01 00:00:00")
+   add("dateBcLiteral", "dates", "d", nil, "-0044-03-15 00:00:00",
+       { literal = "DATE '-0044-03-15'" })
+   add("tsBc", "dates", "ts", { "-0044-03-15 12:00:00.25", t.timestamp },
+       "-0044-03-15 12:00:00.250000")
+   add("tsMax", "dates", "ts",
+       { "9999-12-31 23:59:59.999999", t.timestamp },
+       "9999-12-31 23:59:59.999999")
+   add("tstzBcLiteral", "dates", "tstz", nil,
+       "-0044-03-15 12:00:00.000000 +01:00",
+       { literal = "TIMESTAMP '-0044-03-15 12:00:00 +01:00'" })
+   -- luasql.type.time is bound as a plain string.
+   add("timeAsString", "dates", "s", { "13:45:30", t.time }, "13:45:30")
+   add("timeInDate", "dates", "d", { "13:45:30", t.time }, nil)
 
    -- Intervals, read as Oracle's text form in the precision of the
    -- column and compared with the text of the server. Binds are strings
@@ -393,6 +453,64 @@ local function makeCases(t)
        "a" .. pairsText)
    add("nclobPairs", "clob", "nc", { pairsText, t.string }, pairsText)
 
+   -- Several rows in one cursor; a cell is { param, expected }.
+   local nullCell = { t.null }
+   local function text(value)
+      return { { value, t.string }, value }
+   end
+   local function rows(columns, rowList, extra)
+      extra = extra or {}
+      extra.columns = columns
+      extra.rows = rowList
+      extra.needs = { "typesInsertColumns", "typesRangeSelect" }
+      return extra
+   end
+   local deadBeef = { { string.rep("DEADBEEF", 500), t.string },
+                      string.rep("\xDE\xAD\xBE\xEF", 500) }
+   local zeroByte = { { "00", t.string }, "\0" }
+   add("rowsString", "rows", "s", nil, nil, rows({ "s" }, {
+      { text(string.rep("x", 3000)) }, { text("ab") }, { nullCell },
+      { text(string.rep("\u{E4}", 1000)) }, { nullCell }, { text("z") },
+   }))
+   add("rowsNumber", "rows", "n", nil, nil, rows({ "n" }, {
+      { { { 42, t.int }, 42 } }, { nullCell }, { { { 0.5, t.number }, 0.5 } },
+      { { { -7, t.int }, -7 } }, { nullCell },
+   }))
+   add("rowsTimestamp", "rows", "ts", nil, nil, rows({ "ts" }, {
+      { { { "2026-10-19 13:45:30.5", t.timestamp },
+          "2026-10-19 13:45:30.500000" } },
+      { nullCell },
+      { { { "2000-01-01 00:00:00", t.timestamp },
+          "2000-01-01 00:00:00.000000" } },
+   }))
+   add("rowsClob", "rows", "c", nil, nil, rows({ "c" }, {
+      { text(largeClob) }, { nullCell }, { text("x") }, { nullCell },
+      { text(utf8Clob) },
+   }))
+   add("rowsNclob", "rows", "nc", nil, nil, rows({ "nc" }, {
+      { text(utf8Clob) }, { nullCell }, { text(largeClob) }, { nullCell },
+      { text("y") },
+   }))
+   add("rowsBlob", "rows", "bl", nil, nil, rows({ "bl" }, {
+      { deadBeef }, { nullCell }, { zeroByte }, { nullCell }, { deadBeef },
+   }))
+   add("rowsRaw", "rows", "rw", nil, nil, rows({ "rw" }, {
+      { deadBeef }, { nullCell }, { zeroByte }, { nullCell },
+   }))
+   add("rowsJson", "rows", "js", nil, nil, rows({ "js" }, {
+      { text(jsonLong) }, { nullCell }, { text('{"a":1}') }, { nullCell },
+   }))
+   -- All columns at once, read with both kinds of keys.
+   add("rowsColumnsNa", "rows", "n", nil, nil, rows(
+      { "n", "s", "d", "c", "bl", "js" }, {
+         { { { 1, t.int }, 1 }, text("a"),
+           { { "2026-10-19", t.date }, "2026-10-19 00:00:00" },
+           text(utf8Clob), deadBeef, text('{"a":1}') },
+         { nullCell, nullCell, nullCell, nullCell, nullCell, nullCell },
+         { nullCell, text("b"), nullCell, text("c"), nullCell,
+           text(jsonLong) },
+      }, { fetchMode = "na" }))
+
    add("long", "unsupported", nil, nil, nil, { unsupported = "long" })
    add("longRaw", "unsupported", nil, nil, nil, { unsupported = "longRaw" })
    return list
@@ -426,9 +544,11 @@ local function describe(value)
       return string.format("0x%s%s (%d bytes)", hex,
                            #value > 12 and "..." or "", #value)
    elseif type(value) == "string" then
+      -- At most 24 characters, cut at a character border.
       local shown = value
-      if #shown > 24 then
-         shown = shown:sub(1, 24) .. "..."
+      local cut = utf8.offset(value, 25)
+      if cut and cut <= #value then
+         shown = value:sub(1, cut - 1) .. "..."
       end
       return string.format("%q (%d bytes)", shown, #value)
    end
@@ -694,6 +814,86 @@ local function runUnsupportedCase(ctx, id, case)
    return "limit", spec.reason
 end
 
+-- Runs a rows case: writes case.rows into consecutive rows starting at
+-- id (one cell { param, expected } per column of case.columns), reads
+-- them back in one cursor and compares cell by cell.
+-- Returns "pass", or "fail" and a message.
+local function runRowsCase(ctx, id, case)
+   local backend = ctx.backend
+   local int = ctx.types.int
+   local placeholders = {}
+   for k = 1, #case.columns do
+      placeholders[k] = ":" .. (k + 1)
+   end
+   local columnList = table.concat(case.columns, ", ")
+   local insert = string.format(backend.typesInsertColumns, columnList,
+                                table.concat(placeholders, ", "))
+   local lastId = id + #case.rows - 1
+   ctx.nextId = lastId
+   for k, row in ipairs(case.rows) do
+      local params = { { id + k - 1, int } }
+      for c, cell in ipairs(row) do
+         params[c + 1] = cell[1]
+      end
+      local ok, err = executeStatement(ctx, insert, params)
+      if not ok then
+         return "fail", string.format("insert row %d: %s", k, err)
+      end
+   end
+
+   local stmt = prepare(ctx.testConn,
+      string.format(backend.typesRangeSelect, columnList))
+   local cur, err = stmt:execute({ { id, int }, { lastId, int } })
+   if not cur then
+      closeStatement(stmt)
+      return "fail", "select: " .. tostring(err)
+   end
+   local mode = case.fetchMode or "n"
+   local count, problem = 0, nil
+   local row
+   row, err = cur:fetch({}, mode)
+   while row ~= nil and problem == nil do
+      count = count + 1
+      local cells = case.rows[count]
+      if cells == nil then
+         problem = "more rows than written"
+         break
+      end
+      for c, name in ipairs(case.columns) do
+         local value = mode == "a" and row[name] or row[c]
+         local expected = cells[c][2]
+         if mode == "na" and row[c] ~= row[name] then
+            problem = string.format("row %d, %s: numeric key gives %s,"
+               .. " named key %s", count, name, describe(row[c]),
+               describe(row[name]))
+         elseif not compare(ctx.numberMode, value, expected) then
+            problem = string.format("row %d, %s: expected %s, got %s",
+               count, name, describe(expected), describe(value))
+         end
+         if problem then
+            break
+         end
+      end
+      if problem == nil then
+         row, err = cur:fetch({}, mode)
+      end
+   end
+   -- Closes a cursor that is still open; the result does not matter.
+   cur:close()
+   closeStatement(stmt)
+   if problem then
+      return "fail", problem
+   end
+   if err ~= nil then
+      return "fail", "fetch: " .. tostring(err)
+   end
+   if count ~= #case.rows then
+      return "fail", string.format("expected %d rows, got %d", #case.rows,
+                                   count)
+   end
+   return "pass"
+end
+
 -- Runs one case. Returns "pass", or "limit" or "fail" and a message.
 local function runCase(ctx, id, case)
    if case.rowid then
@@ -701,6 +901,9 @@ local function runCase(ctx, id, case)
    end
    if case.unsupported then
       return runUnsupportedCase(ctx, id, case)
+   end
+   if case.rows then
+      return runRowsCase(ctx, id, case)
    end
    local ok, err = writeValue(ctx, id, case)
    if not ok then
@@ -840,6 +1043,11 @@ local function skipReason(ctx, case)
    end
    if case.column and not ctx.columns[case.column] then
       return "backend has no column " .. case.column
+   end
+   for _, column in ipairs(case.columns or {}) do
+      if not ctx.columns[column] then
+         return "backend has no column " .. column
+      end
    end
    for _, key in ipairs(case.needs or {}) do
       if not ctx.backend[key] then
@@ -991,6 +1199,7 @@ local function runBlocks(ctx, cases)
    failed = failed + runBlock(ctx, "clob", cases, { clob = true })
    failed = failed + runBlock(ctx, "blob", cases, { blob = true })
    failed = failed + runBlock(ctx, "json", cases, { json = true })
+   failed = failed + runBlock(ctx, "rows", cases, { rows = true })
    failed = failed + runBlock(ctx, "unsupported", cases,
                               { unsupported = true })
    return failed
