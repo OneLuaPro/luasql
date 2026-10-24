@@ -1276,7 +1276,6 @@ static int conn_execute (lua_State *L) {
 	conn_data *conn = getconnection (L);
 	const char *statement = luaL_checkstring (L, 2);
 	sword status;
-	ub4 prefetch = 0;
 	ub4 iters;
 	ub4 mode;
 	ub2 type;
@@ -1287,9 +1286,6 @@ static int conn_execute (lua_State *L) {
 	/* statement handle */
 	ASSERT (L, OCIHandleAlloc ((dvoid *)env->envhp, (dvoid **)&stmthp,
 		OCI_HTYPE_STMT, (size_t)0, (dvoid **)0), conn->errhp);
-	ASSERT (L, OCIAttrSet ((dvoid *)stmthp, (ub4)OCI_HTYPE_STMT,
-		(dvoid *)&prefetch, (ub4)0, (ub4)OCI_ATTR_PREFETCH_ROWS,
-		conn->errhp), conn->errhp);
 	ASSERT (L, OCIStmtPrepare (stmthp, conn->errhp, (text *)statement,
 		(ub4) strlen(statement), (ub4) OCI_NTV_SYNTAX, (ub4) OCI_DEFAULT),
 		conn->errhp);
@@ -1697,6 +1693,12 @@ static int stmt_execute (lua_State *L) {
         return 2;
     }
 
+    /* stmt:execute() and stmt:execute(nil) mean no parameters, as with
+       the ODBC driver: continue with an empty table */
+    if (lua_isnoneornil(L, 2)) {
+        lua_settop(L, 1);
+        lua_newtable(L);
+    }
     luaL_checktype(L, 2, LUA_TTABLE);
 
     /* Validates the Params table (bind_data) */
