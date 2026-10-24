@@ -81,6 +81,9 @@ typedef union {
 #ifdef SQLT_TIMESTAMP
 	OCIDateTime *datetime;
 #endif
+#ifdef SQLT_INTERVAL_YM
+	OCIInterval *interval;
+#endif
 } column_value;
 
 
@@ -91,6 +94,8 @@ typedef struct {
 	ub2           max;     /* maximum size */
 	sb2           null;    /* is null? */
 	ub2           rlen;    /* returned length (string columns) */
+	ub1           lfprec;  /* interval: leading field precision */
+	ub1           fsprec;  /* interval: fractional second precision */
 	OCIDefine    *define;  /* define handle */
 	column_value  val;
 } column_data;
@@ -344,6 +349,37 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 			break;
 		}
 #endif
+#ifdef SQLT_INTERVAL_YM
+		case SQLT_INTERVAL_YM:
+		case SQLT_INTERVAL_DS: {
+			/* keep the precisions of the column, so pushvalue gives the same
+			   text as TO_CHAR and SQL*Plus; in the select-list describe
+			   OCI_ATTR_PRECISION is an sb2 and OCI_ATTR_SCALE an sb1 */
+			env_data *env;
+			conn_data *conn;
+			sb2 prec = 0;
+			sb1 scale = 0;
+			ASSERT (L, OCIAttrGet (param, OCI_DTYPE_PARAM, (dvoid *)&prec,
+				(ub4 *)0, OCI_ATTR_PRECISION, cur->errhp), cur->errhp);
+			ASSERT (L, OCIAttrGet (param, OCI_DTYPE_PARAM, (dvoid *)&scale,
+				(ub4 *)0, OCI_ATTR_SCALE, cur->errhp), cur->errhp);
+			col->lfprec = (ub1)prec;
+			col->fsprec = (ub1)scale;
+			lua_rawgeti (L, LUA_REGISTRYINDEX, cur->conn);
+			conn = (conn_data *)lua_touserdata (L, -1);
+			lua_pop (L, 1);
+			env = getenvfromconn (L, conn);
+			ASSERT (L, OCIDescriptorAlloc (env->envhp, (dvoid *)&(col->val.interval),
+				col->type == SQLT_INTERVAL_YM ? OCI_DTYPE_INTERVAL_YM
+				                              : OCI_DTYPE_INTERVAL_DS,
+				0, (void **)0), cur->errhp);
+			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define), cur->errhp,
+				(ub4)i, &(col->val.interval), sizeof(col->val.interval),
+				col->type, (dvoid *)&(col->null), (ub2 *)0, (ub2 *)0,
+				(ub4) OCI_DEFAULT), cur->errhp);
+			break;
+		}
+#endif
 		case SQLT_NUM:
 		case SQLT_FLT:
 		case SQLT_INT:
@@ -468,6 +504,16 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 		case SQLT_TIMESTAMP_LTZ:
 		        if (col->val.datetime)
 			    OCIDescriptorFree (col->val.datetime, OCI_DTYPE_TIMESTAMP_LTZ);
+			break;
+#endif
+#ifdef SQLT_INTERVAL_YM
+		case SQLT_INTERVAL_YM:
+			if (col->val.interval)
+				OCIDescriptorFree (col->val.interval, OCI_DTYPE_INTERVAL_YM);
+			break;
+		case SQLT_INTERVAL_DS:
+			if (col->val.interval)
+				OCIDescriptorFree (col->val.interval, OCI_DTYPE_INTERVAL_DS);
 			break;
 #endif
 		case SQLT_BLOB:
@@ -692,6 +738,27 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 				(const oratext *)fmt, (ub1)strlen (fmt), 6, NULL, 0, &buflen, buf),
 				cur->errhp);
 			lua_pushstring (L, (char *)(buf));
+			break;
+		}
+#endif
+#ifdef SQLT_INTERVAL_YM
+		case SQLT_INTERVAL_YM:
+		case SQLT_INTERVAL_DS: {
+			/* Oracle's own text form, e.g. +01-02 or +01 02:03:04.500000 */
+			conn_data *conn;
+			env_data *env;
+			text buf[64] = { 0 };
+			size_t len = 0;
+			lua_rawgeti (L, LUA_REGISTRYINDEX, cur->conn);
+			conn = lua_touserdata (L, -1);
+			lua_pop (L, 1);
+			env = getenvfromconn (L, conn);
+			ASSERT (L, OCIIntervalToText (env->envhp, cur->errhp,
+				col->val.interval, col->lfprec, col->fsprec,
+				buf, sizeof(buf) - 1, &len), cur->errhp);
+			while (len > 0 && buf[len - 1] == '\0')
+				len--;   /* in case resultlen counts a terminator */
+			lua_pushlstring (L, (char *)buf, len);
 			break;
 		}
 #endif
@@ -962,6 +1029,11 @@ static char *getcolumntype (column_data *col) {
 #ifdef SQLT_TIMESTAMP
 		case SQLT_TIMESTAMP:
 			return "timestamp";
+#endif
+#ifdef SQLT_INTERVAL_YM
+		case SQLT_INTERVAL_YM:
+		case SQLT_INTERVAL_DS:
+			return "interval";
 #endif
 		case SQLT_NUM:
 		case SQLT_FLT:
