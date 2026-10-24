@@ -6,11 +6,15 @@ local function sourceName(settings)
    return string.format("%s:%d/%s", settings.host, settings.port, settings.name)
 end
 
--- Case override: Oracle stores an empty string as NULL, also in CHAR
--- and RAW columns.
+-- Case overrides: Oracle stores an empty string as NULL, also in CHAR
+-- columns, and an empty RAW as well.
 local emptyAsNull = {
    limitNull = true,
    limitReason = "Oracle stores an empty string as NULL",
+}
+local emptyRawAsNull = {
+   limitNull = true,
+   limitReason = "Oracle stores an empty RAW as NULL",
 }
 
 return {
@@ -89,14 +93,24 @@ return {
       .. " tsltz TIMESTAMP(6) WITH LOCAL TIME ZONE, b BOOLEAN, c CLOB,"
       .. " ns NVARCHAR2(2000), nc NCLOB, bf BINARY_FLOAT,"
       .. " bd BINARY_DOUBLE, ch CHAR(10 CHAR), nch NCHAR(10), r UROWID,"
-      .. " rw RAW(2000), bl BLOB)",
+      .. " rw RAW(2000), bl BLOB, iym INTERVAL YEAR TO MONTH,"
+      .. " ids INTERVAL DAY TO SECOND, iym4 INTERVAL YEAR(4) TO MONTH,"
+      .. " ids3 INTERVAL DAY(3) TO SECOND(2))",
    typesTableDrop = "DROP TABLE IF EXISTS luastress_types PURGE",
    typesColumns = {
       "n", "s", "d", "ts", "tstz", "tsltz", "b", "c", "ns", "nc",
-      "bf", "bd", "ch", "nch", "r", "rw", "bl",
+      "bf", "bd", "ch", "nch", "r", "rw", "bl", "iym", "ids", "iym4",
+      "ids3",
    },
    typesInsert = "INSERT INTO luastress_types (id, %s) VALUES (:1, :2)",
    typesSelect = "SELECT %s FROM luastress_types WHERE id = :1",
+   -- Interval binds: strings converted on the server; %s is the column.
+   ymIntervalInsert = "INSERT INTO luastress_types (id, %s)"
+      .. " VALUES (:1, TO_YMINTERVAL(:2))",
+   dsIntervalInsert = "INSERT INTO luastress_types (id, %s)"
+      .. " VALUES (:1, TO_DSINTERVAL(:2))",
+   -- %s is an interval column or expression; its text on the server.
+   intervalAsText = "TO_CHAR(%s)",
    -- %s is a RAW column; its bytes as hex digits.
    rawAsHex = "RAWTOHEX(%s)",
    -- ROWID cases; %s is the table. Rows of the index organized table
@@ -156,7 +170,7 @@ return {
       },
       emptyString = emptyAsNull,
       charEmpty = emptyAsNull,
-      rawEmpty = emptyAsNull,
+      rawEmpty = emptyRawAsNull,
    },
    -- Session settings the data type scenario changes and restores.
    sessionSettings = {

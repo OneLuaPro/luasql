@@ -95,6 +95,11 @@ local function memoryUsage()
    return rss, collectgarbage("count")
 end
 
+-- Memory change for the output, rounded to whole KB; never "-0".
+local function signedKb(kb)
+   return string.format("%+d KB", math.floor(kb + 0.5))
+end
+
 -- Runs one phase and returns a short summary. Raises an error on failure.
 local function runPhase(ctx, phase, count, sid)
    if phase.precheck then
@@ -166,10 +171,9 @@ local function runPhase(ctx, phase, count, sid)
       end
    end
    if rssBefore then
-      parts[#parts + 1] = string.format("rss %+.0f KB",
-                                        (rssAfter - rssBefore) / 1024)
+      parts[#parts + 1] = "rss " .. signedKb((rssAfter - rssBefore) / 1024)
    end
-   parts[#parts + 1] = string.format("lua %+.0f KB", luaAfter - luaBefore)
+   parts[#parts + 1] = "lua " .. signedKb(luaAfter - luaBefore)
    return table.concat(parts, ", ")
 end
 

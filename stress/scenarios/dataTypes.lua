@@ -6,7 +6,8 @@
 -- Blocks, in this order:
 --   numbers, dates, booleans  once per test locale of the backend
 --                             (decimal comma, date format); the session
---                             locale must not change any result
+--                             locale must not change any result; dates
+--                             include intervals
 --   numbers, float mode       again with conn:setoption("numbers",
 --                             "float"), if the driver has it
 --   strings                   multibyte, length limit, empty, \0,
@@ -77,7 +78,10 @@ local zeroClob = "ab\0cd" .. asciiClob
 -- runRowidCase; with iot and store), checkHex (also check the bytes
 -- stored on the server; set for all raw cases), expectedLength (value
 -- made on the server: expect the stored bytes of this length), write
--- (backend key of a statement that writes row :1, with writeParams).
+-- (backend key of a statement that writes row :1, with writeParams; %s
+-- is the column), checkText (backend key of an expression that gives
+-- the text of the value on the server; %s is the column), readExpression
+-- (read instead of the column).
 -- Backend overrides may add limitReason with limitNull (NULL read back)
 -- or limitError (Lua pattern of an expected write error).
 local function makeCases(t)
@@ -186,6 +190,52 @@ local function makeCases(t)
        { "2026-10-19 13:45:30", t.timestamp },
        "2026-10-19 13:45:30.000000", { needsTimeZone = true })
    add("dateNull", "dates", "d", t.null, nil, null)
+
+   -- Intervals, read as Oracle's text form in the precision of the
+   -- column and compared with the text of the server. Binds are strings
+   -- converted on the server.
+   local function interval(extra)
+      extra = extra or {}
+      extra.checkText = "intervalAsText"
+      return extra
+   end
+   local function ymBind(text)
+      return interval({ write = "ymIntervalInsert",
+                        writeParams = { { text, t.string } } })
+   end
+   local function dsBind(text)
+      return interval({ write = "dsIntervalInsert",
+                        writeParams = { { text, t.string } } })
+   end
+   add("ymLiteral", "dates", "iym", nil, "+01-02",
+       interval({ literal = "INTERVAL '1-2' YEAR TO MONTH" }))
+   add("ymBind", "dates", "iym", nil, "+01-02", ymBind("1-2"))
+   add("ymNegative", "dates", "iym", nil, "-01-02", ymBind("-1-2"))
+   -- The text the driver reads must be accepted as input again.
+   add("ymOwnText", "dates", "iym", nil, "+01-02", ymBind("+01-02"))
+   add("ymYear4", "dates", "iym4", nil, "+0001-02", ymBind("1-2"))
+   add("ymNull", "dates", "iym", t.null, nil, interval({ nullResult = true }))
+   add("dsLiteral", "dates", "ids", nil, "+01 02:03:04.500000",
+       interval({ literal = "INTERVAL '1 2:3:4.5' DAY TO SECOND" }))
+   add("dsBind", "dates", "ids", nil, "+01 02:03:04.500000",
+       dsBind("1 02:03:04.5"))
+   add("dsNegative", "dates", "ids", nil, "-01 02:03:04.500000",
+       dsBind("-1 02:03:04.5"))
+   add("dsOwnText", "dates", "ids", nil, "+01 01:29:44.750000",
+       dsBind("+000000001 01:29:44.750000000"))
+   add("dsDay3", "dates", "ids3", nil, "+123 02:03:04.56",
+       dsBind("123 2:3:4.56"))
+   local tooLarge = dsBind("123 0:0:0")
+   tooLarge.expectError = true
+   add("dsTooLarge", "dates", "ids", nil, nil, tooLarge)
+   -- A computed interval has the largest precisions (9 and 9).
+   add("dsDifference", "dates", "ts", nil, "+000000001 01:29:44.750000000",
+       interval({ literal = "TIMESTAMP '2026-10-20 13:45:44.75'",
+                  readExpression = "ts - TIMESTAMP '2026-10-19 12:16:00'" }))
+   add("dsFetchNa", "dates", "ids", nil, "+01 02:03:04.500000",
+       interval({ literal = "INTERVAL '1 2:3:4.5' DAY TO SECOND",
+                  fetchMode = "na" }))
+   add("dsNull", "dates", "ids", t.null, nil, interval({ nullResult = true }))
 
    add("trueAsNumber", "booleans", "n", { true, t.boolean }, 1)
    add("falseAsNumber", "booleans", "n", { false, t.boolean }, 0)
@@ -400,7 +450,7 @@ local function writeValue(ctx, id, case)
                           case.literal)
       params = { { id, ctx.types.int } }
    elseif case.write then
-      sql = ctx.backend[case.write]
+      sql = string.format(ctx.backend[case.write], case.column)
       params = { { id, ctx.types.int }, table.unpack(case.writeParams) }
    else
       sql = string.format(ctx.backend.typesInsert, case.column)
@@ -566,7 +616,8 @@ local function runCase(ctx, id, case)
    end
 
    local value
-   ok, value = readValue(ctx, id, case.column, case.fetchMode)
+   local expression = case.readExpression or case.column
+   ok, value = readValue(ctx, id, expression, case.fetchMode)
    if not ok then
       return "fail", "read: " .. value
    end
@@ -577,6 +628,16 @@ local function runCase(ctx, id, case)
          string.format(ctx.backend.numberAsText, case.column))
       if textOk then
          stored = { text = tostring(text), value = tonumber(text) }
+      else
+         stored = { text = "unknown (" .. tostring(text) .. ")" }
+      end
+   end
+   local textQuery = case.checkText and ctx.backend[case.checkText]
+   if textQuery then
+      local textOk, text = readValue(ctx, id,
+         string.format(textQuery, expression))
+      if textOk then
+         stored = { text = describe(text), value = text }
       else
          stored = { text = "unknown (" .. tostring(text) .. ")" }
       end
