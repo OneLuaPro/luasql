@@ -838,6 +838,8 @@ static void free_temp_lobs (lua_State *L, cur_data *cur) {
 	for (i = 0; i < cur->numcols; i++) {
 		column_data *col = &(cur->cols[i]);
 		boolean is_temp = 0;
+		/* JSON is fetched as CLOB; a stress test showed no temporary LOBs
+		   piling up even without this release, it is kept as a safeguard */
 		if ((col->type != SQLT_CLOB && col->type != SQLT_BLOB
 				&& !OCI8_IS_JSON(col->type))
 				|| col->null || col->val.s == NULL)
