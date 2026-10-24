@@ -15,6 +15,7 @@ local scriptDir = arg[0]:match("^(.*[/\\])") or ""
 package.path = scriptDir .. "?.lua;" .. package.path
 
 local argparse = require("argparse")
+local phases = require("phases")
 local report = require("report")
 
 local tiers = { "smoke", "standard", "nightly" }
@@ -22,6 +23,7 @@ local tiers = { "smoke", "standard", "nightly" }
 -- Scenarios in the order they run, each one is scenarios/<name>.lua.
 local scenarioNames = {
    "cursorLifecycle", "stmtLifecycle", "errorPaths", "dataTypes",
+   "transactions",
 }
 
 -- Exit codes, to be evaluated by the orchestrator later on.
@@ -202,19 +204,38 @@ end
 
 -- Runs all scenarios in order.
 -- Returns true if all of them passed, or nil and an error message.
-local function runScenarios(options, driver, backend, testConn, adminConn)
+local function runScenarios(options, driver, backend, testConn, adminConn,
+			    extra)
    local failed = {}
    for _, name in ipairs(scenarioNames) do
       print(string.format("scenario %s:", name))
       local scenario = require("scenarios." .. name)
-      local ok, result, err = pcall(
-	 scenario.run, {
-	    tier = options.tier,
-	    backend = backend,
-	    testConn = testConn,
-	    adminConn = adminConn,
-	    driver = driver,
-      })
+      local ctx = {
+	 tier = options.tier,
+	 testUser = extra.testUser,
+	 openTestConnection = extra.openTestConnection,
+	 backend = backend,
+	 testConn = testConn,
+	 adminConn = adminConn,
+	 driver = driver,
+      }
+      -- Server counters before and after the scenario: a note shows
+      -- what a scenario left open, also one without leak phases.
+      local snapOk, before = pcall(phases.snapshot, ctx)
+      local ok, result, err = pcall(scenario.run, ctx)
+      if snapOk and before then
+	 local after
+	 snapOk, after = pcall(phases.snapshot, ctx)
+	 if snapOk then
+	    phases.reportGrowth(ctx, before, after, name)
+	 else
+	    before = after
+	 end
+      end
+      if not snapOk then
+	 report.print("  warning: ", "cannot read the session state: "
+			 .. tostring(before))
+      end
       if not ok then
 	 report.print("  internal error: ", result)
 	 failed[#failed + 1] = name
@@ -299,7 +320,15 @@ local function run(options, handles, cleanups)
    end
    print(string.format("server: %s", version))
 
-   return runScenarios(options, driver, backend, testConn, adminConn)
+   -- Lets scenarios open more test connections without handing out the
+   -- credentials.
+   local extra = {
+      testUser = settings.test.user,
+      openTestConnection = function()
+	 return connect(env, backend, settings.test, "extra test")
+      end,
+   }
+   return runScenarios(options, driver, backend, testConn, adminConn, extra)
 end
 
 local function main()

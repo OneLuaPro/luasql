@@ -13,11 +13,12 @@ report.width = 100
 local minTextWidth = 20
 
 -- Wraps text into lines of at most 'width' bytes. Line breaks in the
--- text (e.g. in server error messages) become spaces. Breaks after
--- "; " if that fills at least half of the line, otherwise at the last
--- space; a word longer than a line stays whole. Returns a list.
+-- text (e.g. in server error messages) become spaces, white space at the
+-- end is dropped. Breaks after "; " if that fills at least half of the
+-- line, otherwise at the last space; a word longer than a line stays
+-- whole. Returns a list.
 local function wrap(text, width)
-   text = text:gsub("[ \t]*\r?\n[ \t]*", " ")
+   text = text:gsub("[ \t]*\r?\n[ \t]*", " "):gsub("%s+$", "")
    local lines = {}
    while #text > width do
       local head = text:sub(1, width + 1)

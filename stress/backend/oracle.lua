@@ -92,6 +92,55 @@ return {
    -- Used by the data type scenario: test table, its columns (a case
    -- for a missing column is skipped) and statements; %s is a column
    -- name or an expression.
+   -- Used by the transaction scenario; %d is an id. txCountOther counts
+   -- in another session, its %s is the owner of the table.
+   txTableCreate = "CREATE TABLE luastress_tx (id NUMBER PRIMARY KEY,"
+      .. " v VARCHAR2(100))",
+   txTableDrop = "DROP TABLE IF EXISTS luastress_tx PURGE",
+   txInsert = "INSERT INTO luastress_tx (id, v) VALUES (:1, :2)",
+   txInsertLiteral = "INSERT INTO luastress_tx (id, v) VALUES (%d, 'x')",
+   -- Rows %d + 1 to %d + second %d.
+   txInsertSelect = "INSERT INTO luastress_tx (id, v)"
+      .. " SELECT %d + level, 'x' FROM dual CONNECT BY level <= %d",
+   txUpdateAll = "UPDATE luastress_tx SET v = 'y'",
+   txUpdateNone = "UPDATE luastress_tx SET v = 'z' WHERE id < 0",
+   txDeleteAbove = "DELETE FROM luastress_tx WHERE id > %d",
+   txDeleteAboveBind = "DELETE FROM luastress_tx WHERE id > :1",
+   txDeleteAll = "DELETE FROM luastress_tx",
+   txCount = "SELECT COUNT(*) FROM luastress_tx WHERE id = %d",
+   txCountAll = "SELECT COUNT(*) FROM luastress_tx",
+   txCountOther = "SELECT COUNT(*) FROM %s.luastress_tx WHERE id = %d",
+   txPlsqlInsert = "BEGIN INSERT INTO luastress_tx (id, v)"
+      .. " VALUES (%d, 'x'); END;",
+   txSavepoint = "SAVEPOINT luastress",
+   txRollbackToSavepoint = "ROLLBACK TO SAVEPOINT luastress",
+   -- Any DDL; txDdlUndo is DDL as well.
+   txDdl = "CREATE TABLE luastress_txddl (x NUMBER)",
+   txDdlUndo = "DROP TABLE IF EXISTS luastress_txddl PURGE",
+   -- Open transactions of session %d, an extra server counter of the
+   -- transaction phases.
+   -- Open cursors of session %d by type and text; the runner shows the
+   -- new ones when the server counters grew during a scenario.
+   openCursorQuery = "SELECT cursor_type, sql_text FROM v$open_cursor"
+      .. " WHERE sid = %d ORDER BY cursor_type, sql_text",
+   transactionCounter = {
+      label = "open tx",
+      query = "SELECT COUNT(*) FROM v$transaction t"
+         .. " JOIN v$session s ON s.taddr = t.addr WHERE s.sid = %d",
+   },
+   -- Known limitations of the transaction scenario, with their reasons.
+   transactionLimits = {
+      enableAutocommit = "setautocommit(true) rolls back an open"
+         .. " transaction (luasql.oci8)",
+      ddlCommits = "Oracle commits an open transaction implicitly at"
+         .. " DDL, also with autocommit off",
+      closeCommits = "Oracle commits an open transaction when the session"
+         .. " ends; conn:close() does not roll back",
+      gcCommits = "Oracle commits an open transaction when the session"
+         .. " ends; closing by the GC does not roll back",
+      rowCountFloat = "row counts are floats (lua_pushnumber), not"
+         .. " integers",
+   },
    typesTableCreate = "CREATE TABLE luastress_types ("
       .. "id NUMBER PRIMARY KEY, n NUMBER, s VARCHAR2(4000 BYTE),"
       .. " d DATE, ts TIMESTAMP(6), tstz TIMESTAMP(6) WITH TIME ZONE,"

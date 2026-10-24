@@ -14,7 +14,9 @@
 --             failure
 --
 -- ctx needs testConn and backend; adminConn is optional. Without it the
--- phases still run, but the server side check is skipped.
+-- phases still run, but the server side check is skipped. The optional
+-- ctx.serverCounters replaces backend.serverCounters, e.g. to add a
+-- counter for one scenario.
 --
 -- Each phase also reports how the memory of this process changed (rss,
 -- needs luv) and how the Lua heap changed (lua), both measured after a
@@ -59,8 +61,13 @@ function phases.sessionId(ctx)
    return sid
 end
 
+-- The server counters of a phase.
+local function serverCounters(ctx)
+   return ctx.serverCounters or ctx.backend.serverCounters
+end
+
 -- Reads the server counters of the test session in the order of
--- backend.serverCounters. Returns the list of values, or nil without
+-- serverCounters(ctx). Returns the list of values, or nil without
 -- admin connection. Raises an error on failure.
 local function readServerCounters(ctx, sid)
    if not ctx.adminConn then
@@ -74,7 +81,7 @@ local function readServerCounters(ctx, sid)
       error("sync query: " .. err, 0)
    end
    local values = {}
-   for i, counter in ipairs(ctx.backend.serverCounters) do
+   for i, counter in ipairs(serverCounters(ctx)) do
       local value
       value, err = dbutil.queryValue(ctx.adminConn,
          string.format(counter.query, sid))
@@ -84,6 +91,75 @@ local function readServerCounters(ctx, sid)
       values[i] = math.tointeger(tonumber(value))
    end
    return values
+end
+
+-- Server counters and open cursors (backend.openCursorQuery) of the test
+-- session, taken before and after a scenario by the runner. Returns nil
+-- without admin connection. Raises an error on failure.
+function phases.snapshot(ctx)
+   if not ctx.adminConn then
+      return nil
+   end
+   local sid = phases.sessionId(ctx)
+   local snapshot = { counters = readServerCounters(ctx, sid), cursors = {} }
+   local query = ctx.backend.openCursorQuery
+   if query then
+      local cur, err = ctx.adminConn:execute(string.format(query, sid))
+      if not cur then
+         error("reading open cursors: " .. tostring(err), 0)
+      end
+      local row = cur:fetch({})
+      while row ~= nil do
+         snapshot.cursors[#snapshot.cursors + 1] =
+            string.format("%s: %s", tostring(row[1]), tostring(row[2]))
+         row = cur:fetch({})
+      end
+      cur:close()
+   end
+   return snapshot
+end
+
+-- Prints a note if a server counter grew between two snapshots, with the
+-- open cursors that are new in the second one; 'what' names the part of
+-- the run, e.g. a scenario. The note tells cursors the DBMS keeps (e.g.
+-- recursive SQL) from cursors left open by the driver. Only cursors of
+-- a type starting with "OPEN" are listed, those count as open; cached
+-- ones are only counted.
+function phases.reportGrowth(ctx, before, after, what)
+   local grown = {}
+   for i, counter in ipairs(serverCounters(ctx)) do
+      if after.counters[i] > before.counters[i] then
+         grown[#grown + 1] = string.format("%s %d -> %d", counter.label,
+                                           before.counters[i],
+                                           after.counters[i])
+      end
+   end
+   if #grown == 0 then
+      return
+   end
+   report.print("  note: ", string.format("%s during %s; new open cursors"
+                   .. " of the session:", table.concat(grown, ", "), what))
+   local seen = {}
+   for _, entry in ipairs(before.cursors) do
+      seen[entry] = (seen[entry] or 0) + 1
+   end
+   local open, cached = 0, 0
+   for _, entry in ipairs(after.cursors) do
+      if (seen[entry] or 0) > 0 then
+         seen[entry] = seen[entry] - 1
+      elseif entry:find("^OPEN") then
+         open = open + 1
+         report.print("        ", entry)
+      else
+         cached = cached + 1
+      end
+   end
+   if open == 0 then
+      print("        none")
+   end
+   if cached > 0 then
+      print(string.format("        (plus %d cached, not counted)", cached))
+   end
 end
 
 -- Returns the resident memory of this process in bytes (nil without
@@ -139,7 +215,7 @@ local function runPhase(ctx, phase, count, sid)
    local rssAfter, luaAfter = memoryUsage()
    local after = readServerCounters(ctx, sid)
 
-   local counters = ctx.backend.serverCounters
+   local counters = serverCounters(ctx)
    if before then
       for i, counter in ipairs(counters) do
          if after[i] > before[i] then
