@@ -34,6 +34,12 @@
 #define CLIENT_MAX_CHAR_BYTES 4
 /* internal type code of UROWID columns; ocidfn.h has no SQLT_ name for it */
 #define OCI8_UROWID 208
+/* JSON columns (SQLT_JSON, Oracle 21c and later) are fetched as CLOB text */
+#ifdef SQLT_JSON
+#define OCI8_IS_JSON(t) ((t) == SQLT_JSON)
+#else
+#define OCI8_IS_JSON(t) 0
+#endif
 
 typedef struct {
 	short         closed;
@@ -396,6 +402,9 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 					(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
 			}
 			break;
+#ifdef SQLT_JSON
+		case SQLT_JSON:
+#endif
 		case SQLT_BLOB:
 		case SQLT_CLOB: {
 			env_data *env;
@@ -408,7 +417,9 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 				OCI_DTYPE_LOB, (size_t)0, (dvoid **)0), cur->errhp);
 			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
 				cur->errhp, (ub4)i, &(col->val.s), (sb4)sizeof(dvoid *),
-				col->type, (dvoid *)&(col->null), (ub2 *)0, (ub2 *)0,
+				/* JSON: OCI delivers the text (UTF-8) in a CLOB */
+				OCI8_IS_JSON(col->type) ? SQLT_CLOB : col->type,
+				(dvoid *)&(col->null), (ub2 *)0, (ub2 *)0,
 				OCI_DEFAULT), cur->errhp);
 			cur->has_lobs = 1;
 			break;
@@ -515,6 +526,9 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 			if (col->val.interval)
 				OCIDescriptorFree (col->val.interval, OCI_DTYPE_INTERVAL_DS);
 			break;
+#endif
+#ifdef SQLT_JSON
+		case SQLT_JSON:
 #endif
 		case SQLT_BLOB:
 		case SQLT_CLOB:
@@ -768,6 +782,9 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			break;
 		}
 #endif
+#ifdef SQLT_JSON
+		case SQLT_JSON:
+#endif
 		case SQLT_BLOB:
 		case SQLT_CLOB: {
 			conn_data *conn;
@@ -821,7 +838,8 @@ static void free_temp_lobs (lua_State *L, cur_data *cur) {
 	for (i = 0; i < cur->numcols; i++) {
 		column_data *col = &(cur->cols[i]);
 		boolean is_temp = 0;
-		if ((col->type != SQLT_CLOB && col->type != SQLT_BLOB)
+		if ((col->type != SQLT_CLOB && col->type != SQLT_BLOB
+				&& !OCI8_IS_JSON(col->type))
 				|| col->null || col->val.s == NULL)
 			continue;
 		if (OCILobIsTemporary (env->envhp, cur->errhp,
@@ -1049,6 +1067,10 @@ static char *getcolumntype (column_data *col) {
 		case SQLT_BIN:
 		case SQLT_BLOB:
 			return "binary";
+#ifdef SQLT_JSON
+		case SQLT_JSON:
+			return "json";
+#endif
 		case SQLT_CLOB:
 			return "string";
 #ifdef SQLT_IBFLOAT
