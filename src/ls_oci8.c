@@ -1157,8 +1157,14 @@ static int conn_close (lua_State *L) {
 	/* Nullify structure fields. */
 	conn->closed = 1;
 	if (conn->svchp) {
-		if (conn->loggedon)
+		if (conn->loggedon) {
+			/* Oracle commits an open transaction at logoff; roll it back
+			   first, so that only explicitly committed changes are kept,
+			   as with the other LuaSQL drivers. Errors are ignored: close
+			   (and __gc) must not stop halfway. */
+			OCITransRollback (conn->svchp, conn->errhp, OCI_DEFAULT);
 			OCILogoff (conn->svchp, conn->errhp);
+		}
 		else
 			OCIHandleFree ((dvoid *)conn->svchp, OCI_HTYPE_SVCCTX);
 	}
@@ -1311,12 +1317,16 @@ static int conn_execute (lua_State *L) {
 		return create_cursor (L, 1, conn, stmthp, statement, LUA_NOREF);
 	} else {
 		/* return number of rows */
-		int rows_affected;
+		ub4 rows_affected = 0;
 		ASSERT (L, OCIAttrGet ((dvoid *)stmthp, (ub4)OCI_HTYPE_STMT,
 			(dvoid *)&rows_affected, (ub4 *)0,
 			(ub4)OCI_ATTR_ROW_COUNT, conn->errhp), conn->errhp);
 		OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
-		lua_pushnumber (L, rows_affected);
+#if LUA_VERSION_NUM >= 503
+		lua_pushinteger (L, (lua_Integer)rows_affected);
+#else
+		lua_pushnumber (L, (lua_Number)rows_affected);
+#endif
 		return 1;
 	}
 }
@@ -1754,7 +1764,11 @@ static int stmt_execute (lua_State *L) {
                              (dvoid *)&rows_affected, (ub4 *)0,
                              (ub4)OCI_ATTR_ROW_COUNT, stmt->errhp),
                stmt->errhp);
+#if LUA_VERSION_NUM >= 503
+        lua_pushinteger(L, (lua_Integer)rows_affected);
+#else
         lua_pushnumber(L, (lua_Number)rows_affected);
+#endif
         return 1;
     }
 }
