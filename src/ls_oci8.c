@@ -2007,8 +2007,6 @@ static int env_connect (lua_State *L) {
 	conn->svchp = NULL;
 	conn->errhp = NULL;
 	conn->authp = NULL;
-	lua_pushvalue (L, 1);
-	conn->env = luaL_ref (L, LUA_REGISTRYINDEX);
 
 	/* error handler */
 	ASSERT (L, OCIHandleAlloc((dvoid *) env->envhp,
@@ -2020,10 +2018,27 @@ static int env_connect (lua_State *L) {
 		(ub4) OCI_HTYPE_SVCCTX, (size_t) 0, (dvoid **) 0), conn->errhp);
 */
 	/* login */
-	ASSERT (L, OCILogon(env->envhp, conn->errhp, &(conn->svchp),
-		(CONST text*)username, userlen,
-		(CONST text*)password, passlen,
-		(CONST text*)sourcename, snlen), conn->errhp);
+	{
+		sword s = OCILogon(env->envhp, conn->errhp, &(conn->svchp),
+			(CONST text*)username, userlen,
+			(CONST text*)password, passlen,
+			(CONST text*)sourcename, snlen);
+		/* OCI_SUCCESS_WITH_INFO (e.g. ORA-28002, password expires soon)
+		   is a successful logon */
+		if (s != OCI_SUCCESS && s != OCI_SUCCESS_WITH_INFO) {
+			/* read the error first, then free what this connect made;
+			   the connection stays closed, so its finalizer does
+			   nothing more */
+			int ret = checkerr (L, s, conn->errhp);
+			OCIHandleFree ((dvoid *)conn->errhp, OCI_HTYPE_ERROR);
+			conn->errhp = NULL;
+			conn->svchp = NULL;
+			return ret;
+		}
+	}
+	/* only a logged on connection keeps its environment alive */
+	lua_pushvalue (L, 1);
+	conn->env = luaL_ref (L, LUA_REGISTRYINDEX);
 	conn->closed = 0;
 	env->conn_counter++;
 	conn->loggedon = 1;
