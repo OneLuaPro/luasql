@@ -35,9 +35,6 @@
 #define CLIENT_MAX_CHAR_BYTES 4
 /* internal type code of UROWID columns; ocidfn.h has no SQLT_ name for it */
 #define OCI8_UROWID 208
-#ifndef OCI_STRLS_CACHE_DELETE
-#define OCI_STRLS_CACHE_DELETE OCI_DEFAULT
-#endif
 /* JSON columns (SQLT_JSON, Oracle 21c and later) are fetched as CLOB text */
 #ifdef SQLT_JSON
 #define OCI8_IS_JSON(t) ((t) == SQLT_JSON)
@@ -67,7 +64,18 @@ typedef struct {
 	int           env;                /* reference to environment */
 	OCISvcCtx    *svchp;              /* service handle */
 	OCIError     *errhp;              /* !!! */
+	OCISession   *authp;              /* user session of svchp, NULL if unknown */
 } conn_data;
+
+/*
+** Handle for the OCIDateTime* conversions: with the user session handle
+** OCI uses the session time zone (also after ALTER SESSION SET
+** TIME_ZONE) for TIMESTAMP WITH LOCAL TIME ZONE; with the environment
+** handle it uses the time zone the client had when the environment was
+** created.
+*/
+#define OCI8_DTHNDL(conn, env) \
+	((conn)->authp ? (dvoid *)(conn)->authp : (dvoid *)(env)->envhp)
 
 typedef struct {
 	short       closed;
@@ -784,7 +792,7 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			ub1 month, day;
 			const char *fmt;
 			/* sign only for BC years, as for DATE */
-			ASSERT (L, OCIDateTimeGetDate (env->envhp, cur->errhp,
+			ASSERT (L, OCIDateTimeGetDate (OCI8_DTHNDL (conn, env), cur->errhp,
 				col->val.datetime, &year, &month, &day), cur->errhp);
 			if (col->type == SQLT_TIMESTAMP_TZ)
 				fmt = (year < 0) ? "SYYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM"
@@ -792,7 +800,7 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			else
 				fmt = (year < 0) ? "SYYYY-MM-DD HH24:MI:SS.FF6"
 				                 : "YYYY-MM-DD HH24:MI:SS.FF6";
-			ASSERT (L, OCIDateTimeToText (env->envhp, cur->errhp, col->val.datetime,
+			ASSERT (L, OCIDateTimeToText (OCI8_DTHNDL (conn, env), cur->errhp, col->val.datetime,
 				(const oratext *)fmt, (ub1)strlen (fmt), 6, NULL, 0, &buflen, buf),
 				cur->errhp);
 			lua_pushstring (L, (char *)(buf));
@@ -1608,7 +1616,7 @@ static int stmt_bind (lua_State *L, stmt_data *stmt, int is_named) {
                         sword rc = OCIDescriptorAlloc(env->envhp, (dvoid **)&slot->val.datetime, OCI_DTYPE_TIMESTAMP, 0, (void **)0);
                         if (rc == OCI_SUCCESS) {
                             rc = OCIDateTimeFromText(
-                                env->envhp,
+                                OCI8_DTHNDL(conn, env),
                                 stmt->errhp,
                                 (const oratext *)date_str, (size_t)strlen(date_str),
                                 /* same form as read; fraction and time
@@ -1767,8 +1775,17 @@ static int stmt_reset (lua_State *L) {
     lua_pop(L, 1);
     if (status)
         return checkerr(L, status, stmt->errhp);
-    /* not back into a statement cache: the bindings must go with it */
-    OCIStmtRelease(stmt->stmthp, stmt->errhp, NULL, 0, OCI_STRLS_CACHE_DELETE);
+    /* the driver uses no statement cache (OCILogon), so OCI_DEFAULT
+       deallocates the old handle with its bindings and its cursor, as in
+       stmt_close; OCI_STRLS_CACHE_DELETE is only valid with a cache */
+    status = OCIStmtRelease(stmt->stmthp, stmt->errhp, NULL, 0, OCI_DEFAULT);
+    if (status) {
+        /* read the error first, then keep the statement as it was and
+           drop the new handle */
+        int ret = checkerr(L, status, stmt->errhp);
+        OCIStmtRelease(stmthp, stmt->errhp, NULL, 0, OCI_DEFAULT);
+        return ret;
+    }
     stmt->stmthp = stmthp;
     stmt_free_binds(L, stmt);
     lua_pushboolean(L, 1);
@@ -1989,6 +2006,7 @@ static int env_connect (lua_State *L) {
 	conn->loggedon = 0;
 	conn->svchp = NULL;
 	conn->errhp = NULL;
+	conn->authp = NULL;
 	lua_pushvalue (L, 1);
 	conn->env = luaL_ref (L, LUA_REGISTRYINDEX);
 
@@ -2009,6 +2027,12 @@ static int env_connect (lua_State *L) {
 	conn->closed = 0;
 	env->conn_counter++;
 	conn->loggedon = 1;
+	/* the session that OCILogon created; without it the datetime
+	   conversions fall back to the environment handle */
+	if (OCIAttrGet ((dvoid *)conn->svchp, (ub4)OCI_HTYPE_SVCCTX,
+			(dvoid *)&conn->authp, (ub4 *)0, (ub4)OCI_ATTR_SESSION,
+			conn->errhp) != OCI_SUCCESS)
+		conn->authp = NULL;
 
 	return 1;
 }
