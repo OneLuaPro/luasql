@@ -978,6 +978,22 @@ static int cur_fetch (lua_State *L) {
 		cur_nullify (L, cur);
 		lua_pushnil (L);
 		return 1;
+	} else if (status == OCI_SUCCESS_WITH_INFO) {
+		/* The row was fetched, with a warning (e.g. ORA-24347, NULL in
+		   an aggregate function), as SQL_SUCCESS_WITH_INFO in the ODBC
+		   driver. But a truncated column value (ORA-01406) also comes
+		   this way: its indicator is > 0 or -2, and pushvalue would give
+		   nil for it, so that stays an error. */
+		int i;
+		for (i = 0; i < cur->numcols; i++) {
+			sb2 ind = cur->cols[i].null;
+			if (ind > 0 || ind == -2) {
+				lua_pushnil (L);
+				lua_pushfstring (L, LUASQL_PREFIX"value of column %d was "
+					"truncated (ORA-01406)", i + 1);
+				return 2;
+			}
+		}
 	} else if (status != OCI_SUCCESS) {
 		/* Error */
 		return checkerr (L, status, cur->errhp);
@@ -1332,7 +1348,10 @@ static int conn_execute (lua_State *L) {
 	/* execute statement */
 	status = OCIStmtExecute (conn->svchp, stmthp, conn->errhp, iters,
 		(ub4)0, (CONST OCISnapshot *)NULL, (OCISnapshot *)NULL, mode);
-	if (status && (status != OCI_NO_DATA)) {
+	/* OCI_SUCCESS_WITH_INFO (e.g. ORA-24344, success with compilation
+	   error) is a success, as in the ODBC driver */
+	if (status != OCI_SUCCESS && status != OCI_SUCCESS_WITH_INFO
+			&& status != OCI_NO_DATA) {
 		OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
 		return checkerr (L, status, conn->errhp);
 	}
@@ -1845,7 +1864,9 @@ static int stmt_execute (lua_State *L) {
                                   (CONST OCISnapshot *)NULL,
                                   (OCISnapshot *)NULL, mode);
 
-    if (status && status != OCI_NO_DATA) {
+    /* OCI_SUCCESS_WITH_INFO is a success, as in conn:execute */
+    if (status != OCI_SUCCESS && status != OCI_SUCCESS_WITH_INFO
+            && status != OCI_NO_DATA) {
         lua_pop(L, 1); /* pop conn */
         return checkerr(L, status, stmt->errhp);
     }
