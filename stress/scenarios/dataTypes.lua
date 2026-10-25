@@ -28,6 +28,12 @@
 --                             on purpose: reading must fail cleanly; a
 --                             known limitation
 --
+-- Cases with TIMESTAMP WITH LOCAL TIME ZONE also read the value as text
+-- on the server (TO_CHAR in the same session) and run in several session
+-- time zones: one that differs from the offset of this computer, and a
+-- region with summer and winter time. A client library that converts
+-- in its own time zone instead of the session's fails there.
+--
 -- Every read also checks the column type the driver reports
 -- (cur:getcoltypes()) against backend.columnTypes, if given.
 --
@@ -61,6 +67,38 @@ local dataTypes = {}
 -- this offset.
 local testTimeZone = "+02:00"
 
+-- Session time zone for a case that must not match the offset of this
+-- computer: the first of these that differs from os.date("%z").
+local foreignTimeZones = { "+05:45", "-03:30" }
+
+-- Region with summer and winter time for the LTZ cases.
+local regionTimeZone = "Europe/Berlin"
+
+-- First of foreignTimeZones that differs from the offset of this
+-- computer ("+0100" from os.date("%z") is compared as "+01:00").
+local function foreignTimeZone()
+   local own = os.date("%z")
+   own = own:gsub("^([+-]%d%d)(%d%d)$", "%1:%2")
+   for _, zone in ipairs(foreignTimeZones) do
+      if zone ~= own then
+         return zone
+      end
+   end
+end
+
+-- 2026-10-19 11:45:30 UTC as local time in zone ("+hh:mm" or
+-- "-hh:mm"); the zones above keep the date.
+local function timeInZone(zone)
+   local sign, hours, minutes = zone:match("^([+-])(%d%d):(%d%d)$")
+   local shift = tonumber(hours) * 60 + tonumber(minutes)
+   if sign == "-" then
+      shift = -shift
+   end
+   local total = 11 * 60 + 45 + shift
+   return string.format("2026-10-19 %02d:%02d:30.000000", total // 60,
+                        total % 60)
+end
+
 -- Numbers read in float mode are converted by OCI, which is off by a
 -- few ULP (about 4e-16 relative was seen); allowed relative deviation.
 local floatModeTolerance = 1e-14
@@ -93,7 +131,8 @@ local zeroClob = "ab\0cd" .. asciiClob
 -- the text of the value on the server; %s is the column), readExpression
 -- (read instead of the column), columnType (expected column type, for a
 -- readExpression), unsupported (key in backend.unsupportedTypes),
--- columns and rows (rows case, see runRowsCase).
+-- columns and rows (rows case, see runRowsCase), sessionTimeZone (the
+-- case runs with this session time zone instead of testTimeZone).
 -- Backend overrides may add limitReason with limitNull (NULL read back)
 -- or limitError (Lua pattern of an expected write error).
 local function makeCases(t)
@@ -221,9 +260,26 @@ local function makeCases(t)
    add("timestampTzOffset", "dates", "tstz", nil,
        "2026-10-19 13:45:30.500000 +05:30",
        { literal = "TIMESTAMP '2026-10-19 13:45:30.5 +05:30'" })
+   -- LTZ values come in the session time zone; checked against TO_CHAR
+   -- in the same session.
+   local function ltz(extra)
+      extra.needsTimeZone = true
+      extra.checkText = "timestampAsText"
+      return extra
+   end
    add("timestampLtz", "dates", "tsltz",
        { "2026-10-19 13:45:30", t.timestamp },
-       "2026-10-19 13:45:30.000000", { needsTimeZone = true })
+       "2026-10-19 13:45:30.000000", ltz({}))
+   local foreign = foreignTimeZone()
+   add("ltzOtherZone", "dates", "tsltz", nil, timeInZone(foreign),
+       ltz({ literal = "TIMESTAMP '2026-10-19 13:45:30 +02:00'",
+             sessionTimeZone = foreign }))
+   add("ltzSummer", "dates", "tsltz", nil, "2026-07-15 14:00:00.000000",
+       ltz({ literal = "TIMESTAMP '2026-07-15 12:00:00 UTC'",
+             sessionTimeZone = regionTimeZone }))
+   add("ltzWinter", "dates", "tsltz", nil, "2026-01-15 13:00:00.000000",
+       ltz({ literal = "TIMESTAMP '2026-01-15 12:00:00 UTC'",
+             sessionTimeZone = regionTimeZone }))
    add("dateNull", "dates", "d", t.null, nil, null)
    -- Bind formats: DATE with optional time, TIMESTAMP with optional
    -- fraction; years before Christ with a minus sign.
@@ -1067,6 +1123,30 @@ local function skipReason(ctx, case)
    return nil
 end
 
+-- Runs a case; one with sessionTimeZone runs in that session time zone,
+-- and testTimeZone is set again afterwards.
+local function runCaseInZone(ctx, id, case)
+   if not case.sessionTimeZone then
+      return runCase(ctx, id, case)
+   end
+   local set = ctx.backend.sessionSettings.timeZone.set
+   local ok, err = dbutil.exec(ctx.testConn,
+                               string.format(set, case.sessionTimeZone))
+   if not ok then
+      return "fail", string.format("cannot set session time zone %s: %s",
+                                   case.sessionTimeZone, err)
+   end
+   local runOk, status, message = pcall(runCase, ctx, id, case)
+   ok, err = dbutil.exec(ctx.testConn, string.format(set, testTimeZone))
+   if not runOk then
+      error(status, 0)
+   end
+   if not ok then
+      return "fail", "cannot restore session time zone: " .. err
+   end
+   return status, message
+end
+
 -- Runs all cases of the given blocks, prints failures, limits, skips
 -- and a summary. Adds the limits to ctx.limitCount and returns the number
 -- of failed cases.
@@ -1082,7 +1162,8 @@ local function runBlock(ctx, title, cases, blocks)
             report.print(prefix, "skipped: " .. reason)
          else
             ctx.nextId = ctx.nextId + 1
-            local ok, status, message = pcall(runCase, ctx, ctx.nextId, case)
+            local ok, status, message = pcall(runCaseInZone, ctx,
+                                              ctx.nextId, case)
             if not ok then
                status, message = "fail", status
             end

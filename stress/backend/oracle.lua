@@ -259,6 +259,9 @@ return {
       .. " VALUES (:1, TO_DSINTERVAL(:2))",
    -- %s is an interval column or expression; its text on the server.
    intervalAsText = "TO_CHAR(%s)",
+   -- A timestamp without zone (also LTZ, in the session time zone) as
+   -- text in the form the driver reads it.
+   timestampAsText = "TO_CHAR(%s, 'YYYY-MM-DD HH24:MI:SS.FF6')",
    -- %s is a RAW column; its bytes as hex digits.
    rawAsHex = "RAWTOHEX(%s)",
    -- %s is a JSON column; its compact text on the server.
