@@ -132,26 +132,6 @@ local function expectSessions(ctx, expected, what)
    end
 end
 
--- Overwrites the stack slots that a function which has returned used,
--- so that no stale reference there keeps an object alive for the GC.
-local function scrubStack()
-   local a, b, c, d, e, f, g, h = false, false, false, false, false,
-      false, false, false
-   local i, j, k, l, m, n, o, p = false, false, false, false, false,
-      false, false, false
-   return a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p
-end
-
-local function collected(weak)
-   for _ = 1, maxGcCycles do
-      if weak[1] == nil then
-         return true
-      end
-      collectgarbage("collect")
-   end
-   return weak[1] == nil
-end
-
 -- Fetches from cur after the kill until an error comes. Rows already on
 -- the client may still arrive; a normal end of the result is wrong.
 local function fetchUntilLost(ctx, cur, limit)
@@ -273,9 +253,9 @@ local function killThenGcCase(ctx)
    local base = sessionCount(ctx)
    local weak = setmetatable({}, { __mode = "v" })
    killAndDrop(ctx, weak)
-   scrubStack()
-   expect(collected(weak), "environment not collected after "
-          .. maxGcCycles .. " GC cycles")
+   dbutil.scrubStack()
+   expect(dbutil.collected(weak, maxGcCycles),
+          "environment not collected after " .. maxGcCycles .. " GC cycles")
    expectSessions(ctx, base, "after the GC")
 end
 

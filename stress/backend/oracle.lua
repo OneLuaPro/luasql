@@ -125,6 +125,29 @@ return {
    lossTableDrop = "DROP TABLE IF EXISTS luastress_loss PURGE",
    lossInsert = "INSERT INTO luastress_loss (id) VALUES (%d)",
    lossCount = "SELECT COUNT(*) FROM luastress_loss WHERE id = %d",
+   -- Used by the concurrency scenario: a table with concRows rows (%d
+   -- in concFill), row locks on id %d (WAIT: second %d in seconds) and
+   -- their errors; values %d + 1 .. %d + second %d, and the same with
+   -- binds.
+   concTableCreate = "CREATE TABLE luastress_conc (id NUMBER PRIMARY KEY,"
+      .. " v VARCHAR2(20))",
+   concTableDrop = "DROP TABLE IF EXISTS luastress_conc PURGE",
+   concFill = "INSERT INTO luastress_conc (id, v)"
+      .. " SELECT level, 'row ' || level FROM dual CONNECT BY level <= %d",
+   concRows = 100,
+   concSelectAll = "SELECT id, v FROM luastress_conc ORDER BY id",
+   concCount = "SELECT COUNT(*) FROM luastress_conc",
+   concDeleteAll = "DELETE FROM luastress_conc",
+   concLockNowait = "SELECT id FROM luastress_conc WHERE id = %d"
+      .. " FOR UPDATE NOWAIT",
+   concLockWait = "SELECT id FROM luastress_conc WHERE id = %d"
+      .. " FOR UPDATE WAIT %d",
+   lockBusyError = "ORA%-00054",
+   -- A WAIT n that runs out: ORA-30006 in older releases, ORA-00054
+   -- (with ORA-40097) in 23ai.
+   lockTimeoutError = { "ORA%-30006", "ORA%-00054" },
+   offsetQuery = "SELECT %d + level FROM dual CONNECT BY level <= %d",
+   offsetBindQuery = "SELECT :1 + level FROM dual CONNECT BY level <= :2",
    -- Used by the params scenario (and bindNumberQuery, bindStringQuery).
    paramsPairQuery = "SELECT CAST(:1 AS NUMBER), CAST(:2 AS NUMBER)"
       .. " FROM dual",

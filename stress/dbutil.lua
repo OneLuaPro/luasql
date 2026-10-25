@@ -49,8 +49,34 @@ local function checkTempLobs(ctx, phase)
    return nil
 end
 
+-- Overwrites the stack slots that a function which has returned used,
+-- so that no stale reference there keeps an object alive for the GC.
+-- Called right after that function, at the same place in the caller.
+local function scrubStack()
+   local a, b, c, d, e, f, g, h = false, false, false, false, false,
+      false, false, false
+   local i, j, k, l, m, n, o, p = false, false, false, false, false,
+      false, false, false
+   return a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p
+end
+
+-- True if the object in weak[1] is collected within maxCycles full GC
+-- cycles; each cycle may free one more link of a chain (cursor,
+-- statement, connection, environment).
+local function collected(weak, maxCycles)
+   for _ = 1, maxCycles do
+      if weak[1] == nil then
+         return true
+      end
+      collectgarbage("collect")
+   end
+   return weak[1] == nil
+end
+
 return {
    exec = exec,
    queryValue = queryValue,
    checkTempLobs = checkTempLobs,
+   scrubStack = scrubStack,
+   collected = collected,
 }

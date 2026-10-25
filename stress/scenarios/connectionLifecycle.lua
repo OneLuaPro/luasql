@@ -144,29 +144,6 @@ local function expectSessions(ctx, expected, what)
    end
 end
 
--- Overwrites the stack slots that a function which has returned used,
--- so that no stale reference there keeps an object alive for the GC.
--- Called right after that function, at the same place in the caller.
-local function scrubStack()
-   local a, b, c, d, e, f, g, h = false, false, false, false, false,
-      false, false, false
-   local i, j, k, l, m, n, o, p = false, false, false, false, false,
-      false, false, false
-   return a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p
-end
-
--- True if the object in weak[1] is collected within maxGcCycles full GC
--- cycles.
-local function collected(weak)
-   for _ = 1, maxGcCycles do
-      if weak[1] == nil then
-         return true
-      end
-      collectgarbage("collect")
-   end
-   return weak[1] == nil
-end
-
 -- Phases.
 
 local function connectCloseStep(ctx)
@@ -262,9 +239,9 @@ local function gcAllCase(ctx)
    local base = sessionCount(ctx)
    local weak = setmetatable({}, { __mode = "v" })
    makeChain(ctx, weak, base)
-   scrubStack()
-   expect(collected(weak), "environment not collected after "
-          .. maxGcCycles .. " GC cycles")
+   dbutil.scrubStack()
+   expect(dbutil.collected(weak, maxGcCycles),
+          "environment not collected after " .. maxGcCycles .. " GC cycles")
    expectSessions(ctx, base, "after the GC")
 end
 
@@ -311,9 +288,10 @@ end
 local function envReleasedCase(ctx)
    local weak = setmetatable({}, { __mode = "v" })
    useAndClose(ctx, weak)
-   scrubStack()
-   expect(collected(weak), "closed environment not collected after "
-          .. maxGcCycles .. " GC cycles")
+   dbutil.scrubStack()
+   expect(dbutil.collected(weak, maxGcCycles),
+          "closed environment not collected after " .. maxGcCycles
+          .. " GC cycles")
 end
 
 -- A connect that must fail: clean error matching pattern, no session,
@@ -334,10 +312,10 @@ local function failingConnect(ctx, kind, pattern)
    local base = sessionCount(ctx)
    local weak = setmetatable({}, { __mode = "v" })
    failAndClose(ctx, weak, kind, pattern, base)
-   scrubStack()
-   expect(collected(weak), "environment still referenced after the"
-          .. " failed connect (not collected after " .. maxGcCycles
-          .. " GC cycles)")
+   dbutil.scrubStack()
+   expect(dbutil.collected(weak, maxGcCycles),
+          "environment still referenced after the failed connect (not"
+          .. " collected after " .. maxGcCycles .. " GC cycles)")
 end
 
 local function unknownUserCase(ctx)
