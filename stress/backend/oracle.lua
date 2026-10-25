@@ -106,6 +106,25 @@ return {
    unknownUserError = "ORA%-01017",
    closedPort = 1,
    closedPortError = "ORA%-12541",
+   -- Used by the connection loss scenario: kill a session (sid, serial#)
+   -- on the admin connection; the errors a killed session gives (seen:
+   -- ORA-03113 first, then ORA-03114); a query with many rows; a table
+   -- for the transaction case, %d is an id.
+   killSession = "ALTER SYSTEM KILL SESSION '%d,%d' IMMEDIATE",
+   -- Sessions of the test user without killed ones: a killed session
+   -- stays in v$session with status KILLED for a few seconds, until
+   -- Oracle has cleaned it up.
+   liveSessionCountQuery = "SELECT COUNT(*) FROM v$session"
+      .. " WHERE username = UPPER('%s') AND status <> 'KILLED'",
+   serialQuery = "SELECT serial# FROM v$session WHERE sid = %d",
+   lostConnectionErrors = { "ORA%-03113", "ORA%-03114", "ORA%-03135",
+                            "ORA%-00028" },
+   manyRowsQuery = "SELECT level FROM dual CONNECT BY level <= 100000",
+   manyRowsCount = 100000,
+   lossTableCreate = "CREATE TABLE luastress_loss (id NUMBER PRIMARY KEY)",
+   lossTableDrop = "DROP TABLE IF EXISTS luastress_loss PURGE",
+   lossInsert = "INSERT INTO luastress_loss (id) VALUES (%d)",
+   lossCount = "SELECT COUNT(*) FROM luastress_loss WHERE id = %d",
    -- Used by the params scenario (and bindNumberQuery, bindStringQuery).
    paramsPairQuery = "SELECT CAST(:1 AS NUMBER), CAST(:2 AS NUMBER)"
       .. " FROM dual",

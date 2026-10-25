@@ -148,7 +148,10 @@ end
 -- so that no stale reference there keeps an object alive for the GC.
 -- Called right after that function, at the same place in the caller.
 local function scrubStack()
-   local a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p
+   local a, b, c, d, e, f, g, h = false, false, false, false, false,
+      false, false, false
+   local i, j, k, l, m, n, o, p = false, false, false, false, false,
+      false, false, false
    return a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p
 end
 
