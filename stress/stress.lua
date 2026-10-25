@@ -23,7 +23,7 @@ local tiers = { "smoke", "standard", "nightly" }
 -- Scenarios in the order they run, each one is scenarios/<name>.lua.
 local scenarioNames = {
    "cursorLifecycle", "stmtLifecycle", "errorPaths", "params",
-   "dataTypes", "transactions", "volume",
+   "connectionLifecycle", "dataTypes", "transactions", "volume",
 }
 
 -- Exit codes, to be evaluated by the orchestrator later on.
@@ -217,6 +217,8 @@ local function runScenarios(options, driver, backend, testConn, adminConn,
 	 testUser = extra.testUser,
 	 smallTablespace = extra.smallTablespace,
 	 openTestConnection = extra.openTestConnection,
+	 newEnvironment = extra.newEnvironment,
+	 openFailingConnection = extra.openFailingConnection,
 	 backend = backend,
 	 testConn = testConn,
 	 adminConn = adminConn,
@@ -331,8 +333,34 @@ local function run(options, handles, cleanups)
       testUser = settings.test.user,
       -- The small tablespace of the prep step, if it ran.
       smallTablespace = settings.admin and config.tablespaceName or nil,
-      openTestConnection = function()
-	 return connect(env, backend, settings.test, "extra test")
+      -- A test connection on otherEnv, or on the environment of the run.
+      openTestConnection = function(otherEnv)
+	 return connect(otherEnv or env, backend, settings.test, "extra test")
+      end,
+      -- A new environment of the driver, or nil and an error message.
+      newEnvironment = function()
+	 return driver[config.driverName]()
+      end,
+      -- A connect that must fail, on otherEnv or the environment of the
+      -- run; returns what env:connect returns. kind: "unknownUser" (a
+      -- user that does not exist, backend.unknownUser) or "closedPort"
+      -- (the test host on a port without listener, backend.closedPort).
+      -- Never a wrong password of the test user: that may lock it.
+      openFailingConnection = function(kind, otherEnv)
+	 local failing = {}
+	 for key, value in pairs(settings.test) do
+	    failing[key] = value
+	 end
+	 if kind == "unknownUser" then
+	    failing.user = backend.unknownUser
+	    failing.password = "wrong"
+	 elseif kind == "closedPort" then
+	    failing.port = backend.closedPort
+	 else
+	    error("unknown kind of failing connection: " .. tostring(kind))
+	 end
+	 return (otherEnv or env):connect(backend.sourceName(failing),
+					  failing.user, failing.password)
       end,
    }
    return runScenarios(options, driver, backend, testConn, adminConn, extra)

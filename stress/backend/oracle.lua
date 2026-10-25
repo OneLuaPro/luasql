@@ -96,6 +96,16 @@ return {
       .. " CONNECT BY level <= 10",
    -- BFILE is not supported by luasql.oci8 on purpose.
    unsupportedTypeQuery = "SELECT BFILENAME('X', 'y') FROM dual",
+   -- Used by the connection scenario: sessions of the test user (%s, in
+   -- the case the user gave it; Oracle keeps names in upper case), a
+   -- user that does not exist and a port without listener for failing
+   -- connects, with their errors.
+   sessionCountQuery = "SELECT COUNT(*) FROM v$session"
+      .. " WHERE username = UPPER('%s')",
+   unknownUser = "LUASTRESS_NO_SUCH_USER",
+   unknownUserError = "ORA%-01017",
+   closedPort = 1,
+   closedPortError = "ORA%-12541",
    -- Used by the params scenario (and bindNumberQuery, bindStringQuery).
    paramsPairQuery = "SELECT CAST(:1 AS NUMBER), CAST(:2 AS NUMBER)"
       .. " FROM dual",
