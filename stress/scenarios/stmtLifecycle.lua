@@ -33,6 +33,7 @@
 
 local dbutil = require("dbutil")
 local phases = require("phases")
+local report = require("report")
 
 local stmtLifecycle = {}
 
@@ -388,7 +389,7 @@ local phaseList = {
 -- Returns true, or nil and an error message.
 function stmtLifecycle.run(ctx)
    if ctx.testConn.prepare == nil then
-      print("  skipped: driver has no prepare()")
+      report.print("  ", "skipped: driver has no prepare()", "skip")
       return true
    end
    local count = iterations[ctx.tier]
@@ -404,8 +405,8 @@ function stmtLifecycle.run(ctx)
    local list = {}
    for _, phase in ipairs(phaseList) do
       if phase.needs and ctx.backend[phase.needs] == nil then
-         print(string.format("  %-14s skipped: backend has no %s",
-                             phase.name, phase.needs))
+         report.print(string.format("  %-14s ", phase.name),
+                      "skipped: backend has no " .. phase.needs, "skip")
       else
          list[#list + 1] = phase
       end

@@ -1159,7 +1159,7 @@ local function runBlock(ctx, title, cases, blocks)
          local reason = skipReason(ctx, case)
          if reason then
             skipped = skipped + 1
-            report.print(prefix, "skipped: " .. reason)
+            report.print(prefix, "skipped: " .. reason, "skip")
          else
             ctx.nextId = ctx.nextId + 1
             local ok, status, message = pcall(runCaseInZone, ctx,
@@ -1169,18 +1169,22 @@ local function runBlock(ctx, title, cases, blocks)
             end
             if status == "pass" then
                passed = passed + 1
+               if report.verbose then
+                  report.print(prefix, "passed", "pass")
+               end
             elseif status == "limit" then
                limits = limits + 1
-               report.print(prefix, "limit: " .. tostring(message))
+               report.print(prefix, "limit: " .. tostring(message), "limit")
             else
                failed = failed + 1
-               report.print(prefix, "FAILED: " .. tostring(message))
+               report.print(prefix, "FAILED: " .. tostring(message), "fail")
             end
          end
       end
    end
-   print(string.format("    %d passed, %s, %d failed, %d skipped",
-                       passed, plural(limits, "limit"), failed, skipped))
+   report.print("    ", string.format("%d passed, %s, %d failed, %d skipped",
+                                    passed, plural(limits, "limit"), failed,
+                                    skipped), failed > 0 and "fail" or "pass")
    ctx.limitCount = ctx.limitCount + limits
    return failed
 end
@@ -1210,7 +1214,7 @@ local function restoreSetting(ctx, name, old)
    local ok, err = dbutil.exec(ctx.testConn, string.format(setting.set, old))
    if not ok then
       report.print("  warning: ",
-                   string.format("cannot restore %s: %s", name, err))
+                   string.format("cannot restore %s: %s", name, err), "note")
    end
 end
 
@@ -1232,7 +1236,8 @@ local function runBlocks(ctx, cases)
    local oldTimeZone, err = changeSetting(ctx, "timeZone", testTimeZone)
    ctx.timeZoneSet = oldTimeZone ~= nil
    if not oldTimeZone then
-      report.print("  note: ", "time zone not set: " .. tostring(err))
+      report.print("  note: ", "time zone not set: " .. tostring(err),
+                   "note")
    end
 
    local settings = ctx.backend.sessionSettings or {}
@@ -1249,7 +1254,7 @@ local function runBlocks(ctx, cases)
       if value and not oldLocale then
          report.print("  ", string.format("cannot set %s = %s: %s",
                                           locale.label, value,
-                                          tostring(err)))
+                                          tostring(err)), "fail")
          failed = failed + 1
       else
          failed = failed + runBlock(ctx, title, cases, typeBlocks)
@@ -1293,11 +1298,11 @@ function dataTypes.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
    if conn.prepare == nil then
-      print("  skipped: driver has no prepare()")
+      report.print("  ", "skipped: driver has no prepare()", "skip")
       return true
    end
    if backend.typesTableCreate == nil then
-      print("  skipped: backend has no test table")
+      report.print("  ", "skipped: backend has no test table", "skip")
       return true
    end
 
@@ -1337,7 +1342,8 @@ function dataTypes.run(ctx)
       for _, statements in ipairs(tables) do
          local ok, err = dbutil.exec(conn, statements[2])
          if not ok then
-            report.print("  warning: ", "cannot drop test table: " .. err)
+            report.print("  warning: ", "cannot drop test table: " .. err,
+                         "note")
          end
       end
    end

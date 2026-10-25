@@ -2,7 +2,7 @@
 -- stress.lua
 -- Stress test runner for LuaSQL drivers.
 --
--- Usage: lua stress.lua <dbms> [tier]
+-- Usage: lua stress.lua <dbms> [tier] [--keep] [-v|--verbose]
 --
 -- <dbms> selects config/<dbms>.lua (static settings) and backend/<dbms>.lua
 -- (DBMS specific functions). Connection data is read from environment
@@ -36,6 +36,7 @@ local function parseArguments()
    parser:argument("dbms", "DBMS to test, selects config/<dbms>.lua and backend/<dbms>.lua.")
    parser:argument("tier", "Test tier (default: smoke)."):choices(tiers):args("?")
    parser:flag("--keep", "Keep the test environment after the run.")
+   parser:flag("-v --verbose", "Also list the cases that passed.")
    local options = parser:parse()
    options.tier = options.tier or "smoke"
    return options
@@ -174,7 +175,8 @@ local function runPrep(options, config, settings, adminConn, cleanups)
    end
    print("prep:   " .. state.summary)
    if options.keep then
-      print("note:   --keep given, test environment stays in place")
+      report.print("note:   ", "--keep given, test environment stays in"
+		   .. " place", "note")
       return true
    end
    cleanups[#cleanups + 1] = function()
@@ -235,16 +237,17 @@ local function runScenarios(options, driver, backend, testConn, adminConn,
       end
       if not snapOk then
 	 report.print("  warning: ", "cannot read the session state: "
-			 .. tostring(before))
+			 .. tostring(before), "note")
       end
       if not ok then
-	 report.print("  internal error: ", result)
+	 report.print("  internal error: ", result, "fail")
 	 failed[#failed + 1] = name
       elseif not result then
-	 report.print("  FAILED: ", err)
+	 report.print("  FAILED: ", err, "fail")
 	 failed[#failed + 1] = name
       else
-	 print("  passed" .. (err and (" (" .. err .. ")") or ""))
+	 report.print("  ", "passed" .. (err and (" (" .. err .. ")") or ""),
+		      "pass")
       end
    end
    if #failed > 0 then
@@ -272,7 +275,8 @@ local function run(options, handles, cleanups)
    print(string.format("dbms:   %s (%s)", options.dbms, config.driverModule))
    print(string.format("tier:   %s", options.tier))
    if not settings.admin then
-      print("note:   no admin credentials set, scenarios requiring admin access will be skipped")
+      report.print("note:   ", "no admin credentials set, scenarios"
+		   .. " requiring admin access will be skipped", "note")
    end
 
    local okDriver, driver = pcall(require, config.driverModule)
@@ -336,6 +340,7 @@ end
 
 local function main()
    local options = parseArguments()
+   report.verbose = options.verbose
 
    local handles = {}
    local cleanups = {}
@@ -356,7 +361,7 @@ local function main()
    if not cleanupOk then
       os.exit(exitFailure)
    end
-   print("done")
+   report.print("", "done", "pass")
    os.exit(exitOk)
 end
 

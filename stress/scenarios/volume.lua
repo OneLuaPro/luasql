@@ -475,24 +475,28 @@ local function runCases(ctx)
       local prefix = string.format("    %-17s ", case.name)
       if reason then
          skipped = skipped + 1
-         report.print(prefix, "skipped: " .. reason)
+         report.print(prefix, "skipped: " .. reason, "skip")
       else
          local ok, err = pcall(case.run, ctx)
          -- A failed step may leave a transaction open.
          pcall(rollback, ctx.testConn)
          if ok then
             passed = passed + 1
+            if report.verbose then
+               report.print(prefix, "passed", "pass")
+            end
          else
             failed = failed + 1
-            report.print(prefix, "FAILED: " .. tostring(err))
+            report.print(prefix, "FAILED: " .. tostring(err), "fail")
          end
       end
    end
    if backend.fullTableDrop then
       dbutil.exec(ctx.testConn, backend.fullTableDrop)
    end
-   print(string.format("    %d passed, %d failed, %d skipped", passed,
-                       failed, skipped))
+   report.print("    ", string.format("%d passed, %d failed, %d skipped",
+                                    passed, failed, skipped),
+                failed > 0 and "fail" or "pass")
    return failed
 end
 
@@ -503,11 +507,11 @@ function volume.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
    if conn.prepare == nil then
-      print("  skipped: driver has no prepare()")
+      report.print("  ", "skipped: driver has no prepare()", "skip")
       return true
    end
    if backend.volTableCreate == nil then
-      print("  skipped: backend has no volume table")
+      report.print("  ", "skipped: backend has no volume table", "skip")
       return true
    end
    local rowCount = rowCounts[ctx.tier]
@@ -541,7 +545,8 @@ function volume.run(ctx)
       for _, statements in ipairs(tables) do
          local ok, err = dbutil.exec(conn, statements[2])
          if not ok then
-            report.print("  warning: ", "cannot drop volume table: " .. err)
+            report.print("  warning: ", "cannot drop volume table: " .. err,
+                         "note")
          end
       end
    end

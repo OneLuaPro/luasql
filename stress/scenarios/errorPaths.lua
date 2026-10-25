@@ -240,7 +240,7 @@ function errorPaths.run(ctx)
       local missing = missingRequirement(phaseCtx, phase)
       if missing then
          report.print(string.format("  %-14s ", phase.name),
-                      "skipped: " .. missing)
+                      "skipped: " .. missing, "skip")
       else
          list[#list + 1] = phase
       end

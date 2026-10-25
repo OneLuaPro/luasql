@@ -185,7 +185,7 @@ function cursorLifecycle.run(ctx)
    for _, phase in ipairs(phaseList) do
       if phase.needs and ctx.backend[phase.needs] == nil then
          report.print(string.format("  %-14s ", phase.name),
-                      "skipped: backend has no " .. phase.needs)
+                      "skipped: backend has no " .. phase.needs, "skip")
       else
          list[#list + 1] = phase
       end

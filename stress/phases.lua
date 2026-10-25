@@ -139,7 +139,8 @@ function phases.reportGrowth(ctx, before, after, what)
       return
    end
    report.print("  note: ", string.format("%s during %s; new open cursors"
-                   .. " of the session:", table.concat(grown, ", "), what))
+                   .. " of the session:", table.concat(grown, ", "), what),
+                "note")
    local seen = {}
    for _, entry in ipairs(before.cursors) do
       seen[entry] = (seen[entry] or 0) + 1
@@ -149,7 +150,7 @@ function phases.reportGrowth(ctx, before, after, what)
    local syncQuery = "OPEN: " .. tostring(ctx.backend.singleRowQuery)
    local function show(entry)
       report.print("        ", entry .. (entry == syncQuery
-                      and " (sync query of this check)" or ""))
+                      and " (sync query of this check)" or ""), "note")
    end
    local open, cached = 0, 0
    for _, entry in ipairs(after.cursors) do
@@ -163,10 +164,11 @@ function phases.reportGrowth(ctx, before, after, what)
       end
    end
    if open == 0 then
-      print("        none")
+      report.print("        ", "none", "note")
    end
    if cached > 0 then
-      print(string.format("        (plus %d cached, not counted)", cached))
+      report.print("        ", string.format("(plus %d cached, not counted)",
+                                                cached), "note")
    end
    -- Entries of the first snapshot left in 'seen' are gone now.
    local gone = {}
@@ -177,7 +179,7 @@ function phases.reportGrowth(ctx, before, after, what)
       end
    end
    if #gone > 0 then
-      print("        no longer open:")
+      report.print("        ", "no longer open:", "note")
       for _, entry in ipairs(gone) do
          show(entry)
       end
@@ -288,9 +290,9 @@ function phases.run(ctx, list, count)
       local phaseOk, result = pcall(runPhase, ctx, phase, count, sid)
       local prefix = string.format("  %-14s ", phase.name)
       if phaseOk then
-         report.print(prefix, result)
+         report.print(prefix, result, "pass")
       else
-         report.print(prefix, "FAILED: " .. tostring(result))
+         report.print(prefix, "FAILED: " .. tostring(result), "fail")
          failed[#failed + 1] = phase.name
       end
    end

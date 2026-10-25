@@ -460,7 +460,7 @@ local function runCases(ctx)
       local reason = skipReason(ctx, case)
       if reason then
          skipped = skipped + 1
-         report.print(prefix, "skipped: " .. reason)
+         report.print(prefix, "skipped: " .. reason, "skip")
       else
          local ok, status, message = pcall(function()
             resetState(ctx)
@@ -476,17 +476,21 @@ local function runCases(ctx)
          end
          if status == nil then
             passed = passed + 1
+            if report.verbose then
+               report.print(prefix, "passed", "pass")
+            end
          elseif status == "limit" then
             limits = limits + 1
-            report.print(prefix, "limit: " .. tostring(message))
+            report.print(prefix, "limit: " .. tostring(message), "limit")
          else
             failed = failed + 1
-            report.print(prefix, "FAILED: " .. tostring(message))
+            report.print(prefix, "FAILED: " .. tostring(message), "fail")
          end
       end
    end
-   print(string.format("    %d passed, %s, %d failed, %d skipped",
-                       passed, plural(limits, "limit"), failed, skipped))
+   report.print("    ", string.format("%d passed, %s, %d failed, %d skipped",
+                                    passed, plural(limits, "limit"), failed,
+                                    skipped), failed > 0 and "fail" or "pass")
    return failed, limits
 end
 
@@ -602,11 +606,11 @@ function transactions.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
    if conn.prepare == nil then
-      print("  skipped: driver has no prepare()")
+      report.print("  ", "skipped: driver has no prepare()", "skip")
       return true
    end
    if backend.txTableCreate == nil then
-      print("  skipped: backend has no transaction table")
+      report.print("  ", "skipped: backend has no transaction table", "skip")
       return true
    end
    local count = iterations[ctx.tier]
@@ -651,7 +655,8 @@ function transactions.run(ctx)
    pcall(resetState, txCtx)
    ok, err = dbutil.exec(conn, backend.txTableDrop)
    if not ok then
-      report.print("  warning: ", "cannot drop transaction table: " .. err)
+      report.print("  warning: ", "cannot drop transaction table: "
+                   .. err, "note")
    end
 
    if not casesOk then

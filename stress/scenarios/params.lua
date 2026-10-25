@@ -314,7 +314,7 @@ local function runCases(ctx)
       local prefix = string.format("    %-17s ", case.name)
       if case.needsReset and not ctx.hasReset then
          skipped = skipped + 1
-         report.print(prefix, "skipped: driver has no stmt:reset()")
+         report.print(prefix, "skipped: driver has no stmt:reset()", "skip")
       else
          ctx.stmts = {}
          local ok, status, message = pcall(case.run, ctx)
@@ -329,17 +329,21 @@ local function runCases(ctx)
          ctx.stmts = nil
          if status == nil then
             passed = passed + 1
+            if report.verbose then
+               report.print(prefix, "passed", "pass")
+            end
          elseif status == "limit" then
             limits = limits + 1
-            report.print(prefix, "limit: " .. tostring(message))
+            report.print(prefix, "limit: " .. tostring(message), "limit")
          else
             failed = failed + 1
-            report.print(prefix, "FAILED: " .. tostring(message))
+            report.print(prefix, "FAILED: " .. tostring(message), "fail")
          end
       end
    end
-   print(string.format("    %d passed, %s, %d failed, %d skipped",
-                       passed, plural(limits, "limit"), failed, skipped))
+   report.print("    ", string.format("%d passed, %s, %d failed, %d skipped",
+                                    passed, plural(limits, "limit"), failed,
+                                    skipped), failed > 0 and "fail" or "pass")
    return failed, limits
 end
 
@@ -431,12 +435,12 @@ function params.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
    if conn.prepare == nil then
-      print("  skipped: driver has no prepare()")
+      report.print("  ", "skipped: driver has no prepare()", "skip")
       return true
    end
    for _, key in ipairs(requiredQueries) do
       if backend[key] == nil then
-         print("  skipped: backend has no " .. key)
+         report.print("  ", "skipped: backend has no " .. key, "skip")
          return true
       end
    end
