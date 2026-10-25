@@ -30,7 +30,27 @@ local function queryValue(conn, sql)
    return value
 end
 
+-- Precheck of a LOB phase (see phases.lua): backend.tempLobChecks
+-- [phase.name] is a query that gives 1 if the query of the phase gives
+-- temporary LOBs. Returns why the phase would test nothing, or nil;
+-- also nil if the backend has no check for the phase.
+local function checkTempLobs(ctx, phase)
+   local sql = (ctx.backend.tempLobChecks or {})[phase.name]
+   if sql == nil then
+      return nil
+   end
+   local value, err = queryValue(ctx.testConn, sql)
+   if value == nil then
+      return "temporary LOB check failed: " .. tostring(err)
+   end
+   if tonumber(value) ~= 1 then
+      return "query gives no temporary LOBs"
+   end
+   return nil
+end
+
 return {
    exec = exec,
    queryValue = queryValue,
+   checkTempLobs = checkTempLobs,
 }

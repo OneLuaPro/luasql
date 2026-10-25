@@ -61,6 +61,13 @@ return {
    blobQuery = "SELECT TO_BLOB(HEXTORAW(RPAD(:1, 2 * :2, :3))) FROM dual",
    blobRowsQuery = "SELECT TO_BLOB(HEXTORAW(RPAD(:1, 2 * level * :2, :3)))"
       .. " FROM dual CONNECT BY level <= :4",
+   -- The same without binds for conn:execute (cursorLifecycle): row k
+   -- has k * the first %d characters 'x' or bytes 0xAB, the second %d
+   -- is the number of rows.
+   clobRowsLiteral = "SELECT RPAD(TO_CLOB('x'), level * %d, 'x')"
+      .. " FROM dual CONNECT BY level <= %d",
+   blobRowsLiteral = "SELECT TO_BLOB(HEXTORAW(RPAD('AB', 2 * level * %d,"
+      .. " 'AB'))) FROM dual CONNECT BY level <= %d",
    -- JSON object {"t":"<clobQuery value>"}, {"t":null} for a NULL :1.
    -- Fetching it leaves no temporary LOB, so there is no tempLobChecks
    -- entry for phase jsonRead.
@@ -68,7 +75,7 @@ return {
       .. " RETURNING JSON) FROM dual",
    -- Checked before a LOB phase: 1 if the expression of its query gives
    -- temporary LOBs, so the phase tests their release. Keys are phase
-   -- names.
+   -- names (clobRows and blobRows in cursorLifecycle and stmtLifecycle).
    tempLobChecks = {
       clobRead = "SELECT DBMS_LOB.ISTEMPORARY(RPAD(TO_CLOB('ab'), 8, 'cd'))"
          .. " FROM dual",
@@ -89,9 +96,25 @@ return {
       .. " CONNECT BY level <= 10",
    -- BFILE is not supported by luasql.oci8 on purpose.
    unsupportedTypeQuery = "SELECT BFILENAME('X', 'y') FROM dual",
-   -- Used by the data type scenario: test table, its columns (a case
-   -- for a missing column is skipped) and statements; %s is a column
-   -- name or an expression.
+   -- Used by the params scenario (and bindNumberQuery, bindStringQuery).
+   paramsPairQuery = "SELECT CAST(:1 AS NUMBER), CAST(:2 AS NUMBER)"
+      .. " FROM dual",
+   -- A string and a timestamp, the timestamp as text in the form it is
+   -- bound with (6 fractional digits).
+   rebindQuery = "SELECT CAST(:1 AS VARCHAR2(4000)),"
+      .. " TO_CHAR(CAST(:2 AS TIMESTAMP(6)), 'YYYY-MM-DD HH24:MI:SS.FF6')"
+      .. " FROM dual",
+   -- Errors of a statement executed with placeholders never bound, and
+   -- with more parameters than placeholders.
+   missingParamsError = "ORA%-01008",
+   tooManyParamsError = "ORA%-01036",
+   -- Known limitations of the params scenario, with their reasons.
+   paramsLimits = {
+      partialParams = "unbound placeholders keep their last value"
+         .. " (OCI); use stmt:reset()",
+      failedBindKeeps = "a failed execute keeps the bindings made before"
+         .. " the error (OCI binds one by one)",
+   },
    -- Used by the volume scenario.
    volTableCreate = "CREATE TABLE luastress_vol (id NUMBER PRIMARY KEY,"
       .. " n NUMBER, s VARCHAR2(100))",
@@ -165,6 +188,9 @@ return {
       ddlCommits = "Oracle commits an open transaction implicitly at"
          .. " DDL, also with autocommit off",
    },
+   -- Used by the data type scenario: test table, its columns (a case
+   -- for a missing column is skipped) and statements; %s is a column
+   -- name or an expression.
    typesTableCreate = "CREATE TABLE luastress_types ("
       .. "id NUMBER PRIMARY KEY, n NUMBER, s VARCHAR2(4000 BYTE),"
       .. " d DATE, ts TIMESTAMP(6), tstz TIMESTAMP(6) WITH TIME ZONE,"

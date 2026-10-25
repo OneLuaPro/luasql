@@ -6,6 +6,8 @@
 -- Phases:
 --   prepareClose  prepare, execute, fetch, close the statement
 --   reuse         one statement, executed again and again
+--   noParams      one statement without placeholders, executed with
+--                 execute(), execute(nil) and execute({}) in turn
 --   partialFetch  one statement, fetch one of several rows, close the
 --                 cursor, execute again
 --   rebindNumber  one statement, binds int, number and null in turn
@@ -178,23 +180,6 @@ local function finishStatement(_, stmt)
    closeStatement(stmt)
 end
 
--- Precheck of the LOB phases. Returns why the phase would test nothing,
--- or nil; also nil if the backend has no check for the phase.
-local function checkTempLobs(ctx, phase)
-   local sql = (ctx.backend.tempLobChecks or {})[phase.name]
-   if sql == nil then
-      return nil
-   end
-   local value, err = dbutil.queryValue(ctx.testConn, sql)
-   if value == nil then
-      return "temporary LOB check failed: " .. tostring(err)
-   end
-   if tonumber(value) ~= 1 then
-      return "query gives no temporary LOBs"
-   end
-   return nil
-end
-
 local function prepareCloseStep(ctx, i)
    local stmt = prepareBindQuery(ctx)
    local cur = execute(stmt, { { i, ctx.types.int } })
@@ -205,6 +190,23 @@ end
 local function reuseStep(ctx, i, stmt)
    local cur = execute(stmt, { { i, ctx.types.int } })
    expectValue(fetchSingle(cur), i)
+end
+
+local function prepareSingleRowQuery(ctx)
+   return prepare(ctx.testConn, ctx.backend.singleRowQuery)
+end
+
+-- The three ways to execute without parameters, in turn.
+local function noParamsStep(_, i, stmt)
+   local cur, err
+   if i % 3 == 0 then
+      cur, err = stmt:execute()
+   elseif i % 3 == 1 then
+      cur, err = stmt:execute(nil)
+   else
+      cur, err = stmt:execute({})
+   end
+   expectValue(fetchSingle(check(cur, err, "execute")), 1)
 end
 
 local function partialFetchStep(ctx, _, stmt)
@@ -357,6 +359,8 @@ local phaseList = {
    { name = "prepareClose", step = prepareCloseStep },
    { name = "reuse", setup = prepareBindQuery, step = reuseStep,
      finish = finishStatement },
+   { name = "noParams", setup = prepareSingleRowQuery, step = noParamsStep,
+     finish = finishStatement },
    { name = "partialFetch", setup = prepareMultiRowQuery,
      step = partialFetchStep, finish = finishStatement },
    { name = "rebindNumber", setup = prepareNumberQuery,
@@ -364,14 +368,16 @@ local phaseList = {
    { name = "rebindString", setup = prepareStringQuery,
      step = rebindStringStep, finish = finishStatement },
    { name = "gcClose", step = gcCloseStep },
-   { name = "clobRead", precheck = checkTempLobs, setup = prepareClobQuery,
-     step = clobReadStep, finish = finishStatement, needs = "clobQuery" },
-   { name = "clobRows", precheck = checkTempLobs,
+   { name = "clobRead", precheck = dbutil.checkTempLobs,
+     setup = prepareClobQuery, step = clobReadStep,
+     finish = finishStatement, needs = "clobQuery" },
+   { name = "clobRows", precheck = dbutil.checkTempLobs,
      setup = prepareClobRowsQuery, step = clobRowsStep,
      finish = finishStatement, needs = "clobRowsQuery" },
-   { name = "blobRead", precheck = checkTempLobs, setup = prepareBlobQuery,
-     step = blobReadStep, finish = finishStatement, needs = "blobQuery" },
-   { name = "blobRows", precheck = checkTempLobs,
+   { name = "blobRead", precheck = dbutil.checkTempLobs,
+     setup = prepareBlobQuery, step = blobReadStep,
+     finish = finishStatement, needs = "blobQuery" },
+   { name = "blobRows", precheck = dbutil.checkTempLobs,
      setup = prepareBlobRowsQuery, step = blobRowsStep,
      finish = finishStatement, needs = "blobRowsQuery" },
    { name = "jsonRead", setup = prepareJsonQuery, step = jsonReadStep,

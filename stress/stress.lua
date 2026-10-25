@@ -22,8 +22,8 @@ local tiers = { "smoke", "standard", "nightly" }
 
 -- Scenarios in the order they run, each one is scenarios/<name>.lua.
 local scenarioNames = {
-   "cursorLifecycle", "stmtLifecycle", "errorPaths", "dataTypes",
-   "transactions", "volume",
+   "cursorLifecycle", "stmtLifecycle", "errorPaths", "params",
+   "dataTypes", "transactions", "volume",
 }
 
 -- Exit codes, to be evaluated by the orchestrator later on.
