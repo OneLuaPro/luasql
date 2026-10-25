@@ -22,7 +22,7 @@ local tiers = { "smoke", "standard", "nightly" }
 
 -- Scenarios in the order they run, each one is scenarios/<name>.lua.
 local scenarioNames = {
-   "cursorLifecycle", "stmtLifecycle", "errorPaths", "params",
+   "cursorLifecycle", "stmtLifecycle", "errorPaths", "warnings", "params",
    "connectionLifecycle", "connectionLoss", "concurrency", "dataTypes",
    "transactions", "volume",
 }

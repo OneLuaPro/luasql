@@ -148,6 +148,17 @@ return {
    lockTimeoutError = { "ORA%-30006", "ORA%-00054" },
    offsetQuery = "SELECT %d + level FROM dual CONNECT BY level <= %d",
    offsetBindQuery = "SELECT :1 + level FROM dual CONNECT BY level <= :2",
+   -- Used by the warnings scenario: statements that succeed with a
+   -- warning (OCI_SUCCESS_WITH_INFO), and the messages that mean a
+   -- warning returned as an error.
+   warnProcCreate = "CREATE OR REPLACE PROCEDURE luastress_warn_proc IS"
+      .. " BEGIN x; END;",
+   warnProcDrop = "DROP PROCEDURE IF EXISTS luastress_warn_proc",
+   warnProcStatus = "SELECT status FROM user_objects"
+      .. " WHERE object_name = 'LUASTRESS_WARN_PROC'",
+   nullAggregateQuery = "SELECT SUM(x) FROM (SELECT NULL x FROM dual"
+      .. " UNION ALL SELECT 1 FROM dual)",
+   warningErrors = { "Success with info", "ORA%-24344", "ORA%-24347" },
    -- Used by the params scenario (and bindNumberQuery, bindStringQuery).
    paramsPairQuery = "SELECT CAST(:1 AS NUMBER), CAST(:2 AS NUMBER)"
       .. " FROM dual",
