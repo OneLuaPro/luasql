@@ -2117,8 +2117,9 @@ static int create_environment (lua_State *L) {
 	env->conn_counter = 0;
 	env->envhp = NULL;
 	env->errhp = NULL;
-/* maybe OCI_SHARED and OCI_THREADED ??? */
-	if (OCIEnvNlsCreate ( &(env->envhp), (ub4)OCI_DEFAULT, (dvoid *)0,
+	/* OCI_THREADED: several Lua states (e.g. lanes) may use OCI in
+	   different threads at the same time, each with its own environment */
+	if (OCIEnvNlsCreate ( &(env->envhp), (ub4)OCI_THREADED, (dvoid *)0,
 			(dvoid * (*)(dvoid *, size_t)) 0,
 			(dvoid * (*)(dvoid *, dvoid *, size_t)) 0,
 			(void (*)(dvoid *, dvoid *)) 0,
