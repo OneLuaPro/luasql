@@ -12,6 +12,8 @@
 --   step      function(ctx, i, shared), raises an error on failure
 --   finish    optional, function(ctx, shared), raises an error on
 --             failure
+--   warmup    optional, iterations before the memory measurement
+--             starts, instead of warmupIterations
 --
 -- ctx needs testConn and backend; adminConn is optional. Without it the
 -- phases still run, but the server side check is skipped. The optional
@@ -214,7 +216,7 @@ local function runPhase(ctx, phase, count, sid)
    if phase.setup then
       shared = phase.setup(ctx)
    end
-   local warmup = math.min(warmupIterations, count)
+   local warmup = math.min(phase.warmup or warmupIterations, count)
    local rssBefore, luaBefore
    for i = 1, count do
       local ok, err = pcall(phase.step, ctx, i, shared)

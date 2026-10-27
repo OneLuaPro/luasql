@@ -25,6 +25,7 @@ package.path = scriptDir .. "?.lua;" .. package.path
 local argparse = require("argparse")
 local phases = require("phases")
 local report = require("report")
+local settings = require("settings")
 
 local tiers = { "smoke", "standard", "nightly" }
 
@@ -37,8 +38,8 @@ local isWindows = package.config:sub(1, 1) == "\\"
 -- Scenarios in the order they run, each one is scenarios/<name>.lua.
 local scenarioNames = {
    "cursorLifecycle", "stmtLifecycle", "errorPaths", "warnings", "params",
-   "connectionLifecycle", "connectionLoss", "concurrency", "dataTypes",
-   "transactions", "volume",
+   "connectionLifecycle", "connectionLoss", "concurrency", "threads",
+   "dataTypes", "transactions", "volume",
 }
 
 -- Exit codes, to be evaluated by the orchestrator later on.
@@ -76,86 +77,6 @@ local function parseArguments()
    return options
 end
 
--- Loads config/<dbms>.lua or backend/<dbms>.lua.
-local function loadModule(kind, dbms)
-   if not dbms:match("^[%w_]+$") then
-      return nil, string.format("invalid DBMS name '%s'", dbms)
-   end
-   local ok, result = pcall(require, kind .. "." .. dbms)
-   if not ok then
-      return nil, string.format("cannot load %s for '%s': %s", kind, dbms, tostring(result))
-   end
-   return result
-end
-
--- Builds the environment variable name, e.g. ORACLE_TEST_HOST.
-local function envName(prefix, role, field)
-   return string.format("%s_%s_%s", prefix, role, field:upper())
-end
-
--- Reads the given fields from environment variables.
--- Returns a table with the values found and a list with the names of the missing variables.
-local function readFields(prefix, role, fields)
-   local values, missing = {}, {}
-   for _, field in ipairs(fields) do
-      local name = envName(prefix, role, field)
-      local value = os.getenv(name)
-      if value == nil or value == "" then
-	 missing[#missing + 1] = name
-      else
-	 values[field] = value
-      end
-   end
-   return values, missing
-end
-
--- Reads all connection settings for the configured DBMS.
--- Test settings are mandatory. Admin settings are optional, but must be complete
--- if any of them is set. Returns { test = {...}, admin = {...} or nil } or nil and
--- an error message.
-local function readSettings(config)
-   local test, missing = readFields(config.envPrefix, "TEST", config.testFields)
-
-   local adminFields = config.adminFields or {}
-   local admin, adminMissing = readFields(config.envPrefix, "ADMIN", adminFields)
-   if #adminMissing == #adminFields then
-      admin = nil
-   else
-      table.move(adminMissing, 1, #adminMissing, #missing + 1, missing)
-   end
-
-   if #missing > 0 then
-      return nil, "missing environment variables: " .. table.concat(missing, ", ")
-   end
-
-   if test.port then
-      local port = math.tointeger(tonumber(test.port))
-      if not port or port < 1 or port > 65535 then
-	 return nil, string.format("%s is not a valid port number: '%s'",
-				   envName(config.envPrefix, "TEST", "port"), test.port)
-      end
-      test.port = port
-   end
-
-   -- The admin connection goes to the same database as the test connection.
-   if admin then
-      admin.host, admin.port, admin.name = test.host, test.port, test.name
-   end
-
-   return { test = test, admin = admin }
-end
-
--- Opens a connection and returns it, or nil and an error message.
-local function connect(env, backend, settings, role)
-   local source = backend.sourceName(settings)
-   local conn, err = env:connect(source, settings.user, settings.password)
-   if not conn then
-      return nil, string.format("cannot open %s connection as %s to %s: %s",
-				role, settings.user, source, tostring(err))
-   end
-   return conn
-end
-
 -- Runs a query that returns a single value and returns that value, or nil and an error message.
 local function queryValue(conn, sql)
    local cur, err = conn:execute(sql)
@@ -180,24 +101,10 @@ local function closeAll(handles)
    end
 end
 
--- Switches a connection to exact numbers if the driver supports it:
--- integral values come back as Lua integers, all others as correctly
--- rounded floats. Returns the mode in use, or nil and an error message.
-local function useExactNumbers(conn)
-   if conn.setoption == nil then
-      return "driver default (no setoption)"
-   end
-   local ok, err = conn:setoption("numbers", "exact")
-   if not ok then
-      return nil, "cannot switch to exact numbers: " .. tostring(err)
-   end
-   return "exact"
-end
-
 -- Runs prep/<dbms>.lua, if there is one, and registers its teardown in
 -- 'cleanups', unless --keep is given; nothing in a child process.
 -- Returns true, or nil and an error.
-local function runPrep(options, config, settings, adminConn, cleanups)
+local function runPrep(options, config, values, adminConn, cleanups)
    if options.child then
       return true   -- the parent process prepared the environment
    end
@@ -207,7 +114,7 @@ local function runPrep(options, config, settings, adminConn, cleanups)
       return true
    end
    local prep = require(name)
-   local state, err = prep.setup(adminConn, config, settings)
+   local state, err = prep.setup(adminConn, config, values)
    if not state then
       return nil, "prep failed: " .. tostring(err)
    end
@@ -255,6 +162,7 @@ local function runScenario(name, options, session)
       openTestConnection = extra.openTestConnection,
       newEnvironment = extra.newEnvironment,
       openFailingConnection = extra.openFailingConnection,
+      laneSpec = extra.laneSpec,
       backend = session.backend,
       testConn = session.testConn,
       adminConn = session.adminConn,
@@ -433,22 +341,23 @@ end
 -- message.
 local function openSession(options, handles, cleanups)
    local say = options.child and function() end or print
-   local config, configErr = loadModule("config", options.dbms)
+   local config, configErr = settings.loadModule("config", options.dbms)
    if not config then
       return nil, configErr
    end
-   local backend, backendErr = loadModule("backend", options.dbms)
+   local backend, backendErr = settings.loadModule("backend",
+                                                     options.dbms)
    if not backend then
       return nil, backendErr
    end
-   local settings, settingsErr = readSettings(config)
-   if not settings then
-      return nil, settingsErr
+   local values, valuesErr = settings.read(config)
+   if not values then
+      return nil, valuesErr
    end
 
    say(string.format("dbms:   %s (%s)", options.dbms, config.driverModule))
    say(string.format("tier:   %s", options.tier))
-   if not settings.admin and not options.child then
+   if not values.admin and not options.child then
       report.print("note:   ", "no admin credentials set, scenarios"
 		   .. " requiring admin access will be skipped", "note")
    end
@@ -464,30 +373,32 @@ local function openSession(options, handles, cleanups)
    handles[#handles + 1] = env
 
    local adminConn
-   if settings.admin then
+   if values.admin then
       local adminErr
-      adminConn, adminErr = connect(env, backend, settings.admin, "admin")
+      adminConn, adminErr = settings.connect(env, backend, values.admin,
+                                             "admin")
       if not adminConn then
 	 return nil, adminErr
       end
       handles[#handles + 1] = adminConn
-      say(string.format("admin:  connected as %s", settings.admin.user))
-      local prepOk, prepErr = runPrep(options, config, settings, adminConn,
+      say(string.format("admin:  connected as %s", values.admin.user))
+      local prepOk, prepErr = runPrep(options, config, values, adminConn,
 				      cleanups)
       if not prepOk then
 	 return nil, prepErr
       end
    end
 
-   local testConn, testErr = connect(env, backend, settings.test, "test")
+   local testConn, testErr = settings.connect(env, backend, values.test,
+                                              "test")
    if not testConn then
       return nil, testErr
    end
    handles[#handles + 1] = testConn
-   say(string.format("test:   connected as %s to %s", settings.test.user,
-		       backend.sourceName(settings.test)))
+   say(string.format("test:   connected as %s to %s", values.test.user,
+		       backend.sourceName(values.test)))
 
-   local numbers, numbersErr = useExactNumbers(testConn)
+   local numbers, numbersErr = settings.useExactNumbers(testConn)
    if not numbers then
       return nil, numbersErr
    end
@@ -502,12 +413,13 @@ local function openSession(options, handles, cleanups)
    -- Lets scenarios open more test connections without handing out the
    -- credentials.
    local extra = {
-      testUser = settings.test.user,
+      testUser = values.test.user,
       -- The small tablespace of the prep step, if it ran.
-      smallTablespace = settings.admin and config.tablespaceName or nil,
+      smallTablespace = values.admin and config.tablespaceName or nil,
       -- A test connection on otherEnv, or on the environment of the run.
       openTestConnection = function(otherEnv)
-	 return connect(otherEnv or env, backend, settings.test, "extra test")
+	 return settings.connect(otherEnv or env, backend, values.test,
+				 "extra test")
       end,
       -- A new environment of the driver, or nil and an error message.
       newEnvironment = function()
@@ -520,7 +432,7 @@ local function openSession(options, handles, cleanups)
       -- Never a wrong password of the test user: that may lock it.
       openFailingConnection = function(kind, otherEnv)
 	 local failing = {}
-	 for key, value in pairs(settings.test) do
+	 for key, value in pairs(values.test) do
 	    failing[key] = value
 	 end
 	 if kind == "unknownUser" then
@@ -534,6 +446,13 @@ local function openSession(options, handles, cleanups)
 	 return (otherEnv or env):connect(backend.sourceName(failing),
 					  failing.user, failing.password)
       end,
+      -- What a lane needs to open a test connection itself (laneconn.lua):
+      -- the DBMS and the module paths, no credentials.
+      laneSpec = {
+         dbms = options.dbms,
+         path = package.path,
+         cpath = package.cpath,
+      },
    }
    return {
       driver = driver,

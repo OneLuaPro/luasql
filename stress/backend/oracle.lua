@@ -146,6 +146,33 @@ return {
    -- A WAIT n that runs out: ORA-30006 in older releases, ORA-00054
    -- (with ORA-40097) in 23ai.
    lockTimeoutError = { "ORA%-30006", "ORA%-00054" },
+   -- Used by the threads scenario: a table with rows 1 and 2 (v = 0);
+   -- set v of a row (first %d the value, second one the id; waits for a
+   -- lock without limit); lock a row with WAIT (second %d in seconds);
+   -- v of row %d. A deadlock gives deadlockError to the session that
+   -- waited first (seen in 23ai: only its statement is rolled back, its
+   -- transaction and locks stay). The PL/SQL block sleeps %d seconds on
+   -- the server. Session %d: the session blocking it (0 for none), and
+   -- 1 while it sleeps in that block. A kill while the session is still
+   -- on its way into the call may give killMarkedError (seen in 23ai):
+   -- the session is only marked and killed a little later.
+   threadsTableCreate = "CREATE TABLE luastress_threads"
+      .. " (id NUMBER PRIMARY KEY, v NUMBER)",
+   threadsTableDrop = "DROP TABLE IF EXISTS luastress_threads PURGE",
+   threadsFill = "INSERT INTO luastress_threads (id, v)"
+      .. " SELECT level, 0 FROM dual CONNECT BY level <= 2",
+   threadsReset = "UPDATE luastress_threads SET v = 0",
+   threadsUpdate = "UPDATE luastress_threads SET v = %d WHERE id = %d",
+   threadsLockWait = "SELECT v FROM luastress_threads WHERE id = %d"
+      .. " FOR UPDATE WAIT %d",
+   threadsValue = "SELECT v FROM luastress_threads WHERE id = %d",
+   deadlockError = "ORA%-00060",
+   sleepBlock = "BEGIN DBMS_SESSION.SLEEP(%d); END;",
+   blockingSessionQuery = "SELECT NVL(blocking_session, 0) FROM v$session"
+      .. " WHERE sid = %d",
+   sleepingSessionQuery = "SELECT COUNT(*) FROM v$session"
+      .. " WHERE sid = %d AND event = 'PL/SQL lock timer'",
+   killMarkedError = "ORA%-00031",
    offsetQuery = "SELECT %d + level FROM dual CONNECT BY level <= %d",
    offsetBindQuery = "SELECT :1 + level FROM dual CONNECT BY level <= :2",
    -- Used by the warnings scenario: statements that succeed with a
