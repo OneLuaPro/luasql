@@ -250,6 +250,29 @@ function threadsLane.sleeper(spec, linda, seconds)
    }
 end
 
+-- A lane of the pool of phase laneLoop: on each "go<tag>" (value: the
+-- iteration i) runs queries with tag * 1000 + i % 1000 and sends "done"
+-- with tag and sum; ends on "stop<tag>" and returns the number of
+-- iterations done.
+function threadsLane.poolMember(spec, linda, tag, rounds)
+   local count = 0
+   while true do
+      local key, i = linda:receive(messageSeconds, "go" .. tag,
+                                   "stop" .. tag, "abort")
+      if key == "stop" .. tag then
+         return count
+      elseif key == "abort" then
+         error("aborted by the scenario", 0)
+      elseif key == nil then
+         error("no message from the scenario after " .. messageSeconds
+               .. " s", 0)
+      end
+      local sum = threadsLane.queries(spec, tag * 1000 + i % 1000, rounds)
+      count = count + 1
+      linda:send("done", { tag = tag, sum = sum })
+   end
+end
+
 -- Leaves a connection, a statement and a cursor open and raises an
 -- error: closing the Lua state of the lane must release them.
 function threadsLane.errorWithOpen(spec)

@@ -35,7 +35,8 @@
 --                     cleanly; the environment works on
 --
 -- Phase:
---   laneLoop  per iteration N lanes, each connects, queries and closes;
+--   laneLoop  a pool of N lanes; per iteration each connects, queries
+--             and closes;
 --             checks memory of the process (the lanes are part of it)
 --             and the sessions of the test user
 --
@@ -61,7 +62,7 @@ local queryRounds = { smoke = 50, standard = 200, nightly = 1000 }
 -- Connects per lane in parallelConnect.
 local connectRounds = { smoke = 5, standard = 20, nightly = 50 }
 
--- Iterations of phase laneLoop, and queries per lane in it.
+-- Iterations of phase laneLoop, and queries per lane and iteration.
 local iterations = { smoke = 20, standard = 200, nightly = 1000 }
 local loopRounds = 5
 
@@ -659,40 +660,75 @@ local function runCases(ctx)
    return failed, limits
 end
 
--- Phase: N lanes per iteration, each connects, queries and closes. All
--- lanes are joined before an error is raised, so none stays behind.
-local function laneLoopStep(ctx, i)
-   local handles = {}
+-- Phase: a pool of N lanes that live for the whole phase; per iteration
+-- each of them connects, queries and closes once. New threads per
+-- iteration would make the memory measurement useless: on Windows the
+-- resident memory of threads that connect moves in steps of up to a few
+-- MB (seen: no steady growth over 16000 threads, about 30 bytes per
+-- thread in the long run, as for threads without OCI). Creating and
+-- ending threads is checked by the cases, through the sessions.
+
+local function setupLaneLoop(ctx)
+   ctx.lanes, ctx.sids, ctx.linda = {}, {}, lanes.linda()
    for tag = 1, ctx.laneCount do
-      handles[tag] = spawn(ctx, "queries", tag * 1000 + i % 1000,
-                           loopRounds)
+      start(ctx, "poolMember", ctx.linda, tag, loopRounds)
+   end
+   return { iterations = 0 }
+end
+
+local function laneLoopStep(ctx, i, shared)
+   for tag = 1, ctx.laneCount do
+      ctx.linda:send("go" .. tag, i)
    end
    local problem
-   for tag, handle in ipairs(handles) do
-      local ok, sum = pcall(join, handle, laneSeconds, "lane " .. tag)
-      local laneTag = tag * 1000 + i % 1000
-      if not ok then
-         problem = problem or sum
-      elseif sum ~= expectedSum(laneTag, loopRounds) then
+   for _ = 1, ctx.laneCount do
+      local result = waitMessage(ctx, "done", laneSeconds, "lane pool")
+      local laneTag = result.tag * 1000 + i % 1000
+      if result.sum ~= expectedSum(laneTag, loopRounds) then
          problem = problem or string.format("lane %d: sum %s, expected %d",
-                                            tag, tostring(sum),
+                                            result.tag, tostring(result.sum),
                                             expectedSum(laneTag,
                                                         loopRounds))
       end
    end
+   shared.iterations = i
    if problem then
       error(problem, 0)
    end
 end
 
--- Iterations before the memory measurement of laneLoop: the first
--- thousand or so threads of a process grow the heap of the C runtime
--- (seen: about 1 MB with 8 lanes per iteration, flat after 125
--- iterations), independent of the driver.
-local laneLoopWarmup = 125
+-- Ends the pool; raises an error if a lane failed or did not do every
+-- iteration. Also called after a failed step, then its error counts.
+local function finishLaneLoop(ctx, shared)
+   for tag = 1, ctx.laneCount do
+      ctx.linda:send("stop" .. tag, true)
+   end
+   local problem
+   for tag, handle in ipairs(ctx.lanes) do
+      local ok, count = pcall(join, handle, messageSeconds, "lane " .. tag)
+      if not ok then
+         problem = problem or count
+      elseif count ~= shared.iterations then
+         problem = problem or string.format("lane %d: %s iterations,"
+                                            .. " expected %d", tag,
+                                            tostring(count),
+                                            shared.iterations)
+      end
+   end
+   local warning = cleanUp(ctx)
+   if problem or warning then
+      error(problem or warning, 0)
+   end
+end
+
+-- Iterations before the memory measurement of laneLoop: the pool grows
+-- with the first connections of its threads (seen on Windows: about
+-- +20 MB at first, flat after about 300 iterations of 8 lanes).
+local laneLoopWarmup = 300
 
 local phaseList = {
-   { name = "laneLoop", step = laneLoopStep, warmup = laneLoopWarmup },
+   { name = "laneLoop", setup = setupLaneLoop, step = laneLoopStep,
+     finish = finishLaneLoop, warmup = laneLoopWarmup },
 }
 
 -- ctx: tier, driver, backend, testConn, adminConn (may be nil),
