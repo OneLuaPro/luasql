@@ -185,7 +185,24 @@ return {
       .. " WHERE object_name = 'LUASTRESS_WARN_PROC'",
    nullAggregateQuery = "SELECT SUM(x) FROM (SELECT NULL x FROM dual"
       .. " UNION ALL SELECT 1 FROM dual)",
-   warningErrors = { "Success with info", "ORA%-24344", "ORA%-24347" },
+   warningErrors = { "Success with info", "ORA%-24344", "ORA%-24347",
+                     "ORA%-28002", "ORA%-28098" },
+   -- A user of its own whose password is in the grace period: its
+   -- profile lets the password expire after a second, the first logon
+   -- after that starts the grace period and gives a warning (ORA-28098
+   -- in 23ai, ORA-28002 before). %s in graceUserCreate is the password.
+   -- The drops may fail if there is nothing to drop.
+   graceProfileCreate = "CREATE PROFILE luastress_grace LIMIT"
+      .. " PASSWORD_LIFE_TIME 1/86400 PASSWORD_GRACE_TIME 1",
+   graceProfileDrop = "DROP PROFILE luastress_grace CASCADE",
+   graceUser = "LUASTRESS_GRACE",
+   graceUserCreate = "CREATE USER luastress_grace IDENTIFIED BY \"%s\""
+      .. " PROFILE luastress_grace",
+   graceUserGrant = "GRANT CREATE SESSION TO luastress_grace",
+   graceUserDrop = "DROP USER luastress_grace CASCADE",
+   graceStatusQuery = "SELECT account_status FROM dba_users"
+      .. " WHERE username = 'LUASTRESS_GRACE'",
+   graceStatus = "EXPIRED(GRACE)",
    -- Used by the params scenario (and bindNumberQuery, bindStringQuery).
    paramsPairQuery = "SELECT CAST(:1 AS NUMBER), CAST(:2 AS NUMBER)"
       .. " FROM dual",

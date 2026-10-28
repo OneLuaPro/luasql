@@ -162,6 +162,7 @@ local function runScenario(name, options, session)
       openTestConnection = extra.openTestConnection,
       newEnvironment = extra.newEnvironment,
       openFailingConnection = extra.openFailingConnection,
+      openUserConnection = extra.openUserConnection,
       laneSpec = extra.laneSpec,
       backend = session.backend,
       testConn = session.testConn,
@@ -445,6 +446,18 @@ local function openSession(options, handles, cleanups)
 	 end
 	 return (otherEnv or env):connect(backend.sourceName(failing),
 					  failing.user, failing.password)
+      end,
+      -- A connection to the test database as another user, e.g. one a
+      -- scenario created itself, on otherEnv or the environment of the
+      -- run; returns what env:connect returns.
+      openUserConnection = function(user, password, otherEnv)
+         local other = {}
+         for key, value in pairs(values.test) do
+            other[key] = value
+         end
+         other.user, other.password = user, password
+         return (otherEnv or env):connect(backend.sourceName(other), user,
+                                          password)
       end,
       -- What a lane needs to open a test connection itself (laneconn.lua):
       -- the DBMS and the module paths, no credentials.

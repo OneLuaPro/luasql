@@ -19,6 +19,13 @@
 --                          (ORA-24347 in some releases); the value must
 --                          be 1
 --   nullAggregatePrepared  the same through stmt:execute()
+--   passwordGrace          connect as a user of its own whose password
+--                          is in the grace period (ORA-28098, before
+--                          23ai ORA-28002); the connection must work,
+--                          the account must be in the grace period, a
+--                          second connect must work too. Needs the admin
+--                          connection, which creates and drops the user
+--                          and its profile; never the test user.
 --
 -- Phase:
 --   warnLoop  the compile error statement again and again on the test
@@ -120,6 +127,71 @@ end
 -- Cases. Each returns nothing for a pass, or "limit" and the reason;
 -- raises an error on failure.
 
+-- Drops the user and the profile of passwordGrace, if there are any.
+local function dropGraceUser(ctx)
+   local userOk, userErr = dbutil.exec(ctx.adminConn,
+                                       ctx.backend.graceUserDrop)
+   local profileOk, profileErr = dbutil.exec(ctx.adminConn,
+                                             ctx.backend.graceProfileDrop)
+   return userOk and profileOk, userErr or profileErr
+end
+
+-- Connects as the grace user, checks the session and closes it again.
+-- The connection is kept in ctx.graceConn until it is closed.
+local function graceLogon(ctx, password, what)
+   local backend = ctx.backend
+   local conn, err = ctx.openUserConnection(backend.graceUser, password)
+   if not conn then
+      callFailed(ctx, what, err)
+   end
+   ctx.graceConn = conn
+   local value, queryErr = dbutil.queryValue(conn, backend.singleRowQuery)
+   check(value, queryErr, "query after the " .. what)
+   local closed, closeErr = conn:close()
+   ctx.graceConn = nil
+   check(closed, closeErr, "close after the " .. what)
+end
+
+-- Runs sql on the admin connection; raises an error naming what if it
+-- fails.
+local function adminExec(ctx, sql, what)
+   local ok, err = dbutil.exec(ctx.adminConn, sql)
+   check(ok, err, what)
+end
+
+local function passwordGraceSteps(ctx, password)
+   local backend, admin = ctx.backend, ctx.adminConn
+   adminExec(ctx, backend.graceProfileCreate, "create profile")
+   adminExec(ctx, string.format(backend.graceUserCreate, password),
+             "create user")
+   adminExec(ctx, backend.graceUserGrant, "grant")
+   -- The password expires after a second.
+   adminExec(ctx, string.format(backend.sleepBlock, 2),
+             "wait for the password to expire")
+   graceLogon(ctx, password, "connect in the grace period")
+   local status, err = dbutil.queryValue(admin, backend.graceStatusQuery)
+   expect(status == backend.graceStatus, "account status "
+          .. tostring(status or err) .. ", expected " .. backend.graceStatus)
+   graceLogon(ctx, password, "second connect in the grace period")
+end
+
+local function passwordGraceCase(ctx)
+   -- Leftovers of an aborted run go first; errors mean nothing to drop.
+   dropGraceUser(ctx)
+   local password = string.format("Grace_%06d_Pw", math.random(0, 999999))
+   local ok, err = pcall(passwordGraceSteps, ctx, password)
+   if ctx.graceConn then
+      -- A user with a session cannot be dropped.
+      pcall(ctx.graceConn.close, ctx.graceConn)
+      ctx.graceConn = nil
+   end
+   local dropped, dropErr = dropGraceUser(ctx)
+   if not ok then
+      error(err, 0)
+   end
+   check(dropped, dropErr, "drop the grace user")
+end
+
 local function compileError(ctx, prepared)
    local via = prepared and "stmt:execute" or "conn:execute"
    dbutil.exec(ctx.testConn, ctx.backend.warnProcDrop)
@@ -179,7 +251,30 @@ local caseList = {
    { name = "nullAggregateExecute", run = nullAggregateExecuteCase },
    { name = "nullAggregatePrepared", run = nullAggregatePreparedCase,
      usesPrepare = true },
+   { name = "passwordGrace", run = passwordGraceCase, needsAdmin = true,
+     needs = { "graceProfileCreate", "graceProfileDrop", "graceUser",
+               "graceUserCreate", "graceUserGrant", "graceUserDrop",
+               "graceStatusQuery", "graceStatus", "sleepBlock" } },
 }
+
+-- Why a case is skipped, or nil.
+local function skipReason(ctx, case)
+   if case.usesPrepare and ctx.testConn.prepare == nil then
+      return "driver has no prepare()"
+   end
+   if case.needsAdmin and not ctx.adminConn then
+      return "needs the admin connection"
+   end
+   if case.needsAdmin and not ctx.openUserConnection then
+      return "runner gives no openUserConnection"
+   end
+   for _, key in ipairs(case.needs or {}) do
+      if ctx.backend[key] == nil then
+         return "backend has no " .. key
+      end
+   end
+   return nil
+end
 
 -- Runs all cases, prints failures, limits, skips and a summary.
 -- Returns the number of failed cases and of limits.
@@ -188,9 +283,10 @@ local function runCases(ctx)
    local passed, limits, failed, skipped = 0, 0, 0, 0
    for _, case in ipairs(caseList) do
       local prefix = string.format("    %-21s ", case.name)
-      if case.usesPrepare and ctx.testConn.prepare == nil then
+      local reason = skipReason(ctx, case)
+      if reason then
          skipped = skipped + 1
-         report.print(prefix, "skipped: driver has no prepare()", "skip")
+         report.print(prefix, "skipped: " .. reason, "skip")
       else
          local ok, status, message = pcall(case.run, ctx)
          if not ok then
@@ -233,7 +329,8 @@ local phaseList = {
    { name = "warnLoop", step = warnLoopStep },
 }
 
--- ctx: tier, driver, backend, testConn, adminConn (may be nil)
+-- ctx: tier, driver, backend, testConn, adminConn (may be nil),
+-- openUserConnection
 -- Returns true and optionally a note on known limitations, or nil and an
 -- error message.
 function warnings.run(ctx)
@@ -256,6 +353,7 @@ function warnings.run(ctx)
       testConn = ctx.testConn,
       adminConn = ctx.adminConn,
       types = ctx.driver.type,
+      openUserConnection = ctx.openUserConnection,
    }
 
    local casesOk, failed, limits = pcall(runCases, warnCtx)
