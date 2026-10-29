@@ -15,6 +15,8 @@ local lfs = require("lfs")
 local appName = "luasql-stress"
 local sep = package.config:sub(1, 1)
 
+local state = {}
+
 local function nonEmpty(value)
    if value ~= nil and value ~= "" then
       return value
@@ -63,7 +65,7 @@ end
 
 -- Returns the state file path for a DBMS and a target database, or nil
 -- and an error message. 'target' may hold host, port and name.
-local function filePath(dbms, target)
+function state.filePath(dbms, target)
    local base, err = baseDir()
    if not base then
       return nil, err
@@ -80,7 +82,7 @@ end
 
 -- Reads a state file. Returns a table with the values, or nil if there
 -- is no such file, or nil and an error message if it cannot be parsed.
-local function load(path)
+function state.load(path)
    local file = io.open(path, "r")
    if not file then
       return nil
@@ -104,7 +106,7 @@ end
 
 -- Writes a state file, replacing an existing one.
 -- Returns true, or nil and an error message.
-local function save(path, values)
+function state.save(path, values)
    local ok, err = makeDirs(path:match("^(.*)[/\\]"))
    if not ok then
       return nil, err
@@ -138,7 +140,7 @@ end
 
 -- Deletes a state file. A missing file is not an error.
 -- Returns true, or nil and an error message.
-local function remove(path)
+function state.remove(path)
    local ok, err = os.remove(path)
    if not ok and lfs.attributes(path, "mode") then
       return nil, "cannot delete " .. path .. ": " .. tostring(err)
@@ -146,9 +148,4 @@ local function remove(path)
    return true
 end
 
-return {
-   filePath = filePath,
-   load = load,
-   save = save,
-   remove = remove,
-}
+return state

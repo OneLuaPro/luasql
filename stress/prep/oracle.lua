@@ -11,6 +11,8 @@
 local dbutil = require("dbutil")
 local state = require("state")
 
+local oracle = {}
+
 -- Names from config or environment end up in SQL text, so only plain
 -- identifiers are accepted.
 local function checkIdentifier(name)
@@ -95,7 +97,7 @@ end
 
 -- Creates the test environment.
 -- Returns a state table for teardown, or nil and an error message.
-local function setup(conn, config, settings)
+function oracle.setup(conn, config, settings)
    local ok, err = checkConfig(config)
    if not ok then
       return nil, "config/oracle.lua: " .. err
@@ -183,7 +185,7 @@ end
 
 -- Removes the test environment. Tries every step, even if one fails.
 -- Returns true, or nil and an error message.
-local function teardown(conn, prepState)
+function oracle.teardown(conn, prepState)
    local errors = {}
    local ok, err = setOpenCursors(conn, prepState.oldOpenCursors)
    if ok then
@@ -205,7 +207,4 @@ local function teardown(conn, prepState)
    return true
 end
 
-return {
-   setup = setup,
-   teardown = teardown,
-}
+return oracle

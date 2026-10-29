@@ -463,16 +463,16 @@ return {
    -- Session settings the data type scenario changes and restores.
    sessionSettings = {
       timeZone = {
-	 query = "SELECT SESSIONTIMEZONE FROM dual",
-	 set = "ALTER SESSION SET TIME_ZONE = '%s'",
+         query = "SELECT SESSIONTIMEZONE FROM dual",
+         set = "ALTER SESSION SET TIME_ZONE = '%s'",
       },
       -- Number, date and boolean cases run once per test value.
       locale = {
-	 label = "NLS_TERRITORY",
-	 query = "SELECT value FROM nls_session_parameters"
-	    .. " WHERE parameter = 'NLS_TERRITORY'",
-	 set = "ALTER SESSION SET NLS_TERRITORY = '%s'",
-	 testValues = { "AMERICA", "GERMANY" },
+         label = "NLS_TERRITORY",
+         query = "SELECT value FROM nls_session_parameters"
+            .. " WHERE parameter = 'NLS_TERRITORY'",
+         set = "ALTER SESSION SET NLS_TERRITORY = '%s'",
+         testValues = { "AMERICA", "GERMANY" },
       },
    },
 }
