@@ -4,6 +4,11 @@
 --
 -- Usage: lua stress.lua <dbms> [tier] [--keep] [--inline]
 --                       [--timeout <minutes>] [-v|--verbose]
+--                       [--duration <minutes>] [--csv <file>]
+--
+-- Tiers smoke, standard and nightly run all scenarios; tier soak runs
+-- only scenarios/soak.lua, for --duration minutes (default 240), and
+-- writes its samples to the --csv file if given.
 --
 -- <dbms> selects config/<dbms>.lua (static settings) and backend/<dbms>.lua
 -- (DBMS specific functions). Connection data is read from environment
@@ -23,15 +28,21 @@ local scriptDir = arg[0]:match("^(.*[/\\])") or ""
 package.path = scriptDir .. "?.lua;" .. package.path
 
 local argparse = require("argparse")
+local dbutil = require("dbutil")
 local phases = require("phases")
 local report = require("report")
 local settings = require("settings")
 
-local tiers = { "smoke", "standard", "nightly" }
+local tiers = { "smoke", "standard", "nightly", "soak" }
 
 -- Minutes a scenario may run in its child process before it is stopped,
--- per tier; --timeout overrides them.
+-- per tier; --timeout overrides them. Tier soak: its run time plus
+-- soakExtraMinutes.
 local timeoutMinutes = { smoke = 15, standard = 60, nightly = 240 }
+local soakExtraMinutes = 30
+
+-- Run time of tier soak without --duration.
+local defaultSoakMinutes = 240
 
 local isWindows = package.config:sub(1, 1) == "\\"
 
@@ -39,8 +50,16 @@ local isWindows = package.config:sub(1, 1) == "\\"
 local scenarioNames = {
    "cursorLifecycle", "stmtLifecycle", "errorPaths", "warnings", "params",
    "connectionLifecycle", "connectionLoss", "concurrency", "threads",
-   "dataTypes", "transactions", "volume",
+   "dataTypes", "transactions", "volume", "soak",
 }
+
+-- The scenarios of the tier: only soak in tier soak, else all.
+local function scenariosOf(options)
+   if options.tier == "soak" then
+      return { "soak" }
+   end
+   return scenarioNames
+end
 
 -- Exit codes, to be evaluated by the orchestrator later on.
 local exitOk = 0
@@ -49,21 +68,32 @@ local exitInternalError = 2
 
 local function parseArguments()
    local parser = argparse("stress", "Stress test runner for LuaSQL drivers.")
-   parser:argument("dbms", "DBMS to test, selects config/<dbms>.lua and backend/<dbms>.lua.")
-   parser:argument("tier", "Test tier (default: smoke)."):choices(tiers):args("?")
+   parser:help_max_width(80)
+   parser:argument("dbms", "DBMS to test, selects config/<dbms>.lua and"
+                   .. " backend/<dbms>.lua.")
+   parser:argument("tier", "Test tier (default: smoke).")
+      :choices(tiers):args("?")
    parser:flag("--keep", "Keep the test environment after the run.")
    parser:flag("-v --verbose", "Also list the cases that passed.")
    parser:flag("--inline", "Run all scenarios in this process instead of"
                .. " one child process per scenario.")
    parser:option("--timeout", "Minutes a scenario may run in its child"
                  .. " process (default: smoke 15, standard 60, nightly"
-                 .. " 240)."):argname("<minutes>"):convert(tonumber)
+                 .. " 240, soak its duration + 30).")
+      :argname("<minutes>"):convert(tonumber)
+   parser:option("--duration", "Minutes tier soak runs (default 240).")
+      :argname("<minutes>"):convert(tonumber)
+   parser:option("--csv", "File for the samples of tier soak (CSV).")
+      :argname("<file>")
    parser:option("--child", "Run only this scenario (used internally for"
                  .. " the child processes)."):hidden(true)
    local options = parser:parse()
    options.tier = options.tier or "smoke"
    if options.timeout and options.timeout <= 0 then
       parser:error("--timeout must be a positive number of minutes")
+   end
+   if options.duration and options.duration <= 0 then
+      parser:error("--duration must be a positive number of minutes")
    end
    if options.child then
       local known = false
@@ -77,26 +107,13 @@ local function parseArguments()
    return options
 end
 
--- Runs a query that returns a single value and returns that value, or nil and an error message.
-local function queryValue(conn, sql)
-   local cur, err = conn:execute(sql)
-   if not cur then
-      return nil, tostring(err)
-   end
-   local value, fetchErr = cur:fetch()
-   cur:close()
-   if value == nil then
-      return nil, fetchErr and tostring(fetchErr) or "query returned no rows"
-   end
-   return value
-end
-
--- Closes all handles in reverse order of opening. Errors while closing are reported, but not raised.
+-- Closes all handles in reverse order of opening. Errors while closing
+-- are reported, but not raised.
 local function closeAll(handles)
    for i = #handles, 1, -1 do
       local ok, err = pcall(handles[i].close, handles[i])
       if not ok then
-	 io.stderr:write("warning: close failed: ", tostring(err), "\n")
+         io.stderr:write("warning: close failed: ", tostring(err), "\n")
       end
    end
 end
@@ -121,13 +138,13 @@ local function runPrep(options, config, values, adminConn, cleanups)
    print("prep:   " .. state.summary)
    if options.keep then
       report.print("note:   ", "--keep given, test environment stays in"
-		   .. " place", "note")
+                   .. " place", "note")
       return true
    end
    cleanups[#cleanups + 1] = function()
       local ok, teardownErr = prep.teardown(adminConn, state)
       if ok then
-	 print("teardown: done")
+         print("teardown: done")
       end
       return ok, teardownErr
    end
@@ -141,9 +158,9 @@ local function runCleanups(cleanups)
    for i = #cleanups, 1, -1 do
       local ok, result, err = pcall(cleanups[i])
       if not ok or not result then
-	 io.stderr:write("warning: cleanup failed: ",
-			 tostring(ok and err or result), "\n")
-	 allOk = false
+         io.stderr:write("warning: cleanup failed: ",
+                         tostring(ok and err or result), "\n")
+         allOk = false
       end
    end
    return allOk
@@ -164,6 +181,8 @@ local function runScenario(name, options, session)
       openFailingConnection = extra.openFailingConnection,
       openUserConnection = extra.openUserConnection,
       laneSpec = extra.laneSpec,
+      soakMinutes = options.duration or defaultSoakMinutes,
+      csvPath = options.csv,
       backend = session.backend,
       testConn = session.testConn,
       adminConn = session.adminConn,
@@ -204,7 +223,7 @@ end
 -- and an error message.
 local function runInline(options, session)
    local failed = {}
-   for _, name in ipairs(scenarioNames) do
+   for _, name in ipairs(scenariosOf(options)) do
       print(string.format("scenario %s:", name))
       if not runScenario(name, options, session) then
          failed[#failed + 1] = name
@@ -260,6 +279,12 @@ local function spawnScenario(uv, options, name, seconds)
    if options.verbose then
       args[#args + 1] = "--verbose"
    end
+   for _, option in ipairs({ "duration", "csv" }) do
+      if options[option] then
+         args[#args + 1] = "--" .. option
+         args[#args + 1] = tostring(options[option])
+      end
+   end
    local result = {}
    local timer = uv.new_timer()
    local handle, spawnErr
@@ -312,7 +337,7 @@ end
 -- and an error message.
 local function runIsolated(options, uv, minutes)
    local failed = {}
-   for _, name in ipairs(scenarioNames) do
+   for _, name in ipairs(scenariosOf(options)) do
       print(string.format("scenario %s:", name))
       -- The child writes to the same stdout, so everything printed here
       -- must be out first.
@@ -360,12 +385,13 @@ local function openSession(options, handles, cleanups)
    say(string.format("tier:   %s", options.tier))
    if not values.admin and not options.child then
       report.print("note:   ", "no admin credentials set, scenarios"
-		   .. " requiring admin access will be skipped", "note")
+                   .. " requiring admin access will be skipped", "note")
    end
 
    local okDriver, driver = pcall(require, config.driverModule)
    if not okDriver then
-      return nil, string.format("cannot load driver %s: %s", config.driverModule, tostring(driver))
+      return nil, string.format("cannot load driver %s: %s",
+                                config.driverModule, tostring(driver))
    end
    local env, envErr = driver[config.driverName]()
    if not env then
@@ -379,14 +405,14 @@ local function openSession(options, handles, cleanups)
       adminConn, adminErr = settings.connect(env, backend, values.admin,
                                              "admin")
       if not adminConn then
-	 return nil, adminErr
+         return nil, adminErr
       end
       handles[#handles + 1] = adminConn
       say(string.format("admin:  connected as %s", values.admin.user))
       local prepOk, prepErr = runPrep(options, config, values, adminConn,
-				      cleanups)
+                                      cleanups)
       if not prepOk then
-	 return nil, prepErr
+         return nil, prepErr
       end
    end
 
@@ -397,7 +423,7 @@ local function openSession(options, handles, cleanups)
    end
    handles[#handles + 1] = testConn
    say(string.format("test:   connected as %s to %s", values.test.user,
-		       backend.sourceName(values.test)))
+                       backend.sourceName(values.test)))
 
    local numbers, numbersErr = settings.useExactNumbers(testConn)
    if not numbers then
@@ -405,7 +431,8 @@ local function openSession(options, handles, cleanups)
    end
    say(string.format("numbers: %s", numbers))
 
-   local version, versionErr = queryValue(testConn, backend.versionQuery)
+   local version, versionErr = dbutil.queryValue(testConn,
+                                                 backend.versionQuery)
    if not version then
       return nil, "cannot query server version: " .. tostring(versionErr)
    end
@@ -419,12 +446,12 @@ local function openSession(options, handles, cleanups)
       smallTablespace = values.admin and config.tablespaceName or nil,
       -- A test connection on otherEnv, or on the environment of the run.
       openTestConnection = function(otherEnv)
-	 return settings.connect(otherEnv or env, backend, values.test,
-				 "extra test")
+         return settings.connect(otherEnv or env, backend, values.test,
+                                 "extra test")
       end,
       -- A new environment of the driver, or nil and an error message.
       newEnvironment = function()
-	 return driver[config.driverName]()
+         return driver[config.driverName]()
       end,
       -- A connect that must fail, on otherEnv or the environment of the
       -- run; returns what env:connect returns. kind: "unknownUser" (a
@@ -432,20 +459,20 @@ local function openSession(options, handles, cleanups)
       -- (the test host on a port without listener, backend.closedPort).
       -- Never a wrong password of the test user: that may lock it.
       openFailingConnection = function(kind, otherEnv)
-	 local failing = {}
-	 for key, value in pairs(values.test) do
-	    failing[key] = value
-	 end
-	 if kind == "unknownUser" then
-	    failing.user = backend.unknownUser
-	    failing.password = "wrong"
-	 elseif kind == "closedPort" then
-	    failing.port = backend.closedPort
-	 else
-	    error("unknown kind of failing connection: " .. tostring(kind))
-	 end
-	 return (otherEnv or env):connect(backend.sourceName(failing),
-					  failing.user, failing.password)
+         local failing = {}
+         for key, value in pairs(values.test) do
+            failing[key] = value
+         end
+         if kind == "unknownUser" then
+            failing.user = backend.unknownUser
+            failing.password = "wrong"
+         elseif kind == "closedPort" then
+            failing.port = backend.closedPort
+         else
+            error("unknown kind of failing connection: " .. tostring(kind))
+         end
+         return (otherEnv or env):connect(backend.sourceName(failing),
+                                          failing.user, failing.password)
       end,
       -- A connection to the test database as another user, e.g. one a
       -- scenario created itself, on otherEnv or the environment of the
@@ -495,6 +522,7 @@ local function run(options, handles, cleanups)
       return runInline(options, session)
    end
    local minutes = options.timeout or timeoutMinutes[options.tier]
+      or (options.duration or defaultSoakMinutes) + soakExtraMinutes
    print(string.format("mode:   one process per scenario, timeout %s",
                        minutesText(minutes)))
    return runIsolated(options, uv, minutes)
@@ -544,12 +572,24 @@ local function childMain(options)
    return code
 end
 
+-- Prints the end time and the run time since 'started' (from os.time).
+local function printEnd(started)
+   local finished = os.time()
+   local seconds = math.floor(os.difftime(finished, started))
+   print(string.format("end:    %s, run time %d:%02d:%02d",
+                       os.date("%Y-%m-%d %H:%M:%S", finished),
+                       seconds // 3600, seconds % 3600 // 60, seconds % 60))
+end
+
 local function main()
    local options = parseArguments()
    report.verbose = options.verbose
    if options.child then
       os.exit(childMain(options))
    end
+
+   local started = os.time()
+   print("start:  " .. os.date("%Y-%m-%d %H:%M:%S", started))
 
    local handles = {}
    local cleanups = {}
@@ -558,6 +598,8 @@ local function main()
    -- Cleanups need the open connections, so they run before closeAll.
    local cleanupOk = runCleanups(cleanups)
    closeAll(handles)
+
+   printEnd(started)
 
    if not ok then
       io.stderr:write("internal error: ", tostring(runOk), "\n")

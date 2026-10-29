@@ -173,6 +173,21 @@ return {
    sleepingSessionQuery = "SELECT COUNT(*) FROM v$session"
       .. " WHERE sid = %d AND event = 'PL/SQL lock timer'",
    killMarkedError = "ORA%-00031",
+   -- Used by the soak scenario: a table of its own; values of the date
+   -- and time types of the session; the PGA memory of session %d in
+   -- bytes (grows with statements the server keeps for the session).
+   soakTableCreate = "CREATE TABLE luastress_soak (id NUMBER PRIMARY KEY,"
+      .. " n NUMBER, s VARCHAR2(100))",
+   soakTableDrop = "DROP TABLE IF EXISTS luastress_soak PURGE",
+   soakInsert = "INSERT INTO luastress_soak (id, n, s) VALUES (:1, :2, :3)",
+   soakUpdate = "UPDATE luastress_soak SET n = n + 1 WHERE id = :1",
+   soakDelete = "DELETE FROM luastress_soak WHERE id = :1",
+   soakTypesQuery = "SELECT SYSDATE, SYSTIMESTAMP,"
+      .. " CAST(SYSTIMESTAMP AS TIMESTAMP WITH LOCAL TIME ZONE),"
+      .. " NUMTODSINTERVAL(1.5, 'DAY') FROM dual",
+   pgaQuery = "SELECT s.value FROM v$sesstat s"
+      .. " JOIN v$statname n ON n.statistic# = s.statistic#"
+      .. " WHERE n.name = 'session pga memory' AND s.sid = %d",
    offsetQuery = "SELECT %d + level FROM dual CONNECT BY level <= %d",
    offsetBindQuery = "SELECT :1 + level FROM dual CONNECT BY level <= :2",
    -- Used by the warnings scenario: statements that succeed with a
