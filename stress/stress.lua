@@ -2,11 +2,12 @@
 -- stress.lua
 -- Stress test runner for LuaSQL drivers.
 --
--- Usage: lua stress.lua <dbms> [tier] [--keep] [--inline]
---                       [--timeout <minutes>] [-v|--verbose]
+-- Usage: lua stress.lua <dbms> [tier] [--only <scenarios>] [--keep]
+--                       [--inline] [--timeout <minutes>] [-v|--verbose]
 --                       [--duration <minutes>] [--csv <file>]
 --
--- Tiers smoke, standard and nightly run all scenarios; tier soak runs
+-- Tiers smoke, standard and nightly run all scenarios, or with --only
+-- the listed ones (comma separated, in the order given); tier soak runs
 -- only scenarios/soak.lua, for --duration minutes (default 240), and
 -- writes its samples to the --csv file if given.
 --
@@ -53,12 +54,43 @@ local scenarioNames = {
    "dataTypes", "transactions", "volume", "soak",
 }
 
--- The scenarios of the tier: only soak in tier soak, else all.
+-- The scenarios to run: only soak in tier soak, else those of --only
+-- or all.
 local function scenariosOf(options)
    if options.tier == "soak" then
       return { "soak" }
    end
-   return scenarioNames
+   return options.only or scenarioNames
+end
+
+local function isScenario(name)
+   for _, known in ipairs(scenarioNames) do
+      if known == name then
+         return true
+      end
+   end
+   return false
+end
+
+-- Splits the value of --only into a list of scenario names, in the order
+-- given and without repeats. Returns the list, or nil and an error
+-- message.
+local function parseOnly(text)
+   local list, seen = {}, {}
+   for name in (text .. ","):gmatch("%s*([^,]-)%s*,") do
+      if name == "" then
+         return nil, "--only: empty scenario name"
+      end
+      if not isScenario(name) then
+         return nil, "--only: unknown scenario '" .. name .. "'; known: "
+            .. table.concat(scenarioNames, ", ")
+      end
+      if not seen[name] then
+         seen[name] = true
+         list[#list + 1] = name
+      end
+   end
+   return list
 end
 
 -- Exit codes, to be evaluated by the orchestrator later on.
@@ -73,6 +105,8 @@ local function parseArguments()
                    .. " backend/<dbms>.lua.")
    parser:argument("tier", "Test tier (default: smoke).")
       :choices(tiers):args("?")
+   parser:option("--only", "Run only these scenarios, comma separated,"
+                 .. " e.g. threads,soak."):argname("<scenarios>")
    parser:flag("--keep", "Keep the test environment after the run.")
    parser:flag("-v --verbose", "Also list the cases that passed.")
    parser:flag("--inline", "Run all scenarios in this process instead of"
@@ -95,14 +129,19 @@ local function parseArguments()
    if options.duration and options.duration <= 0 then
       parser:error("--duration must be a positive number of minutes")
    end
-   if options.child then
-      local known = false
-      for _, name in ipairs(scenarioNames) do
-         known = known or name == options.child
+   if options.only then
+      if options.tier == "soak" then
+         parser:error("--only cannot be used with tier soak, which runs"
+                      .. " only scenario soak")
       end
-      if not known then
-         parser:error("unknown scenario '" .. options.child .. "'")
+      local list, err = parseOnly(options.only)
+      if not list then
+         parser:error(err)
       end
+      options.only = list
+   end
+   if options.child and not isScenario(options.child) then
+      parser:error("unknown scenario '" .. options.child .. "'")
    end
    return options
 end
@@ -383,6 +422,9 @@ local function openSession(options, handles, cleanups)
 
    say(string.format("dbms:   %s (%s)", options.dbms, config.driverModule))
    say(string.format("tier:   %s", options.tier))
+   if options.only then
+      say("only:   " .. table.concat(options.only, ", "))
+   end
    if not values.admin and not options.child then
       report.print("note:   ", "no admin credentials set, scenarios"
                    .. " requiring admin access will be skipped", "note")
