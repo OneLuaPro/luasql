@@ -124,6 +124,17 @@ lua stress.lua oracle smoke
 So far it is implemented for Oracle (`luasql.oci8`); backends for the other drivers are planned. Requirements, tiers, options, scenarios and known limitations are described in [`stress/README.md`](stress/README.md), each scenario in detail under [`stress/doc/`](stress/doc/).
 
 
+## Documentation
+
+The reference and the manual are written for [LDoc](https://github.com/lunarmodules/LDoc): the doc comments in `src/ls_oci8.c` describe the API, `doc/ldoc/` holds the manual topics, the examples, the configuration and the style. The CMake build generates the HTML into `<build>/doc` and installs it to `share/doc/luasql`; to generate it by hand, run from the root of the repository:
+
+```CMD
+ldoc -c doc/ldoc/config.ld -d <output directory> .
+```
+
+The HTML pages under `doc/us/` and its translations are the documentation of upstream LuaSQL and stay unchanged.
+
+
 ## Staying in Sync with Upstream
 
 `SyncFork.sh` merges the master branch of [lunarmodules/luasql](https://github.com/lunarmodules/luasql) into this fork. Changes that are of general use may be offered upstream.

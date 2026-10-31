@@ -4,6 +4,128 @@
 ** See Copyright Notice in license.html
 */
 
+/***
+Oracle driver of LuaSQL.
+
+`luasql.oci8` connects Lua to Oracle databases through OCI, the Oracle Call
+Interface of the Oracle Instant Client. It implements the common LuaSQL
+objects (@{environment}, @{connection}, @{cursor}) and prepared statements
+(@{statement}), plus the additions of OneLuaPro: driver options, typed
+parameters that stay bound and `statement:reset`.
+
+The driver needs the DLLs of Oracle Instant Client 23 (64-bit). If they are
+not found, `require` raises an error that names the missing `oci.dll`; the
+@{03-oracle.md|Oracle topic} describes the setup, the data types and the
+behavior of Oracle that is worth knowing.
+
+All objects follow the same rules:
+
+- A call that fails returns `nil` (or `false`) and an error message. The
+  message starts with `LuaSQL:`; errors of the server contain their `ORA-`
+  code. Using a closed object or passing an argument of the wrong type raises
+  an error instead.
+- An object is closed by its `close` method, by a to-be-closed variable
+  (`<close>`) or by the garbage collector.
+- An object can be closed only after the objects it created: an environment
+  after its connections, a connection after its cursors and statements.
+
+Besides the function @{oci8} and the table @{type}, the module holds the
+strings `_VERSION` (e.g. `"LuaSQL 2.8.1 (for Lua 5.5)"`), `_COPYRIGHT` and
+`_DESCRIPTION`.
+
+@module luasql.oci8
+@usage
+local driver = require "luasql.oci8"
+local env  = assert(driver.oci8())
+local conn = assert(env:connect("dbhost:1521/FREEPDB1", "scott",
+                                os.getenv("ORACLE_PASSWORD")))
+local cur  = assert(conn:execute("SELECT id, name FROM emp ORDER BY id"))
+local id, name = cur:fetch()
+while id do
+  print(id, name)
+  id, name = cur:fetch()
+end
+conn:close()
+env:close()
+*/
+
+/***
+Creates an environment.
+
+The environment holds the OCI environment of the driver. Create one per Lua
+state, i.e. one per thread, and open any number of connections on it. It is
+created with `OCI_THREADED`, so several Lua states (e.g. lanes of Lua Lanes)
+can use the driver at the same time, each with its own environment.
+
+@function oci8
+@treturn[1] environment the new environment
+@treturn[2] nil
+@treturn[2] string error message
+@usage local env = assert(require("luasql.oci8").oci8())
+*/
+
+/***
+Type constants for the parameters of prepared statements.
+
+A parameter of @{statement:execute} is a pair `{value, type}` with one of
+these constants as type, or `type.null` alone for NULL. Reading a field that
+does not exist raises an error, so a misspelled type is found at once. The
+@{02-prepared-statements.md|topic on prepared statements} explains the rules.
+
+@table type
+@field int an integer (Lua number), bound as an integer
+@field number a float (Lua number), bound as a double; Oracle keeps 15
+significant digits. Infinity and NaN are bound as `BINARY_DOUBLE`
+@field string a string of any length, also into `CLOB` columns; an embedded
+`"\0"` is kept
+@field boolean `true` or `false`, bound as `1` or `0`
+@field date a string `"YYYY-MM-DD"` or `"YYYY-MM-DD HH24:MI:SS"`, with a
+leading minus sign for years before Christ
+@field time a string, converted by Oracle with `NLS_DATE_FORMAT`; Oracle
+has no `TIME` type
+@field timestamp a string `"YYYY-MM-DD HH24:MI:SS"` with an optional
+fraction of a second, e.g. `".500000"`; without time zone
+@field null NULL; used alone, without a value
+@usage
+local T = require("luasql.oci8").type
+stmt:execute{ {42, T.int}, {"Grüße", T.string}, T.null }
+*/
+
+
+/***
+An environment, created by @{oci8}.
+
+It opens connections. It can be closed only after all of its connections.
+@type environment
+*/
+
+/***
+A connection to a database, created by @{environment:connect}.
+
+It runs SQL statements, prepares statements and controls transactions. It can
+be closed only after all of its cursors and statements.
+@type connection
+*/
+
+/***
+A cursor over the rows of a query, created by @{connection:execute} or
+@{statement:execute}.
+
+It is closed automatically after its last row.
+@type cursor
+*/
+
+/***
+A prepared statement, created by @{connection:prepare}.
+
+It runs the same SQL statement many times, with parameters. Parameters stay
+bound to the statement, as in OCI: a placeholder keeps its value until it is
+bound again, @{statement:reset} is called or the statement is closed. The
+@{02-prepared-statements.md|topic on prepared statements} explains this in
+detail.
+@type statement
+*/
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -962,6 +1084,33 @@ static void cur_nullify (lua_State *L, cur_data *cur) {
 }
 
 
+/*** @type cursor */
+/***
+Fetches the next row.
+
+Without a table, the values of the columns are returned as separate values.
+With a table, they are stored in it and the table is returned: under the
+column numbers (mode `"n"`, the default), under the column names (mode
+`"a"`) or both (`"na"`). A NULL value is `nil`. The data types and their Lua
+values are listed in the @{03-oracle.md|Oracle topic}.
+
+At the end of the rows, `nil` is returned and the cursor is closed.
+
+@function fetch
+@tparam[opt] table row table to store the values in
+@tparam[opt="n"] string mode `"n"`, `"a"` or `"na"`, see above
+@return[1] the values of the columns, or the table
+@treturn[2] nil after the last row
+@treturn[3] nil
+@treturn[3] string error message
+@usage
+local cur = assert(conn:execute("SELECT id, name FROM emp"))
+local row = cur:fetch({}, "a")
+while row do
+  print(row.id, row.name)
+  row = cur:fetch(row, "a")
+end
+*/
 /*
 ** Get another row of the given cursor.
 */
@@ -1038,6 +1187,16 @@ static int cur_fetch (lua_State *L) {
 }
 
 
+/*** @type cursor */
+/***
+Closes the cursor before its last row.
+
+The garbage collector and a to-be-closed variable call it as well.
+@function close
+@treturn[1] boolean `true`
+@treturn[2] boolean `false` if the cursor is already closed
+@treturn[2] string error message
+*/
 /*
 ** Close the cursor on top of the stack.
 ** Return 1
@@ -1068,6 +1227,12 @@ static int cur_gc (lua_State *L) {
 }
 
 
+/*** @type cursor */
+/***
+Returns the names of the columns, in lower case.
+@function getcolnames
+@treturn table list of the names, in the order of the columns
+*/
 /*
 ** Return the list of field names as a table on top of the stack.
 */
@@ -1152,6 +1317,16 @@ static char *getcolumntype (column_data *col) {
 }
 
 
+/*** @type cursor */
+/***
+Returns the types of the columns.
+
+The names are `"string"`, `"number"`, `"binary"`, `"boolean"`, `"date"`,
+`"timestamp"`, `"interval"` and `"json"`; the
+@{03-oracle.md|Oracle topic} shows which Oracle types they stand for.
+@function getcoltypes
+@treturn table list of the type names, in the order of the columns
+*/
 /*
 ** Return the list of field types as a table on top of the stack.
 */
@@ -1175,6 +1350,22 @@ static int cur_getcoltypes (lua_State *L) {
 }
 
 
+/*** @type connection */
+/***
+Closes the connection and logs off.
+
+An open transaction is rolled back first, so only explicitly committed
+changes remain (Oracle itself would commit at logoff). Fails while cursors or
+statements of the connection are open. The garbage collector and a
+to-be-closed variable call it as well; a to-be-closed variable ignores the
+failure, so close cursors and statements before the end of the block.
+
+@function close
+@treturn[1] boolean `true`
+@treturn[2] boolean `false` if the connection is already closed or has open
+cursors or statements
+@treturn[2] string error message
+*/
 /*
 ** Close a Connection object.
 */
@@ -1310,6 +1501,24 @@ static int create_cursor (lua_State *L, int o, conn_data *conn, OCIStmt *stmt,
 }
 
 
+/*** @type connection */
+/***
+Runs an SQL statement.
+
+The statement is given without a trailing `;`; a PL/SQL block ends with
+`END;` as usual. Each call prepares the statement again; for a statement that
+runs many times, or that needs parameters, use @{connection:prepare}.
+
+@function execute
+@tparam string sql the SQL statement or PL/SQL block
+@treturn[1] cursor a cursor for a query
+@treturn[2] integer the number of rows affected, for any other statement
+@treturn[3] nil
+@treturn[3] string error message
+@usage
+local n = assert(conn:execute("UPDATE emp SET sal = sal * 1.1 WHERE deptno = 10"))
+print(n .. " rows updated")
+*/
 /*
 ** Execute an SQL statement.
 ** Return a Cursor object if the statement is a query, otherwise
@@ -1408,6 +1617,17 @@ static void stmt_free_binds (lua_State *L, stmt_data *stmt) {
 	stmt->binds = LUA_NOREF;
 }
 
+/*** @type statement */
+/***
+Closes the statement.
+
+Fails while a cursor of the statement is open. The garbage collector and a
+to-be-closed variable call it as well.
+@function close
+@treturn[1] boolean `true`
+@treturn[2] nil
+@treturn[2] string error message, also if the statement is already closed
+*/
 static int stmt_close (lua_State *L) {
 	conn_data *conn;
 	stmt_data *stmt = (stmt_data *)luaL_checkudata (L, 1, LUASQL_STATEMENT_OCI8);
@@ -1451,6 +1671,24 @@ static int stmt_close (lua_State *L) {
 }
 
 
+/*** @type connection */
+/***
+Prepares a statement for execution with parameters.
+
+The statement is parsed once and can then be executed many times, with
+parameters given as placeholders `:1`, `:2`, ... or `:name`.
+
+@function prepare
+@tparam string sql the SQL statement or PL/SQL block
+@treturn[1] statement the prepared statement
+@treturn[2] nil
+@treturn[2] string error message
+@usage
+local stmt = assert(conn:prepare("INSERT INTO emp (id, name) VALUES (:1, :2)"))
+assert(stmt:execute{ {1, T.int}, {"Smith", T.string} })
+stmt:close()
+@see statement
+*/
 /*
 ** Prepares an SQL statement.
 ** Returns the statement object.
@@ -1759,6 +1997,18 @@ static int stmt_bind (lua_State *L, stmt_data *stmt, int is_named) {
     return 0;
 }
 
+/*** @type statement */
+/***
+Drops all parameters bound to the statement, as in the ODBC driver.
+
+Afterwards, an execute without a value for a placeholder fails with
+`ORA-01008`. Fails while a cursor of the statement is open.
+
+@function reset
+@treturn[1] boolean `true`
+@treturn[2] nil
+@treturn[2] string error message
+*/
 /*
 ** Drop all bindings of a statement, like stmt:reset() of the ODBC
 ** driver. OCI has no call to remove a binding, so the statement is
@@ -1811,6 +2061,33 @@ static int stmt_reset (lua_State *L) {
     return 1;
 }
 
+/*** @type statement */
+/***
+Executes the statement.
+
+`params` binds values to the placeholders: a list for `:1`, `:2`, ...
+(by position) or a table with the names of the placeholders as keys (by
+name), never both. Each value is a pair `{value, type}` with a constant of
+@{type}, or `type.null` alone for NULL. Placeholders not given keep the value
+bound last; without `params`, the statement runs with the values bound last.
+
+Only one cursor of a statement can be open at a time: close it, or fetch
+its last row, before the next execute.
+
+@function execute
+@tparam[opt] table params the parameters
+@treturn[1] cursor a cursor for a query
+@treturn[2] integer the number of rows affected, for any other statement
+@treturn[3] nil
+@treturn[3] string error message, e.g. with `ORA-01008` if a placeholder has
+no value
+@usage
+local stmt = assert(conn:prepare("SELECT name FROM emp WHERE id = :id"))
+local cur = assert(stmt:execute{ id = {7, T.int} })
+print(cur:fetch())
+cur:close()
+stmt:close()
+*/
 /*
 ** Validates the Params table (bind_data)  
 ** bind the data with the Prepared Statement [ Upto this part is done! ]
@@ -1902,6 +2179,14 @@ static int stmt_execute (lua_State *L) {
 }
 
 
+/*** @type connection */
+/***
+Commits the current transaction.
+@function commit
+@treturn[1] boolean `true`
+@treturn[2] nil
+@treturn[2] string error message
+*/
 /*
 ** Commit the current transaction.
 */
@@ -1918,6 +2203,14 @@ static int conn_commit (lua_State *L) {
 }
 
 
+/*** @type connection */
+/***
+Rolls back the current transaction.
+@function rollback
+@treturn[1] boolean `true`
+@treturn[2] nil
+@treturn[2] string error message
+*/
 /*
 ** Rollback the current transaction.
 */
@@ -1934,6 +2227,20 @@ static int conn_rollback (lua_State *L) {
 }
 
 
+/*** @type connection */
+/***
+Turns autocommit on or off.
+
+A new connection is in autocommit mode: each statement is committed when it
+succeeds. With autocommit off, changes stay in a transaction until
+@{connection:commit} or @{connection:rollback}. Turning autocommit on rolls
+back an open transaction. Oracle commits an open transaction implicitly at
+every DDL statement (e.g. `CREATE TABLE`), also with autocommit off.
+
+@function setautocommit
+@tparam boolean on `true` to turn autocommit on, `false` to turn it off
+@treturn boolean `true`
+*/
 /*
 ** Set "auto commit" property of the connection.
 ** If 'true', then rollback current transaction.
@@ -1956,6 +2263,32 @@ static int conn_setautocommit (lua_State *L) {
 }
 
 
+/*** @type connection */
+/***
+Sets a driver option of the connection.
+
+The only option so far is `numbers`. It decides how `NUMBER` columns are
+read and affects cursors opened afterwards:
+
+- `"float"` (default): as a float, converted by OCI. Integers above 2^53 and
+  some decimal fractions are not exact.
+- `"exact"`: integral values in the integer range as Lua integers, all others
+  as correctly rounded floats.
+
+`BINARY_FLOAT` and `BINARY_DOUBLE` columns are always read as floats.
+
+@function setoption
+@tparam string name name of the option
+@tparam string value new value
+@treturn[1] boolean `true`
+@treturn[2] nil
+@treturn[2] string error message for an unknown option or value
+@usage
+assert(conn:setoption("numbers", "exact"))
+local cur = conn:execute("SELECT COUNT(*) FROM emp")
+print(math.type(cur:fetch()))   --> integer
+cur:close()
+*/
 /*
 ** Set a driver option of the connection. Affects cursors created afterwards.
 ** Returns true, or nil plus an error message for an unknown option or value.
@@ -1984,6 +2317,15 @@ static int conn_setoption (lua_State *L) {
 }
 
 
+/*** @type connection */
+/***
+Reads a driver option of the connection.
+@function getoption
+@tparam string name name of the option, see @{connection:setoption}
+@treturn[1] string current value
+@treturn[2] nil
+@treturn[2] string error message for an unknown option
+*/
 /*
 ** Return the current value of a driver option of the connection,
 ** or nil plus an error message for an unknown option.
@@ -2001,6 +2343,29 @@ static int conn_getoption (lua_State *L) {
 }
 
 
+/*** @type environment */
+/***
+Opens a connection to an Oracle database.
+
+A failing connect frees everything it allocated. A logon that succeeds with a
+warning, e.g. a password in its grace period, counts as success. A connect
+that cannot reach the server can take a few seconds.
+
+@function connect
+@tparam string source the database: an Easy Connect string
+`"host[:port]/service"`, e.g. `"dbhost:1521/FREEPDB1"`, a net service name
+of `tnsnames.ora` or a full connect descriptor
+@tparam string user user name
+@tparam string password password of the user
+@treturn[1] connection the new connection, in autocommit mode
+@treturn[2] nil
+@treturn[2] string error message, e.g. with `ORA-01017` (invalid user name or
+password) or `ORA-12541` (no listener)
+@usage
+local conn, err = env:connect("dbhost:1521/FREEPDB1", "scott",
+                              os.getenv("ORACLE_PASSWORD"))
+if not conn then error(err) end
+*/
 /*
 ** Connects to a data source.
 */
@@ -2074,6 +2439,19 @@ static int env_connect (lua_State *L) {
 }
 
 
+/*** @type environment */
+/***
+Closes the environment and frees its OCI resources.
+
+Fails while connections of the environment are open. The garbage collector
+and a to-be-closed variable call it as well.
+
+@function close
+@treturn[1] boolean `true`
+@treturn[2] boolean `false` if the environment is already closed or has open
+connections
+@treturn[2] string error message
+*/
 /*
 ** Close environment object.
 */

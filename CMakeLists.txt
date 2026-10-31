@@ -192,6 +192,41 @@ install(FILES src/ado/ado.lua DESTINATION ${INSTALL_LUASQL_LDIR})
 message(STATUS "Configuring LuaSQL-Oracle (OCI8)...")
 add_luasql_driver(oci8 "src/ls_oci8.c" "${ORACLE_INCLUDE_DIR}" "${ORACLE_LIBRARY}")
 
+# ------------------------------------------------------------------------------
+# Documentation (LDoc)
+# Generated from the LDoc comments in src/ and from doc/ldoc (manual, examples,
+# style) into <build>/doc, installed to <prefix>/share/doc/luasql. Needs ldoc,
+# e.g. the one of the OneLuaPro installation; skipped with a warning without.
+option(LUASQL_BUILD_DOC "Generate the LDoc documentation" ON)
+if(LUASQL_BUILD_DOC)
+  find_program(LDOC_EXECUTABLE NAMES ldoc ldoc.bat
+    HINTS "${CMAKE_INSTALL_PREFIX}/bin" "${LIBLUA_INSTALLDIR}/bin")
+  if(LDOC_EXECUTABLE)
+    message(STATUS "LDoc                  : ${LDOC_EXECUTABLE}")
+    set(LUASQL_DOC_DIR "${PROJECT_BINARY_DIR}/doc")
+    file(GLOB LUASQL_DOC_SOURCES CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/doc/ldoc/*.*"
+      "${CMAKE_CURRENT_SOURCE_DIR}/doc/ldoc/manual/*.md"
+      "${CMAKE_CURRENT_SOURCE_DIR}/doc/ldoc/examples/*.lua"
+    )
+    # ldoc reads the configuration, changes to its directory and resolves
+    # the paths in it from there; the output directory is absolute
+    add_custom_command(
+      OUTPUT "${LUASQL_DOC_DIR}/index.html"
+      COMMAND "${LDOC_EXECUTABLE}" -c doc/ldoc/config.ld -d "${LUASQL_DOC_DIR}" .
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+      DEPENDS ${LUASQL_DOC_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/src/ls_oci8.c"
+      COMMENT "Generating the LuaSQL documentation with LDoc..."
+      VERBATIM
+    )
+    add_custom_target(luasql_doc ALL DEPENDS "${LUASQL_DOC_DIR}/index.html")
+    install(DIRECTORY "${LUASQL_DOC_DIR}/"
+      DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/luasql")
+  else()
+    message(WARNING "ldoc not found: the LuaSQL documentation is not generated")
+  endif()
+endif()
+
 # # 1. ODBC (Nutzt Windows native odbc32.lib)
 # if(WITH_ODBC)
 #     message(STATUS "Configuring LuaSQL-ODBC...")
