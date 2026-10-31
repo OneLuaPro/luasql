@@ -110,6 +110,7 @@ Among others: no leak of temporary LOBs per row; no read of freed bind memory wh
 
 - `tests/test.lua` is the test bench of upstream LuaSQL, e.g. `lua test.lua oci8 <source> <user> <password>` in `tests/`.
 - [`stress/`](stress/README.md) holds the stress test suite.
+- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD`; so far for `luasql.oci8`.
 
 ### Stress Test Suite
 
