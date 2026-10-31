@@ -8,6 +8,12 @@
 DEFINITION_STRING_TYPE_NAME = "varchar(60)"
 QUERYING_STRING_TYPE_NAME = "string"
 
+-- Oracle keeps dropped tables in the recycle bin; PURGE drops them
+-- for good, so repeated test runs leave nothing behind.
+function sql_drop_table (table_name)
+	return string.format ("drop table %s purge", table_name)
+end
+
 -- Oracle Autonomous Database enables parallel DML by default, which
 -- causes ORA-12838 when mixing DML and SELECT in the same transaction.
 -- Wrap the rollback test to disable parallel DML for this session.

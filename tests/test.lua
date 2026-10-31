@@ -48,6 +48,16 @@ function sql_erase_table (table_name)
 end
 
 ---------------------------------------------------------------------
+-- Produces a SQL statement which drops a table.
+-- Drivers may redefine it, e.g. to bypass a recycle bin.
+-- @param table_name String with the name of the table.
+-- @return String with SQL statement.
+---------------------------------------------------------------------
+function sql_drop_table (table_name)
+	return string.format ("drop table %s", table_name)
+end
+
+---------------------------------------------------------------------
 -- checks for a value and throw an error if it is invalid.
 ---------------------------------------------------------------------
 function assert2 (expected, value, msg)
@@ -177,7 +187,7 @@ function create_table ()
 	-- Check SQL statements.
 	CONN = CONN_OK (ENV:connect (datasource, username, password, host,
 				     port, unix_socket, client_flag))
-	CONN:execute"drop table t"
+	CONN:execute (sql_drop_table"t")
 	-- Create t.
 	local cmd = define_table(TOTAL_FIELDS)
 	assert2 (CREATE_TABLE_RETURN_VALUE, CONN:execute (cmd))
@@ -691,9 +701,9 @@ function drop_table ()
 
 	assert2 (true, CONN:setautocommit(true), "couldn't enable autocommit")
 	-- Postgres and SQLite3 returns 0, ODBC retorns -1, others returns 1
-	assert2 (DROP_TABLE_RETURN_VALUE, CONN:execute ("drop table t"))
+	assert2 (DROP_TABLE_RETURN_VALUE, CONN:execute (sql_drop_table"t"))
 	-- Dropping an already dropped table should return 0
-	assert2 (nil, CONN:execute ("drop table t"))
+	assert2 (nil, CONN:execute (sql_drop_table"t"))
 end
 
 ---------------------------------------------------------------------
@@ -777,7 +787,7 @@ function prepared_statements_test ()
 	assert (type(luasql_type) == "table", "luasql.type is missing")
 
 	-- 1. Create table
-	pcall(CONN.execute, CONN, "DROP TABLE t_ps")
+	pcall(CONN.execute, CONN, sql_drop_table"t_ps")
 	assert2 (0, CONN:execute ([[
 		CREATE TABLE t_ps (
 			id NUMBER PRIMARY KEY,
@@ -876,7 +886,7 @@ function prepared_statements_test ()
 	assert (stmt:close())
 
 	-- 8. Cleanup
-	assert2 (0, CONN:execute("DROP TABLE t_ps"))
+	assert2 (0, CONN:execute(sql_drop_table"t_ps"))
 end
 
 ---------------------------------------------------------------------
