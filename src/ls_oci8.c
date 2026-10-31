@@ -2489,6 +2489,7 @@ static int env_close (lua_State *L) {
 */
 static int create_environment (lua_State *L) {
 	env_data *env = (env_data *)LUASQL_NEWUD(L, sizeof(env_data));
+	sword status;
 	luasql_setmeta (L, LUASQL_ENVIRONMENT_OCI8);
 	/* fill in structure */
 	env->closed = 0;
@@ -2497,14 +2498,15 @@ static int create_environment (lua_State *L) {
 	env->errhp = NULL;
 	/* OCI_THREADED: several Lua states (e.g. lanes) may use OCI in
 	   different threads at the same time, each with its own environment */
-	if (OCIEnvNlsCreate ( &(env->envhp), (ub4)OCI_THREADED, (dvoid *)0,
+	status = OCIEnvNlsCreate ( &(env->envhp), (ub4)OCI_THREADED, (dvoid *)0,
 			(dvoid * (*)(dvoid *, size_t)) 0,
 			(dvoid * (*)(dvoid *, dvoid *, size_t)) 0,
 			(void (*)(dvoid *, dvoid *)) 0,
 			(size_t) 0,
 			(dvoid **) 0,
-			(ub2) 873, (ub2) 873))
-		luasql_faildirect (L, "couldn't create environment");
+			(ub2) 873, (ub2) 873);
+	if (status != OCI_SUCCESS && status != OCI_SUCCESS_WITH_INFO)
+		return luasql_faildirect (L, "couldn't create environment");
 	/* error handler */
 	ASSERT (L, OCIHandleAlloc((dvoid *) env->envhp,
 		(dvoid **) &(env->errhp), /* !!! */
