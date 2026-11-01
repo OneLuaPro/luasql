@@ -2314,7 +2314,8 @@ queries executed afterwards, by `conn:execute` and by prepared statements.
 Larger values read large results faster, but OCI allocates the buffer for
 that many rows at every query, whatever the size of the result; very large
 values fail with `ORA-01019`. Values from 100 to a few thousand are
-sensible; 0 fetches each row on its own.
+sensible; 0 fetches each row on its own. When a query fails in the middle of
+its result, the rows fetched ahead with the failing row are not delivered.
 
 @function setoption
 @tparam string name name of the option

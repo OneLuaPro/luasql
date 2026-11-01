@@ -195,6 +195,16 @@ large values fail even for small results with `ORA-01019` (unable to
 allocate memory). Values from 100 to a few thousand are sensible; `0`
 fetches each row on its own.
 
+Two consequences come from OCI and are kept as they are:
+
+- A query that fails with `ORA-01019` keeps its cursor on the server until
+  the connection is closed; OCI no longer knows it and cannot close it. Many
+  such failures end in `ORA-01000` (maximum open cursors exceeded).
+- When a query fails in the middle of its result, e.g. with a division by
+  zero in one row, the rows fetched ahead together with the failing row are
+  not delivered: with 100, up to 99 rows fewer arrive before the error than
+  with a prefetch of 1. The error itself is always reported.
+
 ## Transactions
 
 - A new connection is in **autocommit** mode: every statement is committed
