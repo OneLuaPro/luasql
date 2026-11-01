@@ -75,6 +75,28 @@ local function scalar(sql)
   return v
 end
 
+-- how the session is connected: protocol and, if the view may be read,
+-- the negotiated encryption and integrity algorithms (information only)
+info("network protocol",
+  scalar("SELECT SYS_CONTEXT('USERENV', 'NETWORK_PROTOCOL') FROM dual"))
+do
+  local cur = exec([[SELECT network_service_banner FROM v$session_connect_info
+                      WHERE sid = SYS_CONTEXT('USERENV', 'SID')]])
+  if type(cur) == "userdata" then
+    local enc, sum = "none", "none"
+    local b = cur:fetch()
+    while b do
+      enc = b:match("^(%S+) Encryption service adapter") or enc
+      sum = b:match("^(%S+) Crypto%-checksumming service adapter") or sum
+      b = cur:fetch()
+    end
+    info("network encryption", enc)
+    info("network integrity", sum)
+  else
+    info("network encryption", "unknown (no access to V$SESSION_CONNECT_INFO)")
+  end
+end
+
 -- drop leftovers of an earlier run
 drop(TABLE)
 
