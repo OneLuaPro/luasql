@@ -486,12 +486,15 @@ check("back to float", conn:setoption("numbers", "float") == true and conn:getop
 print("-- prefetch")
 check("prefetch defaults to 100", conn:getoption("prefetch") == 100)
 check("prefetch is an integer", math.type(conn:getoption("prefetch")) == "integer")
-for _, bad in ipairs{ -1, 1.5, 2^32, "100", 0/0 } do
+for _, bad in ipairs{ -1, 1.5, 2^31, "100", 0/0 } do
   local pr, pm = conn:setoption("prefetch", bad)
   check("prefetch rejects " .. type(bad) .. " " .. tostring(bad),
     pr == nil and tostring(pm):find("invalid value") ~= nil, pm)
 end
 check("invalid prefetch keeps the value", conn:getoption("prefetch") == 100)
+-- the largest value OCI accepts (MINSWORDMAXVAL); only set, not used
+check("prefetch accepts 2147483647",
+  conn:setoption("prefetch", 2147483647) == true and conn:getoption("prefetch") == 2147483647)
 -- every value reads every row exactly once, by execute and by prepared
 drop("lt_oci8_pf")
 assert(exec("CREATE TABLE lt_oci8_pf (id NUMBER)"))

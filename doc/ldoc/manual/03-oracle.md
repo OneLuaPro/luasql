@@ -186,10 +186,14 @@ print(conn:getoption("prefetch"))   --> 1000
 
 It applies to queries executed afterwards, by `conn:execute` and by
 prepared statements. Measured on a local server, 100 000 rows took 8 s with
-the OCI default, 0.3 s with 100 and 0.15 s with 1000. A larger value needs a
-buffer for that many rows per query; with 1000, many short queries by
-`conn:execute` became about a quarter slower. `0` fetches each row on its
-own.
+the OCI default, 0.3 s with 100 and 0.15 s with 1000.
+
+The value is an integer from 0 to 2147483647. OCI allocates the buffer for
+that many rows at every query, whatever the size of the result: with 1000,
+many short queries by `conn:execute` became about a quarter slower, and very
+large values fail even for small results with `ORA-01019` (unable to
+allocate memory). Values from 100 to a few thousand are sensible; `0`
+fetches each row on its own.
 
 ## Transactions
 

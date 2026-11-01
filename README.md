@@ -63,7 +63,7 @@ Years before Christ get a minus sign, e.g. `"-4712-01-01 00:00:00"`. Not support
 | Option    | Values                          | Meaning                                                                                                                                                                     |
 | --------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `numbers` | `"float"` (default), `"exact"`  | How `NUMBER` columns are read. `"float"`: as a float, converted by OCI, as before. `"exact"`: integral values in the integer range as Lua integers, all others as correctly rounded floats. Affects cursors opened afterwards. |
-| `prefetch` | integer 0 … 4294967295, default `100` | Rows OCI fetches ahead per round trip to the server; the default of OCI itself is very small. Affects queries executed afterwards, also by prepared statements. 100 000 rows are read about 25 times faster than with the OCI default. |
+| `prefetch` | integer 0 … 2147483647, default `100` | Rows OCI fetches ahead per round trip to the server; the default of OCI itself is very small. Affects queries executed afterwards, also by prepared statements. 100 000 rows are read about 25 times faster than with the OCI default. OCI allocates the buffer for that many rows at every query, so very large values fail with `ORA-01019`; 100 to a few thousand are sensible. |
 
 ### Parameters of Prepared Statements
 

@@ -179,6 +179,8 @@ static const char *const number_modes[] = { "float", "exact", NULL };
 /* default of the connection option "prefetch": rows OCI fetches ahead per
    round trip; the OCI default is very small */
 #define PREFETCH_DEFAULT 100
+/* the largest value OCI accepts is MINSWORDMAXVAL (oratypes.h); above it
+   every query fails with ORA-01063 */
 
 typedef struct {
 	short         closed;
@@ -2307,10 +2309,12 @@ opened afterwards:
 `BINARY_FLOAT` and `BINARY_DOUBLE` columns are always read as floats.
 
 Option `prefetch` is the number of rows OCI fetches ahead in one round trip
-to the server, an integer from 0 to 4294967295 (default 100). It applies to
+to the server, an integer from 0 to 2147483647 (default 100). It applies to
 queries executed afterwards, by `conn:execute` and by prepared statements.
-Larger values read large results faster and need more memory per query;
-0 fetches each row on its own.
+Larger values read large results faster, but OCI allocates the buffer for
+that many rows at every query, whatever the size of the result; very large
+values fail with `ORA-01019`. Values from 100 to a few thousand are
+sensible; 0 fetches each row on its own.
 
 @function setoption
 @tparam string name name of the option
@@ -2335,10 +2339,10 @@ static int conn_setoption (lua_State *L) {
 	if (strcmp (name, "prefetch") == 0) {
 		lua_Number n = lua_tonumber (L, 3);
 		if (lua_type (L, 3) != LUA_TNUMBER || n != floor (n)
-				|| n < 0 || n > 4294967295.0) {
+				|| n < 0 || n > (lua_Number) MINSWORDMAXVAL) {
 			lua_pushnil (L);
 			lua_pushliteral (L, LUASQL_PREFIX"invalid value for option 'prefetch', "
-				"expected an integer from 0 to 4294967295");
+				"expected an integer from 0 to 2147483647");
 			return 2;
 		}
 		conn->prefetch = (ub4) n;
