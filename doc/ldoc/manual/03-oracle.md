@@ -39,6 +39,52 @@ Keep passwords out of the source code, e.g. in an environment variable:
 `os.getenv("ORACLE_PASSWORD")`. Oracle locks an account after several failed
 logons (10 with the default profile).
 
+## Encryption
+
+The driver needs no setting of its own for an encrypted connection: OCI and
+the configuration of Oracle Net do it. Oracle offers two ways; both work with
+the Instant Client without a wallet or a `sqlnet.ora` on the client.
+
+**Native Network Encryption** encrypts a normal connection such as
+`"dbhost:1521/FREEPDB1"`. It is switched on in the `sqlnet.ora` of the
+server; new sessions use it without a restart:
+
+```
+SQLNET.ENCRYPTION_SERVER = REQUIRED
+SQLNET.ENCRYPTION_TYPES_SERVER = (AES256)
+SQLNET.CRYPTO_CHECKSUM_SERVER = REQUIRED
+SQLNET.CRYPTO_CHECKSUM_TYPES_SERVER = (SHA256)
+```
+
+The Instant Client agrees to it by itself. A client configured to refuse
+encryption fails to connect with `ORA-12660`.
+
+**TLS** is chosen by `tcps://` in the connect string, e.g.
+`"tcps://dbhost:2484/FREEPDB1"`. The server needs a wallet with its
+certificate (parameter `WALLET_ROOT`) and a TCPS endpoint of its listener.
+The client checks the certificate of the server against the Windows
+certificate store, so the certificate authority that signed it must be
+trusted there. The host name in the connect string must match the name in the
+certificate; a connect by IP address or another name fails with `ORA-29002`.
+Over TLS, the Instant Client adds no Native Network Encryption, also when the
+server requires it.
+
+How a session is connected shows `SYS_CONTEXT('USERENV', 'NETWORK_PROTOCOL')`
+(`tcp` or `tcps`). The view `V$SESSION_CONNECT_INFO` names the algorithms of
+Native Network Encryption, e.g. `AES256 Encryption service adapter`; reading it
+may need privileges:
+
+```lua
+local cur = assert(conn:execute([[
+  SELECT network_service_banner FROM v$session_connect_info
+   WHERE sid = SYS_CONTEXT('USERENV', 'SID')]]))
+local line = cur:fetch()
+while line do
+  print(line)
+  line = cur:fetch()
+end
+```
+
 ## Character Set
 
 The driver always talks UTF-8 with the server (AL32UTF8 as client character
