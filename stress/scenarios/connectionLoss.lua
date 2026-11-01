@@ -11,6 +11,13 @@
 --   killDuringFetch     kill while a cursor over many rows is open;
 --                       rows already on the client may still come
 --   killDuringLobFetch  the same with a temporary CLOB per row
+--   killFetchPrefetch0, killFetchPrefetch1000, killLobPrefetch0,
+--   killLobPrefetch1000
+--                       killDuringFetch and killDuringLobFetch with
+--                       the driver option prefetch set to 0 and 1000:
+--                       with 1000, hundreds of rows may still come from
+--                       the client buffer before the error; skipped if
+--                       the driver has no option prefetch
 --   killWithStmt        kill, then execute a prepared statement
 --   killInTransaction   autocommit off, insert, kill, commit: commit
 --                       fails and the row is not on the server
@@ -132,17 +139,28 @@ local function expectSessions(ctx, expected, what)
    end
 end
 
--- Fetches from cur after the kill until an error comes. Rows already on
--- the client may still arrive; a normal end of the result is wrong.
-local function fetchUntilLost(ctx, cur, limit)
-   for _ = 1, limit do
+-- Fetches from cur after the kill until an error comes; rows first ..
+-- limit are left. Rows already on the client may still arrive, but
+-- each must be the right one (row k is expectedRow(k)); a normal end of
+-- the result is wrong.
+local function fetchUntilLost(ctx, cur, first, limit, expectedRow)
+   for k = first, limit do
       local row, err = cur:fetch({})
       if row == nil then
          expectLost(ctx, "fetch after the kill", row, err)
          return
       end
+      expect(row[1] == expectedRow(k), string.format("fetch after the"
+                .. " kill: row %d has a wrong value", k))
    end
    error("fetch after the kill: all rows arrived", 0)
+end
+
+-- Sets the driver option prefetch of conn, if a value is given.
+local function setPrefetch(conn, value)
+   if value then
+      check(conn:setoption("prefetch", value))
+   end
 end
 
 -- Phase.
@@ -176,24 +194,27 @@ local function killIdleCase(ctx)
    expectSessions(ctx, base, "after closing")
 end
 
-local function killDuringFetchCase(ctx)
+local function killDuringFetchCase(ctx, prefetch)
    local base = sessionCount(ctx)
    local conn = open(ctx)
+   setPrefetch(conn, prefetch)
    local cur = check(conn:execute(ctx.backend.manyRowsQuery))
    for k = 1, rowsBeforeKill do
       check(cur:fetch({}), nil, "fetch row " .. k)
    end
    kill(ctx, conn)
-   fetchUntilLost(ctx, cur, ctx.backend.manyRowsCount)
+   fetchUntilLost(ctx, cur, rowsBeforeKill + 1, ctx.backend.manyRowsCount,
+                  function(k) return k end)
    -- The failed fetch may have closed the cursor already.
    pcall(cur.close, cur)
    closeObject(conn, "connection")
    expectSessions(ctx, base, "after closing")
 end
 
-local function killDuringLobFetchCase(ctx)
+local function killDuringLobFetchCase(ctx, prefetch)
    local base = sessionCount(ctx)
    local conn = open(ctx)
+   setPrefetch(conn, prefetch)
    local sql = string.format(ctx.backend.clobRowsLiteral, lobRowSize,
                              lobRowCount)
    local cur = check(conn:execute(sql))
@@ -201,7 +222,9 @@ local function killDuringLobFetchCase(ctx)
       check(cur:fetch({}), nil, "fetch row " .. k)
    end
    kill(ctx, conn)
-   fetchUntilLost(ctx, cur, lobRowCount)
+   fetchUntilLost(ctx, cur, rowsBeforeKill + 1, lobRowCount, function(k)
+      return string.rep("x", k * lobRowSize)
+   end)
    pcall(cur.close, cur)
    closeObject(conn, "connection")
    expectSessions(ctx, base, "after closing")
@@ -277,11 +300,23 @@ local caseList = {
    { name = "killDuringFetch", run = killDuringFetchCase },
    { name = "killDuringLobFetch", run = killDuringLobFetchCase,
      needs = "clobRowsLiteral" },
+   { name = "killFetchPrefetch0", run = killDuringFetchCase, prefetch = 0 },
+   { name = "killFetchPrefetch1000", run = killDuringFetchCase,
+     prefetch = 1000 },
+   { name = "killLobPrefetch0", run = killDuringLobFetchCase,
+     needs = "clobRowsLiteral", prefetch = 0 },
+   { name = "killLobPrefetch1000", run = killDuringLobFetchCase,
+     needs = "clobRowsLiteral", prefetch = 1000 },
    { name = "killWithStmt", run = killWithStmtCase, usesPrepare = true },
    { name = "killInTransaction", run = killInTransactionCase },
    { name = "killThenGc", run = killThenGcCase },
    { name = "killThenReconnect", run = killThenReconnectCase },
 }
+
+-- True if the driver has the connection option prefetch.
+local function hasPrefetch(conn)
+   return conn.getoption ~= nil and conn:getoption("prefetch") ~= nil
+end
 
 -- Runs all cases, prints failures, limits, skips and a summary.
 -- Returns the number of failed cases and of limits.
@@ -289,10 +324,12 @@ local function runCases(ctx)
    print("  cases:")
    local passed, limits, failed, skipped = 0, 0, 0, 0
    for _, case in ipairs(caseList) do
-      local prefix = string.format("    %-19s ", case.name)
+      local prefix = string.format("    %-21s ", case.name)
       local reason
       if case.usesPrepare and ctx.testConn.prepare == nil then
          reason = "driver has no prepare()"
+      elseif case.prefetch and not hasPrefetch(ctx.testConn) then
+         reason = "driver has no option prefetch"
       elseif case.needs and ctx.backend[case.needs] == nil then
          reason = "backend has no " .. case.needs
       end
@@ -300,7 +337,7 @@ local function runCases(ctx)
          skipped = skipped + 1
          report.print(prefix, "skipped: " .. reason, "skip")
       else
-         local ok, status, message = pcall(case.run, ctx)
+         local ok, status, message = pcall(case.run, ctx, case.prefetch)
          if not ok then
             status, message = "fail", status
          end

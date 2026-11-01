@@ -46,6 +46,36 @@ return {
    -- Used by prepared statement scenarios, :1 is the first parameter.
    bindQuery = "SELECT :1 FROM dual",
    multiRowBindQuery = "SELECT level FROM dual CONNECT BY level <= :1",
+   -- The same without binds for conn:execute (prefetch), %d rows.
+   prefetchRowsLiteral = "SELECT level FROM dual CONNECT BY level <= %d",
+   -- A query with the largest prefetch value (prefetch): OCI allocates
+   -- the buffer for that many rows, which fails with this error.
+   prefetchLimits = {
+      memoryError = "ORA%-01019",
+      memory = "OCI allocates the prefetch buffer for the full prefetch"
+         .. " value at every query, independent of the size of the"
+         .. " result (ORA-01019)",
+      -- After that error the server cursor stays open until the session
+      -- ends; OCI no longer knows it (label of the counter it shows in).
+      memoryCursor = "the server cursor of the failed execute stays open"
+         .. " until the session ends",
+      cursorCounter = "open cursors",
+      -- A row that fails in the middle of a result (prefetch): OCI
+      -- drops the prefetched rows of the block that contains it.
+      rowError = "ORA%-01476",
+      errorBlock = "OCI drops the prefetched rows of the block that"
+         .. " contains the failing row",
+   },
+   -- Rows 1, 2, 3, ... up to the second %d, the first %d fails with
+   -- ORA-01476 (division by zero).
+   prefetchErrorLiteral = "SELECT CASE WHEN level = %d THEN 1 / (level -"
+      .. " level) ELSE level END FROM dual CONNECT BY level <= %d",
+   -- Round trips between client and server of session %d so far; shows
+   -- which prefetch value a query used (prefetch).
+   roundTripQuery = "SELECT s.value FROM v$sesstat s"
+      .. " JOIN v$statname n ON n.statistic# = s.statistic#"
+      .. " WHERE n.name = 'SQL*Net roundtrips to/from client'"
+      .. " AND s.sid = %d",
    -- Fixed result types: a bind of another type is converted by the
    -- server instead of changing the type of the result column.
    bindNumberQuery = "SELECT CAST(:1 AS NUMBER) FROM dual",
@@ -75,7 +105,8 @@ return {
       .. " RETURNING JSON) FROM dual",
    -- Checked before a LOB phase: 1 if the expression of its query gives
    -- temporary LOBs, so the phase tests their release. Keys are phase
-   -- names (clobRows and blobRows in cursorLifecycle and stmtLifecycle).
+   -- names (clobRows and blobRows in cursorLifecycle and stmtLifecycle,
+   -- lobMidLoop in prefetch).
    tempLobChecks = {
       clobRead = "SELECT DBMS_LOB.ISTEMPORARY(RPAD(TO_CLOB('ab'), 8, 'cd'))"
          .. " FROM dual",
@@ -85,6 +116,8 @@ return {
          .. "RPAD('AB', 8, 'CD')))) FROM dual",
       blobRows = "SELECT DBMS_LOB.ISTEMPORARY(TO_BLOB(HEXTORAW("
          .. "RPAD('AB', 8, 'CD')))) FROM dual",
+      lobMidLoop = "SELECT DBMS_LOB.ISTEMPORARY(RPAD(TO_CLOB('ab'), 8,"
+         .. " 'cd')) FROM dual",
    },
    -- Used by the error path scenario.
    invalidQuery = "SELEC 1 FROM dual",

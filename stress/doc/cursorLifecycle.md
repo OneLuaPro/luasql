@@ -2,7 +2,7 @@
 
 Opens and closes many cursors through `conn:execute` on the test connection, in every way a program might end a cursor: closed before the end, fetched to the end, closed after one row, or simply dropped and left to the garbage collector (GC). Two phases do the same with a temporary LOB (Large Object) in every row. Every phase checks that open cursors and temporary LOBs on the server and the memory of the client do not grow.
 
-`conn:execute` uses the default prefetch of the driver, so rows after the current one may already be on the client when a cursor is closed; the LOB phases check that their temporary LOBs are freed all the same.
+`conn:execute` uses the default prefetch of the driver (100 rows with `luasql.oci8`), so rows after the current one may already be on the client when a cursor is closed; the LOB phases check that their temporary LOBs are freed all the same. Other prefetch values are the subject of scenario [`prefetch`](prefetch.md).
 
 There are no single cases in this scenario.
 

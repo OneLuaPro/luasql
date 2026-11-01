@@ -49,9 +49,10 @@ local isWindows = package.config:sub(1, 1) == "\\"
 
 -- Scenarios in the order they run, each one is scenarios/<name>.lua.
 local scenarioNames = {
-   "cursorLifecycle", "stmtLifecycle", "errorPaths", "warnings", "params",
-   "connectionLifecycle", "connectionLoss", "concurrency", "threads",
-   "dataTypes", "transactions", "volume", "soak",
+   "cursorLifecycle", "stmtLifecycle", "prefetch", "errorPaths",
+   "warnings", "params", "connectionLifecycle", "connectionLoss",
+   "concurrency", "threads", "dataTypes", "transactions", "volume",
+   "soak",
 }
 
 -- The scenarios to run: only soak in tier soak, else those of --only

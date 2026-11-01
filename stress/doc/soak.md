@@ -60,7 +60,7 @@ With `--csv <file>` every sample is written as a line with the columns `seconds`
 
 ## Reference result
 
-A run of 4 hours (`lua stress.lua oracle soak --csv soak240.csv`) with Oracle in a local VM, 481 samples:
+A run of 4 hours (`lua stress.lua oracle soak --csv soak240.csv`) with Oracle in a local VM, 481 samples, made before the driver got its option `prefetch` (one row ahead instead of 100) and before the test database required network encryption; rounds per second are therefore not comparable with newer runs:
 
 | Series                     | Result                                                                                                                                                          |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
