@@ -176,11 +176,16 @@ typedef struct {
 #define NUMBER_EXACT 1  /* integer if integral and in range, else exact float */
 static const char *const number_modes[] = { "float", "exact", NULL };
 
+/* default of the connection option "prefetch": rows OCI fetches ahead per
+   round trip; the OCI default is very small */
+#define PREFETCH_DEFAULT 100
+
 typedef struct {
 	short         closed;
 	short         loggedon;
 	short         auto_commit;        /* 0 for manual commit */
         int           number_mode;        /* NUMBER_FLOAT or NUMBER_EXACT */
+	ub4           prefetch;           /* OCI_ATTR_PREFETCH_ROWS of queries */
 	int           cur_counter;        /* number of open cursors */
 	int           stmt_counter;       /* number of open statements */
 	int           env;                /* reference to environment */
@@ -1554,6 +1559,17 @@ static int conn_execute (lua_State *L) {
 		mode = OCI_COMMIT_ON_SUCCESS;
 	else
 		mode = OCI_DEFAULT;
+	/* rows fetched ahead per round trip (option "prefetch") */
+	if (type == OCI_STMT_SELECT) {
+		status = OCIAttrSet ((dvoid *)stmthp, (ub4)OCI_HTYPE_STMT,
+			(dvoid *)&conn->prefetch, (ub4)0, (ub4)OCI_ATTR_PREFETCH_ROWS,
+			conn->errhp);
+		if (status != OCI_SUCCESS) {
+			int ret = checkerr (L, status, conn->errhp);
+			OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
+			return ret;
+		}
+	}
 	/* execute statement */
 	status = OCIStmtExecute (conn->svchp, stmthp, conn->errhp, iters,
 		(ub4)0, (CONST OCISnapshot *)NULL, (OCISnapshot *)NULL, mode);
@@ -2135,8 +2151,21 @@ static int stmt_execute (lua_State *L) {
 
     ub4 iters = (stmt->type == OCI_STMT_SELECT) ? 0 : 1;
     ub4 mode  = conn->auto_commit ? OCI_COMMIT_ON_SUCCESS : OCI_DEFAULT;
+    sword status;
 
-    sword status = OCIStmtExecute(conn->svchp, stmt->stmthp, stmt->errhp,
+    /* rows fetched ahead per round trip: the value of the option
+       "prefetch" at the time of this execute */
+    if (stmt->type == OCI_STMT_SELECT) {
+        status = OCIAttrSet((dvoid *)stmt->stmthp, (ub4)OCI_HTYPE_STMT,
+                            (dvoid *)&conn->prefetch, (ub4)0,
+                            (ub4)OCI_ATTR_PREFETCH_ROWS, stmt->errhp);
+        if (status != OCI_SUCCESS) {
+            lua_pop(L, 1); /* pop conn */
+            return checkerr(L, status, stmt->errhp);
+        }
+    }
+
+    status = OCIStmtExecute(conn->svchp, stmt->stmthp, stmt->errhp,
                                   iters, (ub4)0,
                                   (CONST OCISnapshot *)NULL,
                                   (OCISnapshot *)NULL, mode);
@@ -2267,8 +2296,8 @@ static int conn_setautocommit (lua_State *L) {
 /***
 Sets a driver option of the connection.
 
-The only option so far is `numbers`. It decides how `NUMBER` columns are
-read and affects cursors opened afterwards:
+Option `numbers` decides how `NUMBER` columns are read and affects cursors
+opened afterwards:
 
 - `"float"` (default): as a float, converted by OCI. Integers above 2^53 and
   some decimal fractions are not exact.
@@ -2277,9 +2306,15 @@ read and affects cursors opened afterwards:
 
 `BINARY_FLOAT` and `BINARY_DOUBLE` columns are always read as floats.
 
+Option `prefetch` is the number of rows OCI fetches ahead in one round trip
+to the server, an integer from 0 to 4294967295 (default 100). It applies to
+queries executed afterwards, by `conn:execute` and by prepared statements.
+Larger values read large results faster and need more memory per query;
+0 fetches each row on its own.
+
 @function setoption
 @tparam string name name of the option
-@tparam string value new value
+@param value new value: a string for `numbers`, an integer for `prefetch`
 @treturn[1] boolean `true`
 @treturn[2] nil
 @treturn[2] string error message for an unknown option or value
@@ -2288,6 +2323,7 @@ assert(conn:setoption("numbers", "exact"))
 local cur = conn:execute("SELECT COUNT(*) FROM emp")
 print(math.type(cur:fetch()))   --> integer
 cur:close()
+assert(conn:setoption("prefetch", 1000))   -- for a large result
 */
 /*
 ** Set a driver option of the connection. Affects cursors created afterwards.
@@ -2296,8 +2332,21 @@ cur:close()
 static int conn_setoption (lua_State *L) {
 	conn_data *conn = getconnection (L);
 	const char *name = luaL_checkstring (L, 2);
-	const char *value = luaL_checkstring (L, 3);
+	if (strcmp (name, "prefetch") == 0) {
+		lua_Number n = lua_tonumber (L, 3);
+		if (lua_type (L, 3) != LUA_TNUMBER || n != floor (n)
+				|| n < 0 || n > 4294967295.0) {
+			lua_pushnil (L);
+			lua_pushliteral (L, LUASQL_PREFIX"invalid value for option 'prefetch', "
+				"expected an integer from 0 to 4294967295");
+			return 2;
+		}
+		conn->prefetch = (ub4) n;
+		lua_pushboolean (L, 1);
+		return 1;
+	}
 	if (strcmp (name, "numbers") == 0) {
+		const char *value = luaL_checkstring (L, 3);
 		int i;
 		for (i = 0; number_modes[i] != NULL; i++) {
 			if (strcmp (value, number_modes[i]) == 0) {
@@ -2322,7 +2371,7 @@ static int conn_setoption (lua_State *L) {
 Reads a driver option of the connection.
 @function getoption
 @tparam string name name of the option, see @{connection:setoption}
-@treturn[1] string current value
+@treturn[1] string|integer current value
 @treturn[2] nil
 @treturn[2] string error message for an unknown option
 */
@@ -2335,6 +2384,10 @@ static int conn_getoption (lua_State *L) {
 	const char *name = luaL_checkstring (L, 2);
 	if (strcmp (name, "numbers") == 0) {
 		lua_pushstring (L, number_modes[conn->number_mode]);
+		return 1;
+	}
+	if (strcmp (name, "prefetch") == 0) {
+		lua_pushinteger (L, (lua_Integer) conn->prefetch);
 		return 1;
 	}
 	lua_pushnil (L);
@@ -2387,6 +2440,7 @@ static int env_connect (lua_State *L) {
 	conn->closed = 1;
 	conn->auto_commit = 1;
 	conn->number_mode = NUMBER_FLOAT;
+	conn->prefetch = PREFETCH_DEFAULT;
 	conn->cur_counter = 0;
 	conn->stmt_counter = 0;
 	conn->loggedon = 0;

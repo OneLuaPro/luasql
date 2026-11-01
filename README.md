@@ -63,6 +63,7 @@ Years before Christ get a minus sign, e.g. `"-4712-01-01 00:00:00"`. Not support
 | Option    | Values                          | Meaning                                                                                                                                                                     |
 | --------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `numbers` | `"float"` (default), `"exact"`  | How `NUMBER` columns are read. `"float"`: as a float, converted by OCI, as before. `"exact"`: integral values in the integer range as Lua integers, all others as correctly rounded floats. Affects cursors opened afterwards. |
+| `prefetch` | integer 0 … 4294967295, default `100` | Rows OCI fetches ahead per round trip to the server; the default of OCI itself is very small. Affects queries executed afterwards, also by prepared statements. 100 000 rows are read about 25 times faster than with the OCI default. |
 
 ### Parameters of Prepared Statements
 
@@ -103,14 +104,14 @@ Values as read from a `DATE` or `TIMESTAMP` column can be bound back unchanged.
 
 ### Fixes
 
-Among others: no leak of temporary LOBs per row; no read of freed bind memory when a prepared statement is executed again; no server cursor left by `stmt:reset()`; no environment kept alive by a failed connect; no crash with two threads; no invalid `NUMBER` stored from a NaN bind; no lost sign of years before Christ; `conn:execute` fetches with the OCI default prefetch, as fast as prepared statements.
+Among others: no leak of temporary LOBs per row; no read of freed bind memory when a prepared statement is executed again; no server cursor left by `stmt:reset()`; no environment kept alive by a failed connect; no crash with two threads; no invalid `NUMBER` stored from a NaN bind; no lost sign of years before Christ; `conn:execute` no longer turns prefetching off.
 
 
 ## Testing
 
 - `tests/test.lua` is the test bench of upstream LuaSQL, e.g. `lua test.lua oci8 <source> <user> <password>` in `tests/`.
 - [`stress/`](stress/README.md) holds the stress test suite.
-- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD`; so far for `luasql.oci8`.
+- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD`; so far for `luasql.oci8`. `checks/bench_oci8.lua` measures short queries and large results, e.g. to compare values of the option `prefetch` (`-p`).
 
 ### Stress Test Suite
 

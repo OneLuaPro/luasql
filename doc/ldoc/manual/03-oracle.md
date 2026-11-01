@@ -173,6 +173,24 @@ result sets the time zone itself:
 conn:execute("ALTER SESSION SET TIME_ZONE = 'Europe/Berlin'")
 ```
 
+## Large Results
+
+`cur:fetch()` returns one row, but OCI fetches several rows ahead in one
+round trip to the server. How many is the driver option `prefetch` of the
+connection, by default 100 (the default of OCI itself is very small):
+
+```lua
+assert(conn:setoption("prefetch", 1000))
+print(conn:getoption("prefetch"))   --> 1000
+```
+
+It applies to queries executed afterwards, by `conn:execute` and by
+prepared statements. Measured on a local server, 100 000 rows took 8 s with
+the OCI default, 0.3 s with 100 and 0.15 s with 1000. A larger value needs a
+buffer for that many rows per query; with 1000, many short queries by
+`conn:execute` became about a quarter slower. `0` fetches each row on its
+own.
+
 ## Transactions
 
 - A new connection is in **autocommit** mode: every statement is committed

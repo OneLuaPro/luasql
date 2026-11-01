@@ -483,6 +483,52 @@ local r3, m3 = conn:getoption("bogus")
 check("getoption: unknown option gives nil + message", r3 == nil and tostring(m3):find("unknown option") ~= nil, m3)
 check("back to float", conn:setoption("numbers", "float") == true and conn:getoption("numbers") == "float")
 
+print("-- prefetch")
+check("prefetch defaults to 100", conn:getoption("prefetch") == 100)
+check("prefetch is an integer", math.type(conn:getoption("prefetch")) == "integer")
+for _, bad in ipairs{ -1, 1.5, 2^32, "100", 0/0 } do
+  local pr, pm = conn:setoption("prefetch", bad)
+  check("prefetch rejects " .. type(bad) .. " " .. tostring(bad),
+    pr == nil and tostring(pm):find("invalid value") ~= nil, pm)
+end
+check("invalid prefetch keeps the value", conn:getoption("prefetch") == 100)
+-- every value reads every row exactly once, by execute and by prepared
+drop("lt_oci8_pf")
+assert(exec("CREATE TABLE lt_oci8_pf (id NUMBER)"))
+assert(exec("INSERT INTO lt_oci8_pf SELECT level FROM dual CONNECT BY level <= 250"))
+local function ids(c)
+  if type(c) ~= "userdata" then return -1, -1 end
+  local count, total = 0, 0
+  local id = c:fetch()
+  while id do
+    count, total = count + 1, total + id
+    id = c:fetch()
+  end
+  return count, total
+end
+local pfstmt = assert(conn:prepare("SELECT id FROM lt_oci8_pf WHERE id <= :1 ORDER BY id"))
+for _, pf in ipairs{ 0, 1, 7, 100, 1000 } do
+  check("setoption prefetch=" .. pf,
+    conn:setoption("prefetch", pf) == true and conn:getoption("prefetch") == pf)
+  local rows, sum = ids(exec("SELECT id FROM lt_oci8_pf ORDER BY id"))
+  check("prefetch " .. pf .. ": execute reads 250 rows", rows == 250 and sum == 31375,
+    rows .. " rows, sum " .. sum)
+  rows, sum = ids(pfstmt:execute{ {250, T.int} })
+  check("prefetch " .. pf .. ": prepared reads 250 rows", rows == 250 and sum == 31375,
+    rows .. " rows, sum " .. sum)
+end
+check("back to 100", conn:setoption("prefetch", 100) == true)
+local pfcur = exec("SELECT id FROM lt_oci8_pf ORDER BY id")
+check("prefetched cursor closed after its first row",
+  type(pfcur) == "userdata" and pfcur:fetch() == 1 and pfcur:close() == true)
+pfcur = pfstmt:execute{ {250, T.int} }
+check("prepared: prefetched cursor closed after its first row",
+  type(pfcur) == "userdata" and pfcur:fetch() == 1 and pfcur:close() == true)
+local pfrows = ids(pfstmt:execute{ {10, T.int} })
+check("statement usable after an early close", pfrows == 10, pfrows)
+pfstmt:close()
+drop("lt_oci8_pf")
+
 print("-- numbers = exact")
 local function num1(ex) return fetch1("select " .. ex .. " from dual") end
 local function desc(x) return tostring(x) .. " (" .. tostring(math.type(x)) .. ")" end
