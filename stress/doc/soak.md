@@ -47,9 +47,9 @@ In tier `smoke` the run is too short for a verdict: the memory lines show only t
 ```
 scenario soak:
   1 min, a sample every 10 s, 2 lanes, memory as private bytes
-  rounds          8498 on the test connection (141.6/s), 17029 in 2 lanes, 1 min
-  private bytes   start 21872 KB, end 25800 KB (no leak verdict in tier smoke)
-  lua             start 451 KB, end 453 KB (no leak verdict in tier smoke)
+  rounds          7731 on the test connection (128.8/s), 15548 in 2 lanes, 1 min
+  private bytes   start 22912 KB, end 25572 KB (no leak verdict in tier smoke)
+  lua             start 460 KB, end 462 KB (no leak verdict in tier smoke)
   pga             start 2703 KB, end 3407 KB (no leak verdict in tier smoke)
   counters        open cursors 10 -> 10, temp lobs 0 -> 0, open tx 0 -> 0
   sessions        2 -> 2

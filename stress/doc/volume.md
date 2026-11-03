@@ -24,12 +24,12 @@ Besides the usual server counters the phases count the open transactions of the 
 
 Before `lobFetch` the scenario reads one CLOB. On the first LOB read from a table Oracle opens an internal cursor (`table_304_11_<object id>`) that stays open in the session; read inside the phase, it would count as a cursor leak.
 
-After the phases a line shows the throughput of each phase in rows per second. It is information, not a check. From a nightly run (Oracle, local VM), made before the driver got its option `prefetch` and before the test database required network encryption:
+After the phases a line shows the throughput of each phase in rows per second. It is information, not a check. From a nightly run (Oracle, local VM, prefetch 100, network encryption):
 
 ```
-  throughput: bulkInsert 6088 rows/s, fetchExecute 13993 rows/s, fetchPrepared 13973 rows/s,
-              fetchReuse 13511 rows/s, bigRollback 5813 rows/s, lobInsert 1426 rows/s,
-              lobFetch 2294 rows/s
+  throughput: bulkInsert 4617 rows/s, fetchExecute 69563 rows/s, fetchPrepared 70404 rows/s,
+              fetchReuse 62886 rows/s, bigRollback 4430 rows/s, lobInsert 1204 rows/s,
+              lobFetch 1437 rows/s
 ```
 
 ## Cases
