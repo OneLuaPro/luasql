@@ -1,5 +1,5 @@
 -- memory.lua
--- Memory of this process for leak checks over a long time (soak). On
+-- Memory of this process for leak checks (phases.lua and soak). On
 -- Windows the private bytes (K32GetProcessMemoryInfo through ffi): unlike
 -- the working set, which luv reports as rss, Windows does not trim them,
 -- so they do not drop and jump back. Elsewhere, or without ffi, the rss

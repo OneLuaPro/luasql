@@ -332,8 +332,10 @@ local function lobFetchStep(_, i, shared)
 end
 
 local phaseList = {
+   -- The insert phases cannot run a second round (phases.lua): their
+   -- ids are fixed, and the fetch phases read the rows they leave.
    { name = "bulkInsert", setup = setupInsert, step = insertStep,
-     finish = finishInsert },
+     finish = finishInsert, confirm = false },
    { name = "fetchExecute", setup = setupFetchExecute, step = fetchStep,
      finish = finishFetch("fetchExecute") },
    { name = "fetchPrepared", setup = setupFetchPrepared, step = fetchStep,
@@ -346,7 +348,7 @@ local phaseList = {
 
 local lobPhaseList = {
    { name = "lobInsert", setup = setupLobInsert, step = lobInsertStep,
-     finish = finishLobInsert },
+     finish = finishLobInsert, confirm = false },
    { name = "lobFetch", precheck = primeLobRead, setup = setupLobFetch,
      step = lobFetchStep, finish = finishFetch("lobFetch") },
 }

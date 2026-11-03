@@ -24,9 +24,9 @@ This file describes how to prepare and run the suite and how to read its results
 The suite needs only plain Lua and two common modules; further modules are optional and enable more of the tests.
 
 - Lua 5.4 or later (tested with Lua 5.5) with the modules `argparse` and `lfs` (LuaFileSystem).
-- Optional: `luv` (the Lua binding of libuv). Without it all scenarios run in one process, without crash and hang protection, and phases measure only the Lua heap, not the memory of the process.
+- Optional: `luv` (the Lua binding of libuv). Without it all scenarios run in one process, without crash and hang protection; outside Windows, phases and scenario `soak` then measure only the Lua heap, not the memory of the process.
 - Optional: Lua Lanes, version 4 or later (the API changed from version 3). Without it scenario `threads` is skipped and scenario `soak` runs without its pool of threads.
-- Optional: an ffi module compatible with LuaJIT's. On Windows it adds colors in the console, measures the private bytes of the process in scenario `soak` and suppresses the error dialog when a child process crashes.
+- Optional: an ffi module compatible with LuaJIT's. On Windows it adds colors in the console, measures the private bytes of the process in phases and in scenario `soak` (without it, the rss from `luv`) and suppresses the error dialog when a child process crashes.
 - The driver under test and the client library of its DBMS, see [Preparing a Run](#preparing-a-run).
 
 
@@ -311,22 +311,28 @@ This annex explains how the suite decides that something leaks. The scenario des
 
 A leak shows in one of two places: on the server, as cursors, temporary LOBs, sessions or open transactions that a session keeps, and in the client, as memory of the process or of the Lua heap that grows. The suite checks both, in short phases and in long soak runs.
 
-Two facts about measuring memory on Windows shape how it does this. First, the `rss` (resident set size) that `luv` reports is the working set of the process, which Windows trims at any time: it can drop by megabytes and come back. The private bytes of a process are not trimmed, so the soak run measures them instead. Second, threads that connect to the database raise the memory of the process in steps of a few megabytes over their first few thousand, without steady growth (16 000 threads measured: about 30 bytes per thread in the long run, the same as for threads without a database connection). Phases that use threads therefore keep a pool of long-lived threads and start measuring only after a longer warm-up.
+Two facts about measuring memory on Windows shape how it does this. First, the `rss` (resident set size) that `luv` reports is the working set of the process, which Windows trims at any time: it can drop by megabytes and come back. The private bytes of a process are not trimmed, so the suite measures them instead, in phases and in soak runs; the working set of phases with many logons varied by up to 1.8 MB between runs. Second, threads that connect to the database raise the memory of the process in steps of a few megabytes over their first few thousand, without steady growth (16 000 threads measured: about 30 bytes per thread in the long run, the same as for threads without a database connection). Phases that use threads therefore keep a pool of long-lived threads and start measuring only after a longer warm-up.
 
 #### Phases
 
 A phase repeats one step many times. Before and after the phase it reads the server counters of the test session on the admin connection: open cursors and temporary LOBs, plus counters of the scenario such as sessions or open transactions. A counter that grows fails the phase.
 
-It also measures, after a full garbage collection, the memory of the process (rss, needs `luv`) and the Lua heap. The first 50 iterations are a warm-up and are not measured, so one-time allocations do not count as growth; phases with threads use a longer warm-up. The phase fails if the process grows by more than 1024 KB or the Lua heap by more than 64 KB. A leak of 100 bytes per iteration crosses the limit in tier `standard`, one of 10 bytes in tier `nightly`.
+It also measures, after a full garbage collection, the memory of the process (on Windows the private bytes, elsewhere the rss) and the Lua heap; the output names the measure, e.g. `private bytes +12 KB`. The first 50 iterations are a warm-up and are not measured, so one-time allocations do not count as growth; phases with threads use a longer warm-up.
+
+The memory of the process does not grow smoothly: the heap takes memory from the system in blocks and gives it back later, and the difference between start and end of a phase can fall into such a step (up to 1.8 MB seen in phases with many logons). A phase therefore takes 20 samples of the process memory after the warm-up, splits them into three thirds and computes the robust slope of each third (the median of the slopes between all pairs of its samples, Theil-Sen estimator). The median of the three slopes, projected onto the measured iterations, is the *trend*: a single step lies in one third and does not count, a leak shows in all of them. The output shows the difference and the trend, e.g. `private bytes +1360 KB (trend +35 KB)`.
+
+The heap may also settle slowly, for example when blocks of very different sizes alternate: then the memory grows for 100 000 iterations and more and stops after that (measured with large temporary CLOBs: about 7 bytes per read over the first 50 000 reads, none over the next 350 000). A phase whose trend is above the limit therefore runs a second round of the same length right away; only a trend above the limit in both rounds counts as a leak. The output then shows both, e.g. `private bytes +2176 KB (trend +1800 KB), second round +12 KB (trend +0 KB)`. The insert phases of scenario `volume` cannot run twice and are judged by their first round.
+
+The phase fails if the trend of the process is above 1024 KB, in both rounds if there is a second one, or if the Lua heap, which does not jump, grows by more than 64 KB. A leak of 100 bytes per iteration crosses the limit in tier `standard`, one of 10 bytes in tier `nightly`. Phases with fewer than 5 samples after their warm-up are judged by the difference.
 
 The run also reads the open cursors of the test session before and after each scenario. If they grew, a note lists the new ones, so cursors the DBMS keeps for itself can be told apart from cursors the driver left open.
 
 #### Soak
 
-A single phase cannot show a leak of one byte per step, and the rss of a process with threads jumps by megabytes. Tier `soak` therefore runs a mixed round of everything the other scenarios check, for hours, and takes a sample every 30 seconds after a full garbage collection:
+A single phase cannot show a leak of one byte per step, and the memory of a process with threads jumps by megabytes. Tier `soak` therefore runs a mixed round of everything the other scenarios check, for hours, and takes a sample every 30 seconds after a full garbage collection:
 
 - the memory of the process: on Windows the private bytes, elsewhere the rss;
 - the Lua heap;
 - the PGA (Program Global Area, the private memory of the session on the Oracle server) and the server counters of the test session.
 
-The first 10 % of the run time, at least 5 minutes, are warm-up. Over the samples after it, each memory series gets a robust slope: the median of the slopes between all pairs of samples (Theil-Sen estimator), so single jumps and dips do not count. The limits per hour are 512 KB for the process, 64 KB for the Lua heap and 256 KB for the PGA. The server counters and the sessions of the test user must be the same at the end. With `--csv <file>` every sample is written as a line, for plotting or a closer look; [`doc/soak.md`](doc/soak.md) has the reference result of a 4 hour run.
+The first 10 % of the run time, at least 5 minutes, are warm-up. Over the samples after it, each memory series gets a robust slope: the median of the slopes between all pairs of samples (Theil-Sen estimator), so single jumps and dips do not count; with hundreds of samples over hours, a single step does not move it either. The limits per hour are 512 KB for the process, 64 KB for the Lua heap and 256 KB for the PGA. The server counters and the sessions of the test user must be the same at the end. With `--csv <file>` every sample is written as a line, for plotting or a closer look; [`doc/soak.md`](doc/soak.md) has the reference result of a 4 hour run.

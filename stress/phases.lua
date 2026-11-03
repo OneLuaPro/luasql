@@ -14,34 +14,63 @@
 --             failure
 --   warmup    optional, iterations before the memory measurement
 --             starts, instead of warmupIterations
+--   confirm   optional, false if the phase cannot run a second round
+--             (see below)
 --
 -- ctx needs testConn and backend; adminConn is optional. Without it the
 -- phases still run, but the server side check is skipped. The optional
 -- ctx.serverCounters replaces backend.serverCounters, e.g. to add a
 -- counter for one scenario.
 --
--- Each phase also reports how the memory of this process changed (rss,
--- needs luv) and how the Lua heap changed (lua), both measured after a
--- full GC. The first iterations are a warm-up and not measured, so
--- one-time allocations do not count as growth.
+-- Each phase also reports how the memory of this process changed and
+-- how the Lua heap changed (lua), both measured after a full GC. The
+-- memory of the process comes from memory.lua: on Windows the private
+-- bytes (needs ffi), which Windows does not trim, unlike the working set
+-- that luv reports as rss; elsewhere the rss (needs luv). The first
+-- iterations are a warm-up and not measured, so one-time allocations do
+-- not count as growth.
+--
+-- The memory of the process does not grow smoothly: the heap takes
+-- memory from the system in blocks and gives it back later, so the
+-- difference between start and end may fall into such a step (up to
+-- 1.8 MB seen in phases with many logons). The phase therefore takes
+-- trendSamples samples after the warm-up, splits them into trendParts
+-- thirds and judges the median of their robust slopes (trend.lua),
+-- projected onto the measured iterations: the trend. A single step
+-- lies in one third, a leak shows in all of them. The Lua heap does not
+-- jump; its difference is judged.
+--
+-- The heap may also settle slowly, e.g. when blocks of very different
+-- sizes alternate: then the memory grows for 100 000 iterations and
+-- more, and stops. A phase whose trend is over the limit therefore runs
+-- a second round of the same length, with its setup and finish again;
+-- only a trend over the limit in both rounds is a leak. A phase that
+-- cannot run twice (e.g. it inserts fixed ids) sets confirm = false.
 
 local dbutil = require("dbutil")
+local memory = require("memory")
 local report = require("report")
-
--- luv is optional, without it only the Lua heap is measured.
-local hasUv, uv = pcall(require, "luv")
-if not hasUv then
-   uv = nil
-end
+local trend = require("trend")
 
 -- Iterations before the memory measurement starts.
 local warmupIterations = 50
 
--- Growth limits per phase. Measured noise is below 100 KB rss and 1 KB
--- Lua heap. A leak of 100 bytes per iteration crosses the rss limit in
--- tier standard, a leak of 10 bytes per iteration in tier nightly.
-local rssLimitKb = 1024
+-- Growth limits per phase: the trend of the process, the difference of
+-- the Lua heap. A leak of 100 bytes per iteration crosses the process
+-- limit in tier standard, a leak of 10 bytes per iteration in tier
+-- nightly.
+local processLimitKb = 1024
 local luaLimitKb = 64
+
+-- Samples of the process memory after the warm-up, evenly spread over
+-- the measured iterations; with fewer than minTrendSamples (a phase
+-- with few iterations after its warm-up) the difference is judged.
+local trendSamples = 20
+local minTrendSamples = 5
+
+-- Parts of the samples whose median slope is the trend (trend.lua): a
+-- single step of the heap lies in one of them and does not count.
+local trendParts = 3
 
 local phases = {}
 
@@ -188,18 +217,94 @@ function phases.reportGrowth(ctx, before, after, what)
    end
 end
 
--- Returns the resident memory of this process in bytes (nil without
--- luv) and the size of the Lua heap in KB, both after a full GC.
+-- Returns the memory of this process in KB (see memory.lua; nil if it
+-- cannot be measured) and the size of the Lua heap in KB, both after a
+-- full GC.
 local function memoryUsage()
    collectgarbage("collect")
    collectgarbage("collect")
-   local rss = uv and uv.resident_set_memory() or nil
-   return rss, collectgarbage("count")
+   return memory.processKb(), collectgarbage("count")
 end
 
 -- Memory change for the output, rounded to whole KB; never "-0".
 local function signedKb(kb)
    return string.format("%+d KB", math.floor(kb + 0.5))
+end
+
+-- Runs 'count' iterations of a phase, with its setup and finish, and
+-- measures the memory; 'round' names the round in error messages.
+-- Returns a table with processBefore and processAfter (nil if the
+-- memory of the process cannot be measured), luaBefore, luaAfter,
+-- trendKb (nil with too few samples) and measured (the iterations
+-- after the warm-up). Raises an error on failure.
+local function measureRound(ctx, phase, count, round)
+   local shared
+   if phase.setup then
+      shared = phase.setup(ctx)
+   end
+   local warmup = math.min(phase.warmup or warmupIterations, count)
+   local interval = math.max(1, (count - warmup) // trendSamples)
+   -- Filled in place, so taking a sample does not grow the Lua heap.
+   local xs, ys, samples = {}, {}, 0
+   for k = 1, trendSamples + 2 do
+      xs[k], ys[k] = 0, 0
+   end
+   -- The last slot is kept for the sample at the end.
+   local function addSample(i, kb, last)
+      if kb and (last or samples < #xs - 1) then
+         samples = samples + 1
+         xs[samples], ys[samples] = i, kb
+      end
+   end
+   local result = { measured = count - warmup }
+   for i = 1, count do
+      local ok, err = pcall(phase.step, ctx, i, shared)
+      if not ok then
+         -- Release what can be released, the step error is what counts.
+         if phase.finish then
+            pcall(phase.finish, ctx, shared)
+         end
+         error(string.format("%siteration %d: %s", round, i,
+                             tostring(err)), 0)
+      end
+      if i == warmup then
+         result.processBefore, result.luaBefore = memoryUsage()
+         addSample(i, result.processBefore)
+      elseif i > warmup and i < count and (i - warmup) % interval == 0 then
+         addSample(i, (memoryUsage()))
+      end
+   end
+   if phase.finish then
+      phase.finish(ctx, shared)
+   end
+   -- memoryUsage runs two full GC cycles: an object finalized in the
+   -- first one may keep another one reachable until the second, e.g. a
+   -- cursor keeps its prepared statement alive.
+   result.processAfter, result.luaAfter = memoryUsage()
+   addSample(count, result.processAfter, true)
+   if result.processBefore and samples >= minTrendSamples then
+      result.trendKb = trend.partSlope(xs, ys, samples, trendParts)
+         * result.measured
+   end
+   return result
+end
+
+-- The growth of the process memory a round is judged by: its trend, or
+-- its difference with too few samples; nil if it cannot be measured.
+local function judgedGrowth(result)
+   if not result.processBefore then
+      return nil
+   end
+   return result.trendKb or (result.processAfter - result.processBefore)
+end
+
+-- Process memory of a round for the output and for messages.
+local function describeProcess(result)
+   local text = signedKb(result.processAfter - result.processBefore)
+   if result.trendKb then
+      text = text .. " (trend " .. signedKb(result.trendKb) .. ")"
+   end
+   return text
 end
 
 -- Runs one phase and returns a short summary. Raises an error on failure.
@@ -211,34 +316,14 @@ local function runPhase(ctx, phase, count, sid)
       end
    end
    local before = readServerCounters(ctx, sid)
-
-   local shared
-   if phase.setup then
-      shared = phase.setup(ctx)
+   local first = measureRound(ctx, phase, count, "")
+   -- A heap that settles grows in the first round only, a leak in both:
+   -- a phase over the limit runs a second round of the same length.
+   local second
+   local growth = judgedGrowth(first)
+   if growth and growth > processLimitKb and phase.confirm ~= false then
+      second = measureRound(ctx, phase, count, "second round, ")
    end
-   local warmup = math.min(phase.warmup or warmupIterations, count)
-   local rssBefore, luaBefore
-   for i = 1, count do
-      local ok, err = pcall(phase.step, ctx, i, shared)
-      if not ok then
-         -- Release what can be released, the step error is what counts.
-         if phase.finish then
-            pcall(phase.finish, ctx, shared)
-         end
-         error(string.format("iteration %d: %s", i, tostring(err)), 0)
-      end
-      if i == warmup then
-         rssBefore, luaBefore = memoryUsage()
-      end
-   end
-   if phase.finish then
-      phase.finish(ctx, shared)
-   end
-
-   -- memoryUsage runs two full GC cycles: an object finalized in the
-   -- first one may keep another one reachable until the second, e.g. a
-   -- cursor keeps its prepared statement alive.
-   local rssAfter, luaAfter = memoryUsage()
    local after = readServerCounters(ctx, sid)
 
    local counters = serverCounters(ctx)
@@ -251,19 +336,29 @@ local function runPhase(ctx, phase, count, sid)
       end
    end
 
-   if rssBefore then
-      local rssGrowthKb = (rssAfter - rssBefore) / 1024
-      if rssGrowthKb > rssLimitKb then
-         error(string.format("process memory grew by %.0f KB",
-                             rssGrowthKb), 0)
+   if growth and growth > processLimitKb then
+      local secondGrowth = second and judgedGrowth(second)
+      if not secondGrowth or secondGrowth > processLimitKb then
+         local text = string.format("process memory (%s) grows: %s over"
+                                    .. " %d iterations", memory.label,
+                                    describeProcess(first), first.measured)
+         if second then
+            text = text .. ", second round " .. describeProcess(second)
+         end
+         error(text, 0)
       end
    end
-   local luaGrowthKb = luaAfter - luaBefore
-   if luaGrowthKb > luaLimitKb then
-      error(string.format("Lua heap grew by %.0f KB", luaGrowthKb), 0)
+   for _, result in ipairs({ first, second }) do
+      local luaGrowthKb = result.luaAfter - result.luaBefore
+      if luaGrowthKb > luaLimitKb then
+         error(string.format("Lua heap grew by %.0f KB", luaGrowthKb), 0)
+      end
    end
 
    local parts = { string.format("%d iterations", count) }
+   if second then
+      parts[1] = parts[1] .. " and a second round"
+   end
    if before == nil then
       parts[#parts + 1] = "server check skipped"
    else
@@ -272,10 +367,15 @@ local function runPhase(ctx, phase, count, sid)
                                            before[i], after[i])
       end
    end
-   if rssBefore then
-      parts[#parts + 1] = "rss " .. signedKb((rssAfter - rssBefore) / 1024)
+   if first.processBefore then
+      local text = memory.label .. " " .. describeProcess(first)
+      if second then
+         text = text .. ", second round " .. describeProcess(second)
+      end
+      parts[#parts + 1] = text
    end
-   parts[#parts + 1] = "lua " .. signedKb(luaAfter - luaBefore)
+   local last = second or first
+   parts[#parts + 1] = "lua " .. signedKb(last.luaAfter - last.luaBefore)
    return table.concat(parts, ", ")
 end
 

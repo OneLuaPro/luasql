@@ -23,6 +23,7 @@ local dbutil = require("dbutil")
 local memory = require("memory")
 local report = require("report")
 local soakRound = require("scenarios.soakRound")
+local trend = require("trend")
 
 local soak = {}
 
@@ -106,35 +107,6 @@ local function adminValue(ctx, sql, what)
    local value, err = dbutil.queryValue(ctx.adminConn, sql)
    return math.tointeger(tonumber(check(what, value, err)))
       or tonumber(value)
-end
-
--- Robust slope of the points (xs[k], ys[k]): the median of the slopes
--- between all pairs (Theil-Sen).
-local function theilSen(xs, ys)
-   local n = #xs
-   local step = math.max(1, n / maxSlopeSamples)
-   local px, py = {}, {}
-   for k = 1, n, step do
-      local index = math.floor(k)
-      px[#px + 1], py[#py + 1] = xs[index], ys[index]
-   end
-   local slopes = {}
-   for a = 1, #px - 1 do
-      for b = a + 1, #px do
-         if px[b] > px[a] then
-            slopes[#slopes + 1] = (py[b] - py[a]) / (px[b] - px[a])
-         end
-      end
-   end
-   table.sort(slopes)
-   local m = #slopes
-   if m == 0 then
-      return 0
-   end
-   if m % 2 == 1 then
-      return slopes[(m + 1) // 2]
-   end
-   return (slopes[m // 2] + slopes[m // 2 + 1]) / 2
 end
 
 -- The server counters of the test session (backend.serverCounters and
@@ -348,7 +320,7 @@ local function evaluateSeries(state, label, key, limit, problems)
                    .. " warm-up, too few for a verdict", #xs), "note")
       return
    end
-   local slope = theilSen(xs, ys) * 3600
+   local slope = trend.theilSen(xs, ys, #xs, maxSlopeSamples) * 3600
    text = text .. string.format(", %+.0f KB per hour (limit %d)", slope,
                                 limit)
    if slope > limit then
