@@ -151,6 +151,14 @@ print("-- error path")
 local c2, e2 = exec("SELECT * FROM lt_oci8_does_not_exist")
 check("error returns nil and ORA-00942", c2 == nil and tostring(e2):find("ORA%-00942") ~= nil, e2)
 if e2 then info("message", mask(e2)) end
+-- an empty statement fails before the execute (OCIStmtPrepare); the
+-- statement handle must be freed on that path, too
+local c3, e3 = exec("")
+check("empty statement returns nil and ORA-24373",
+  c3 == nil and tostring(e3):find("ORA%-24373") ~= nil, e3)
+local c4, e4 = conn:prepare("")
+check("prepare of an empty statement returns nil and ORA-24373",
+  c4 == nil and tostring(e4):find("ORA%-24373") ~= nil, e4)
 
 print("-- unsupported column type")
 local cu, eu = conn:execute("select bfilename('X', 'y') from dual")

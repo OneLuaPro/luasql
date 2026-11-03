@@ -391,13 +391,26 @@ int checkerr (lua_State *L, sword status, OCIError *errhp) {
 
 /*
 ** Copy the column name to the column structure and convert it to lower case.
+** Returns 0 if there is no memory for it.
 */
-static void copy_column_name (column_data *col, text *name) {
+static int copy_column_name (column_data *col, text *name) {
 	unsigned int i;
 	col->name = (text *)malloc (col->namelen);
+	if (col->name == NULL && col->namelen > 0)
+		return 0;
 	memcpy (col->name, name, col->namelen);
 	for (i = 0; i < col->namelen; i++)
 		col->name[i] = tolower (col->name[i]);
+	return 1;
+}
+
+/*
+** Push nil and the message for a buffer that could not be allocated.
+*/
+static int out_of_memory (lua_State *L) {
+	lua_pushnil (L);
+	lua_pushliteral (L, LUASQL_PREFIX"out of memory");
+	return 2;
 }
 
 /*
@@ -412,7 +425,8 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 	ASSERT (L, OCIAttrGet (param, OCI_DTYPE_PARAM,
 		(dvoid *)&(name), (ub4 *)&(col->namelen),
 		OCI_ATTR_NAME, cur->errhp), cur->errhp);
-	copy_column_name (col, name);
+	if (!copy_column_name (col, name))
+		return out_of_memory (L);
 
 	ASSERT (L, OCIAttrGet (param, OCI_DTYPE_PARAM,
 		(dvoid *)&(col->type), (ub4 *)0, OCI_ATTR_DATA_TYPE,
@@ -436,6 +450,8 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 				cur->errhp), cur->errhp);
 			bufsize = (sb4)col->max * CLIENT_MAX_CHAR_BYTES;
 			col->val.s = calloc (bufsize + 1, 1);
+			if (col->val.s == NULL)
+				return out_of_memory (L);
 			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
 				cur->errhp, (ub4)i, col->val.s, bufsize,
 				SQLT_CHR, (dvoid *)&(col->null), &(col->rlen),
@@ -449,6 +465,8 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 				(dvoid *)&(col->max), 0, OCI_ATTR_DATA_SIZE,
 				cur->errhp), cur->errhp);
 			col->val.s = calloc ((size_t)col->max + 1, 1);
+			if (col->val.s == NULL)
+				return out_of_memory (L);
 			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
 				cur->errhp, (ub4)i, col->val.s, (sb4)col->max,
 				SQLT_BIN, (dvoid *)&(col->null), &(col->rlen),
@@ -1546,13 +1564,19 @@ static int conn_execute (lua_State *L) {
 	/* statement handle */
 	ASSERT (L, OCIHandleAlloc ((dvoid *)env->envhp, (dvoid **)&stmthp,
 		OCI_HTYPE_STMT, (size_t)0, (dvoid **)0), conn->errhp);
-	ASSERT (L, OCIStmtPrepare (stmthp, conn->errhp, (text *)statement,
-		(ub4) strlen(statement), (ub4) OCI_NTV_SYNTAX, (ub4) OCI_DEFAULT),
-		conn->errhp);
+	/* from here on, every failure frees stmthp (e.g. ORA-24373 for an
+	   empty statement would otherwise leak the handle) */
+	status = OCIStmtPrepare (stmthp, conn->errhp, (text *)statement,
+		(ub4) strlen(statement), (ub4) OCI_NTV_SYNTAX, (ub4) OCI_DEFAULT);
 	/* statement type */
-	ASSERT (L, OCIAttrGet ((dvoid *)stmthp, (ub4) OCI_HTYPE_STMT,
-		(dvoid *)&type, (ub4 *)0, (ub4)OCI_ATTR_STMT_TYPE, conn->errhp),
-		conn->errhp);
+	if (status == OCI_SUCCESS)
+		status = OCIAttrGet ((dvoid *)stmthp, (ub4) OCI_HTYPE_STMT,
+			(dvoid *)&type, (ub4 *)0, (ub4)OCI_ATTR_STMT_TYPE, conn->errhp);
+	if (status != OCI_SUCCESS) {
+		int ret = checkerr (L, status, conn->errhp);
+		OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
+		return ret;
+	}
 	if (type == OCI_STMT_SELECT)
 		iters = 0;
 	else
@@ -1588,9 +1612,14 @@ static int conn_execute (lua_State *L) {
 	} else {
 		/* return number of rows */
 		ub4 rows_affected = 0;
-		ASSERT (L, OCIAttrGet ((dvoid *)stmthp, (ub4)OCI_HTYPE_STMT,
+		status = OCIAttrGet ((dvoid *)stmthp, (ub4)OCI_HTYPE_STMT,
 			(dvoid *)&rows_affected, (ub4 *)0,
-			(ub4)OCI_ATTR_ROW_COUNT, conn->errhp), conn->errhp);
+			(ub4)OCI_ATTR_ROW_COUNT, conn->errhp);
+		if (status != OCI_SUCCESS) {
+			int ret = checkerr (L, status, conn->errhp);
+			OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
+			return ret;
+		}
 		OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
 #if LUA_VERSION_NUM >= 503
 		lua_pushinteger (L, (lua_Integer)rows_affected);
@@ -2270,7 +2299,10 @@ every DDL statement (e.g. `CREATE TABLE`), also with autocommit off.
 
 @function setautocommit
 @tparam boolean on `true` to turn autocommit on, `false` to turn it off
-@treturn boolean `true`
+@treturn[1] boolean `true`
+@treturn[2] nil
+@treturn[2] string error message, if the rollback fails; autocommit then
+stays as it was
 */
 /*
 ** Set "auto commit" property of the connection.
@@ -2280,10 +2312,10 @@ every DDL statement (e.g. `CREATE TABLE`), also with autocommit off.
 static int conn_setautocommit (lua_State *L) {
 	conn_data *conn = getconnection (L);
 	if (lua_toboolean (L, 2)) {
-		conn->auto_commit = 1;
-		/* Undo active transaction. */
+		/* Undo active transaction; autocommit is on only if that worked */
 		ASSERT (L, OCITransRollback (conn->svchp, conn->errhp,
 			OCI_DEFAULT), conn->errhp);
+		conn->auto_commit = 1;
 	}
 	else {
 		conn->auto_commit = 0;
