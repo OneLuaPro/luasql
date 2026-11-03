@@ -21,6 +21,7 @@ Each case runs once, with a new connection.
 | `killInTransaction`  | Turns autocommit off, inserts a row, kills the session, commits.                                                        | Pass: the commit fails with a lost connection error and the row is not on the server. Fail: the commit succeeds, or the row is there.                                   |
 | `killThenGc`         | Kills the session, then drops connection, open cursor and environment without closing them.                             | Pass: the GC (garbage collector) frees all of them, the environment is collected, the session is gone. Fail: a crash, the environment is not collected, or the session stays. |
 | `killThenReconnect`  | Kills the session, closes the connection and opens a new one on the same environment.                                   | Pass: the new connection works. Fail: the environment is unusable after the kill.                                                                                       |
+| `killThenAutocommit` | Turns autocommit off, kills the session, then calls `conn:setautocommit(true)` twice; that call rolls back the open transaction first, which cannot run on a killed session. Then `conn:commit()`. | Pass: both calls fail with a lost connection error, the driver options (`numbers`, `prefetch`) read the same as before, the commit fails as well, close works, the session is gone. Fail: a call succeeds, an option changed, a crash or a leftover session. Whether autocommit really stayed off cannot be seen on a killed session. |
 
 ## Phases
 

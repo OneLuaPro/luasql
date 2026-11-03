@@ -25,6 +25,10 @@
 --                       closing; the GC frees them and the environment
 --   killThenReconnect   a new connection on the same environment
 --                       works after the kill
+--   killThenAutocommit  autocommit off, kill, setautocommit(true): it
+--                       must fail (the rollback it needs cannot run),
+--                       a second time as well; the driver options are
+--                       unchanged, commit fails, close works
 --
 -- Phase:
 --   killLoop  connect, query, kill, failing call, close; checks memory
@@ -295,6 +299,35 @@ local function killThenReconnectCase(ctx)
    closeObject(env, "environment")
 end
 
+-- Turning autocommit on rolls back the open transaction first; on a
+-- killed session that rollback fails, so the call must fail too and
+-- leave the connection as it was.
+local function killThenAutocommitCase(ctx)
+   local base = sessionCount(ctx)
+   local conn = open(ctx)
+   check(conn:setautocommit(false))
+   local options = {}
+   if conn.getoption then
+      for _, name in ipairs({ "numbers", "prefetch" }) do
+         options[name] = conn:getoption(name)
+      end
+   end
+   kill(ctx, conn)
+   local ok, err = conn:setautocommit(true)
+   expectLost(ctx, "setautocommit(true) after the kill", ok, err)
+   ok, err = conn:setautocommit(true)
+   expectLost(ctx, "second setautocommit(true)", ok, err)
+   for name, value in pairs(options) do
+      expect(conn:getoption(name) == value, string.format("option %s is"
+                .. " %s after the failed call, was %s", name,
+                tostring(conn:getoption(name)), tostring(value)))
+   end
+   ok, err = conn:commit()
+   expectLost(ctx, "commit after the kill", ok, err)
+   closeObject(conn, "connection")
+   expectSessions(ctx, base, "after closing")
+end
+
 local caseList = {
    { name = "killIdle", run = killIdleCase },
    { name = "killDuringFetch", run = killDuringFetchCase },
@@ -311,6 +344,7 @@ local caseList = {
    { name = "killInTransaction", run = killInTransactionCase },
    { name = "killThenGc", run = killThenGcCase },
    { name = "killThenReconnect", run = killThenReconnectCase },
+   { name = "killThenAutocommit", run = killThenAutocommitCase },
 }
 
 -- True if the driver has the connection option prefetch.

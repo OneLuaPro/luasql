@@ -12,6 +12,9 @@
 --                    statement must be closable afterwards
 --   stmtMisuse       execute and close a statement with an open cursor
 --   useAfterClose    calls on closed cursors and statements
+--   emptyStatement   a statement the DBMS rejects already when it is
+--                    prepared (backend.emptyStatement), via conn:execute
+--                    and, every second time, conn:prepare
 --
 -- A phase is skipped if the driver has no prepare() but the phase needs
 -- it, or if the backend lacks a query the phase needs.
@@ -191,6 +194,20 @@ local function useAfterCloseStep(ctx)
    expectRejected("close closed statement", stmt.close, stmt)
 end
 
+-- A statement that fails before it is executed: a driver that frees
+-- its handles only on the execute path leaks them here.
+local function emptyStatementStep(ctx, i)
+   local conn = ctx.testConn
+   local sql = ctx.backend.emptyStatement
+   local cur, err = conn:execute(sql)
+   expectFailure("execute of an empty statement", cur, err)
+   if i % 2 == 0 and conn.prepare ~= nil then
+      local stmt
+      stmt, err = conn:prepare(sql)
+      expectFailure("prepare of an empty statement", stmt, err)
+   end
+end
+
 local phaseList = {
    { name = "sqlError", step = sqlErrorStep,
      needs = { "invalidQuery" } },
@@ -206,6 +223,8 @@ local phaseList = {
      step = stmtMisuseStep, finish = finishStatement,
      usesPrepare = true },
    { name = "useAfterClose", step = useAfterCloseStep },
+   { name = "emptyStatement", step = emptyStatementStep,
+     needs = { "emptyStatement" } },
 }
 
 -- Returns why a phase cannot run with this driver and backend, or nil.

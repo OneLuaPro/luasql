@@ -121,6 +121,9 @@ return {
    },
    -- Used by the error path scenario.
    invalidQuery = "SELEC 1 FROM dual",
+   -- Rejected already when it is prepared (ORA-24373), before any
+   -- execute.
+   emptyStatement = "",
    failingBlock = "BEGIN RAISE_APPLICATION_ERROR(-20001, 'stress');"
       .. " END;",
    conditionalBlock = "BEGIN IF :1 > 0 THEN"
