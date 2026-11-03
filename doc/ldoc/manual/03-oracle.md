@@ -201,9 +201,11 @@ Two consequences come from OCI and are kept as they are:
   the connection is closed; OCI no longer knows it and cannot close it. Many
   such failures end in `ORA-01000` (maximum open cursors exceeded).
 - When a query fails in the middle of its result, e.g. with a division by
-  zero in one row, the rows fetched ahead together with the failing row are
-  not delivered: with 100, up to 99 rows fewer arrive before the error than
-  with a prefetch of 1. The error itself is always reported.
+  zero in one row, the rows that come in the same round trip as the failing
+  row are not delivered: with a prefetch of n, up to n rows before the
+  failing one. If the failing row is among the rows fetched by the execute,
+  already `conn:execute` or `stmt:execute` fails and no row arrives. The
+  error itself is always reported.
 
 ## Transactions
 
