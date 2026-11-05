@@ -191,13 +191,14 @@ LUASQL_API void luasql_set_types (lua_State *L) {
 ** is_named_out: set to 1 if string keys (named), 0 if integer keys (positional).
 **
 ** Returns 1 on success.
-** Returns 0 on failure — pushes nil + errmsg onto the stack.
+** Raises an error if the table is invalid, so the caller must call it
+** before allocating anything for the execution.
 */
 LUASQL_API int luasql_validate_params (lua_State *L, int tbl_idx, int *is_named_out, int *num_params_out) {
     int is_named = -1;  /* -1=unknown, 1=named, 0=positional */
     int param_count = 0;
     
-    /* Convert tbl_idx to absolute index to prevent it from changing when we push nil */
+    /* Convert tbl_idx to an absolute index, so it stays valid while we push */
     int abs_tbl_idx = (tbl_idx < 0) ? lua_gettop(L) + tbl_idx + 1 : tbl_idx;
 
     lua_pushnil(L);
@@ -208,20 +209,14 @@ LUASQL_API int luasql_validate_params (lua_State *L, int tbl_idx, int *is_named_
         /* check if keys are named or positional */
         int key_type = lua_type(L, -2);
         if (key_type != LUA_TSTRING && key_type != LUA_TNUMBER) {
-            lua_pop(L, 2);
-            lua_pushnil(L);
-            lua_pushstring(L, LUASQL_PREFIX "parameter keys must be strings or integers");
-            return 0;
+            return luaL_error(L, LUASQL_PREFIX "parameter keys must be strings or integers");
         }
 
         if (key_type == LUA_TNUMBER) {
             lua_Number num = lua_tonumber(L, -2);
             lua_Integer integer = lua_tointeger(L, -2);
             if (num != (lua_Number)integer || integer <= 0) {
-                lua_pop(L, 2);
-                lua_pushnil(L);
-                lua_pushstring(L, LUASQL_PREFIX "numeric parameter keys must be positive integers");
-                return 0;
+                return luaL_error(L, LUASQL_PREFIX "numeric parameter keys must be positive integers");
             }
         }
 
@@ -229,39 +224,27 @@ LUASQL_API int luasql_validate_params (lua_State *L, int tbl_idx, int *is_named_
         if (is_named == -1) {
             is_named = key_is_str ? 1 : 0;
         } else if (is_named != (key_is_str ? 1 : 0)) {
-            lua_pop(L, 2);
-            lua_pushnil(L);
-            lua_pushstring(L, LUASQL_PREFIX "cannot mix positional and named parameters");
-            return 0;
+            return luaL_error(L, LUASQL_PREFIX "cannot mix positional and named parameters");
         }
 
         /* validate value entry */
         if (lua_istable(L, -1)) {
             /* must be exactly {value, luasql.type.X} — length 2 */
             if (lua_rawlen(L, -1) != (size_t)2) {
-                lua_pop(L, 2);
-                lua_pushnil(L);
-                lua_pushstring(L, LUASQL_PREFIX "parameter must be {value, luasql.type.X}");
-                return 0;
+                return luaL_error(L, LUASQL_PREFIX "parameter must be {value, luasql.type.X}");
             }
 
             /* get type (index 2) */
             lua_rawgeti(L, -1, 2);
             if (lua_type(L, -1) != LUA_TNUMBER) {
-                lua_pop(L, 3);
-                lua_pushnil(L);
-                lua_pushstring(L, LUASQL_PREFIX "second element must be a luasql.type constant");
-                return 0;
+                return luaL_error(L, LUASQL_PREFIX "second element must be a luasql.type constant");
             }
             int luasql_type = (int)lua_tointeger(L, -1);
             lua_pop(L, 1);  /* pop type */
 
             /* validate type constant range */
             if (luasql_type < 0 || luasql_type >= LUASQL_TYPE_COUNT) {
-                lua_pop(L, 2);
-                lua_pushnil(L);
-                lua_pushfstring(L, LUASQL_PREFIX "unknown luasql.type constant: %d", luasql_type);
-                return 0;
+                return luaL_error(L, LUASQL_PREFIX "unknown luasql.type constant: %d", luasql_type);
             }
 
             /* get value (index 1) */
@@ -290,10 +273,7 @@ LUASQL_API int luasql_validate_params (lua_State *L, int tbl_idx, int *is_named_
             lua_pop(L, 1);  /* pop value */
 
             if (!ok) {
-                lua_pop(L, 2);
-                lua_pushnil(L);
-                lua_pushstring(L, LUASQL_PREFIX "value does not match declared luasql.type");
-                return 0;
+                return luaL_error(L, LUASQL_PREFIX "value does not match declared luasql.type");
             }
 
         } else if (lua_type(L, -1) == LUA_TNUMBER && (int)lua_tointeger(L, -1) == LUASQL_TYPE_NULL) {
@@ -301,10 +281,7 @@ LUASQL_API int luasql_validate_params (lua_State *L, int tbl_idx, int *is_named_
 
         } else {
             /* anything else is an error */
-            lua_pop(L, 2);
-            lua_pushnil(L);
-            lua_pushstring(L, LUASQL_PREFIX "parameter must be {value, luasql.type.X} " "or luasql.type.null");
-            return 0;
+            return luaL_error(L, LUASQL_PREFIX "parameter must be {value, luasql.type.X} " "or luasql.type.null");
         }
 
         lua_pop(L, 1);  /* pop value, keep key for next iteration */

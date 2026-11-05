@@ -25,12 +25,12 @@ stmt:close()
 ```
 
 `T.null` alone, without a value, binds NULL. A value that does not match its
-type (e.g. a string with `T.int`) or an unknown type is an error before
+type (e.g. a string with `T.int`) or an unknown type raises an error before
 anything is sent to the server.
 
 Placeholders are bound **by position** (`:1`, `:2`, ..., with a list as
 parameters) or **by name** (`:id`, `:name`, ..., with a table that has the
-names as keys), never both in one call:
+names as keys), never both in one call; mixing them raises an error:
 
 ```lua
 local stmt = assert(conn:prepare("SELECT name FROM emp WHERE id = :id"))
@@ -99,5 +99,6 @@ statement must start from a clean state.
 
 A query statement returns a cursor at each execute. Only one cursor of a
 statement can be open at a time: close it, or fetch its last row, before the
-next execute. The statement itself can be closed only when its cursor is
-closed.
+next execute. An execute or reset while the cursor is open raises an error.
+The statement itself can be closed only when its cursor is closed; until
+then `stmt:close()` returns `false` and a message.

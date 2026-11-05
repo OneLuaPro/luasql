@@ -146,6 +146,22 @@ conn:commit()
 check("commit keeps the insert",
       tonumber(scalar("SELECT COUNT(*) FROM " .. TABLE)) == 2)
 conn:setautocommit(true)
+-- a commit that violates a deferred constraint fails, and Oracle rolls
+-- the transaction back
+drop("lt_oci8_def")
+exec("CREATE TABLE lt_oci8_def (id NUMBER CONSTRAINT lt_oci8_def_pk"
+     .. " PRIMARY KEY DEFERRABLE INITIALLY DEFERRED)")
+conn:setautocommit(false)
+exec("INSERT INTO lt_oci8_def (id) VALUES (1)")
+exec("INSERT INTO lt_oci8_def (id) VALUES (1)")
+local cok, cerr = conn:commit()
+check("failing commit returns false and a message",
+      cok == false and tostring(cerr):find("ORA%-") ~= nil, tostring(cerr))
+if cerr then info("failing commit", mask(cerr)) end
+check("failing commit rolls back",
+      tonumber(scalar("SELECT COUNT(*) FROM lt_oci8_def")) == 0)
+conn:setautocommit(true)
+drop("lt_oci8_def")
 
 print("-- error path")
 local c2, e2 = exec("SELECT * FROM lt_oci8_does_not_exist")
@@ -482,22 +498,22 @@ print("-- options")
 check("numbers defaults to float", conn:getoption("numbers") == "float")
 check("setoption numbers=exact", conn:setoption("numbers", "exact") == true)
 check("getoption reflects change", conn:getoption("numbers") == "exact")
-local r1, m1 = conn:setoption("numbers", "bogus")
-check("invalid value gives nil + message", r1 == nil and tostring(m1):find("invalid value") ~= nil, m1)
+local r1, m1 = pcall(conn.setoption, conn, "numbers", "bogus")
+check("invalid value raises an error", not r1 and tostring(m1):find("invalid value") ~= nil, m1)
 check("invalid value keeps mode", conn:getoption("numbers") == "exact")
-local r2, m2 = conn:setoption("bogus", "x")
-check("unknown option gives nil + message", r2 == nil and tostring(m2):find("unknown option") ~= nil, m2)
-local r3, m3 = conn:getoption("bogus")
-check("getoption: unknown option gives nil + message", r3 == nil and tostring(m3):find("unknown option") ~= nil, m3)
+local r2, m2 = pcall(conn.setoption, conn, "bogus", "x")
+check("unknown option raises an error", not r2 and tostring(m2):find("unknown option") ~= nil, m2)
+local r3, m3 = pcall(conn.getoption, conn, "bogus")
+check("getoption: unknown option raises an error", not r3 and tostring(m3):find("unknown option") ~= nil, m3)
 check("back to float", conn:setoption("numbers", "float") == true and conn:getoption("numbers") == "float")
 
 print("-- prefetch")
 check("prefetch defaults to 100", conn:getoption("prefetch") == 100)
 check("prefetch is an integer", math.type(conn:getoption("prefetch")) == "integer")
 for _, bad in ipairs{ -1, 1.5, 2^31, "100", 0/0 } do
-  local pr, pm = conn:setoption("prefetch", bad)
+  local pr, pm = pcall(conn.setoption, conn, "prefetch", bad)
   check("prefetch rejects " .. type(bad) .. " " .. tostring(bad),
-    pr == nil and tostring(pm):find("invalid value") ~= nil, pm)
+    not pr and tostring(pm):find("invalid value") ~= nil, pm)
 end
 check("invalid prefetch keeps the value", conn:getoption("prefetch") == 100)
 -- the largest value OCI accepts (MINSWORDMAXVAL); only set, not used
@@ -799,10 +815,36 @@ s6:close()
 local s7 = assert(conn:prepare("select 1 from dual"))
 check("reset without bindings", s7:reset() == true)
 local c7 = s7:execute()
-local r7, e7 = s7:reset()
-check("reset with open cursor fails", r7 == nil and e7 ~= nil, tostring(e7))
+local r7, e7 = pcall(s7.reset, s7)
+check("reset with open cursor raises an error",
+      not r7 and tostring(e7):find("open cursor") ~= nil, tostring(e7))
+r7, e7 = pcall(s7.execute, s7)
+check("execute with open cursor raises an error",
+      not r7 and tostring(e7):find("cursor still open") ~= nil, tostring(e7))
+r7, e7 = s7:close()
+check("close with open cursor returns false",
+      r7 == false and tostring(e7):find("open cursor") ~= nil, tostring(e7))
 if c7 then c7:close() end
-s7:close()
+check("close after the cursor is closed", s7:close() == true)
+r7, e7 = s7:close()
+check("close twice returns false", r7 == false and e7 ~= nil, tostring(e7))
+
+print("-- invalid parameters raise an error before binding")
+local s8 = assert(conn:prepare("select cast(:a as number) from dual"))
+local bad_params = {
+   { "mixed keys", { a = { 1, T.int }, [1] = { 2, T.int } }, "cannot mix" },
+   { "wrong type", { a = { "x", T.int } }, "does not match" },
+   { "unknown type constant", { a = { 1, 999 } }, "unknown luasql.type constant" },
+   { "value without type", { a = 1 }, "parameter must be" },
+}
+for _, b in ipairs(bad_params) do
+   r7, e7 = pcall(s8.execute, s8, b[2])
+   check("execute: " .. b[1] .. " raises an error",
+         not r7 and tostring(e7):find(b[3], 1, true) ~= nil, tostring(e7))
+end
+ok1, a1 = run(s8, { a = { 5, T.int } })
+check("statement usable after the errors", ok1 and tonumber(a1) == 5, tostring(a1))
+s8:close()
 
 print("-- TIMESTAMP WITH LOCAL TIME ZONE follows the session time zone")
 local ltz_instants = { "2026-07-19 13:45:30 Europe/Berlin", "2026-12-19 13:45:30 Europe/Berlin" }

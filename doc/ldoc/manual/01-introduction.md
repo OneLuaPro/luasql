@@ -63,8 +63,10 @@ table instead: `cur:fetch({}, "a")` uses the column names as keys,
 
 ## Errors
 
-A call that fails returns `nil` (or `false`) and an error message. It does
-not raise an error, so a program can decide what to do:
+There are two kinds of errors.
+
+A call that fails at the database returns `nil` and an error message,
+so a program can decide what to do:
 
 ```lua
 local cur, err = conn:execute("SELECT * FROM no_such_table")
@@ -73,9 +75,24 @@ if not cur then
 end
 ```
 
-Wrapping a call in `assert` turns a failure into an error with the message.
-Using a closed object or passing an argument of the wrong type always raises
-an error.
+Wrapping such a call in `assert` turns the failure into an error with the
+message.
+
+A call that is used wrongly raises an error: using a closed object, an
+argument of the wrong type, an unknown option, invalid parameters of a
+prepared statement, or an execute while the cursor of the statement is
+still open. These are mistakes in the program, not failures of the
+database; `pcall` catches them:
+
+```lua
+local ok, err = pcall(conn.setoption, conn, "no_such_option", 1)
+print(ok, err)   --> false   LuaSQL: unknown option 'no_such_option'
+```
+
+The functions without a result of their own, `close`, `commit`, `rollback`
+and `setautocommit`, never raise an error for a failure: they return `true`,
+or `false` and a message, e.g. `close` of a connection with open cursors or
+a `commit` that Oracle refuses.
 
 ## Closing
 

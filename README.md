@@ -58,7 +58,7 @@ Years before Christ get a minus sign, e.g. `"-4712-01-01 00:00:00"`. Not support
 
 ### Options
 
-`conn:setoption(name, value)` sets an option of a connection, `conn:getoption(name)` reads it; both return `nil` and a message for an unknown option or value.
+`conn:setoption(name, value)` sets an option of a connection, `conn:getoption(name)` reads it; both raise an error for an unknown option or value.
 
 | Option    | Values                          | Meaning                                                                                                                                                                     |
 | --------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

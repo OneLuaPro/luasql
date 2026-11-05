@@ -862,25 +862,25 @@ function prepared_statements_test ()
 	stmt = assert (CONN:prepare ("INSERT INTO t_ps (id) VALUES (:id)"))
 	
 	-- mixed binds
-	local res, err_ret = stmt:execute({ id = {10, luasql_type.int}, [1] = {11, luasql_type.int} })
-	assert2 (true, res == nil, "mixed binding should fail")
+	local res, err_ret = pcall(stmt.execute, stmt, { id = {10, luasql_type.int}, [1] = {11, luasql_type.int} })
+	assert2 (false, res, "mixed binding should raise an error")
 	
 	-- invalid type
-	res, err_ret = stmt:execute({ id = {"abc", luasql_type.int} })
-	assert2 (true, res == nil, "invalid Lua type should fail")
+	res, err_ret = pcall(stmt.execute, stmt, { id = {"abc", luasql_type.int} })
+	assert2 (false, res, "invalid Lua type should raise an error")
 	assert (stmt:close())
 
 	-- 7. Cursor Lifecycle
 	stmt = assert (CONN:prepare ("SELECT * FROM t_ps WHERE id = :id"))
 	cur = assert (stmt:execute({ id = {1, luasql_type.int} }))
 	
-	-- executing while cursor is open should fail
-	res, err_ret = stmt:execute({ id = {2, luasql_type.int} })
-	assert2 (true, res == nil, "executing while cursor is open should fail")
+	-- executing while cursor is open should raise an error
+	res, err_ret = pcall(stmt.execute, stmt, { id = {2, luasql_type.int} })
+	assert2 (false, res, "executing while cursor is open should raise an error")
 
 	-- closing stmt while cursor is open should fail
 	res, err_ret = stmt:close()
-	assert2 (true, res == nil, "closing statement while cursor is open should fail")
+	assert2 (false, res, "closing statement while cursor is open should return false")
 	
 	cur:close()
 	assert (stmt:close())

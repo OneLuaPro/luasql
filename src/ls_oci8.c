@@ -390,6 +390,19 @@ int checkerr (lua_State *L, sword status, OCIError *errhp) {
 
 
 /*
+** Push false plus an error message, for the functions without a result
+** of their own (commit, rollback, setautocommit), as the LuaSQL manual
+** requires; all other functions return nil plus the message.
+*/
+static int checkerr_false (lua_State *L, sword status, OCIError *errhp) {
+	int n = checkerr (L, status, errhp);   /* nil, message */
+	lua_pushboolean (L, 0);
+	lua_replace (L, -n - 1);
+	return n;
+}
+
+
+/*
 ** Copy the column name to the column structure and convert it to lower case.
 ** Returns 0 if there is no memory for it.
 */
@@ -1668,24 +1681,28 @@ static void stmt_free_binds (lua_State *L, stmt_data *stmt) {
 /***
 Closes the statement.
 
-Fails while a cursor of the statement is open. The garbage collector and a
+Returns `false` while a cursor of the statement is open, as `close` of a
+connection with open statements does. The garbage collector and a
 to-be-closed variable call it as well.
 @function close
 @treturn[1] boolean `true`
-@treturn[2] nil
-@treturn[2] string error message, also if the statement is already closed
+@treturn[2] boolean `false`
+@treturn[2] string error message, if a cursor is open or the statement is
+already closed
+@treturn[3] nil
+@treturn[3] string error message, if Oracle fails to release the statement
 */
 static int stmt_close (lua_State *L) {
 	conn_data *conn;
 	stmt_data *stmt = (stmt_data *)luaL_checkudata (L, 1, LUASQL_STATEMENT_OCI8);
 	luaL_argcheck (L, stmt != NULL, 1, LUASQL_PREFIX"statement expected");
 	if (stmt->closed) {
-		lua_pushnil (L);
+		lua_pushboolean (L, 0);
 		lua_pushstring (L, "Statement is already closed");
 		return 2;
 	}
 	if (stmt->cursor_open) {
-		lua_pushnil (L);
+		lua_pushboolean (L, 0);
 		lua_pushstring (L, LUASQL_PREFIX"cannot close statement with open cursor");
 		return 2;
 	}
@@ -2049,12 +2066,13 @@ static int stmt_bind (lua_State *L, stmt_data *stmt, int is_named) {
 Drops all parameters bound to the statement, as in the ODBC driver.
 
 Afterwards, an execute without a value for a placeholder fails with
-`ORA-01008`. Fails while a cursor of the statement is open.
+`ORA-01008`.
 
 @function reset
 @treturn[1] boolean `true`
 @treturn[2] nil
 @treturn[2] string error message
+@raise if a cursor of the statement is open
 */
 /*
 ** Drop all bindings of a statement, like stmt:reset() of the ODBC
@@ -2070,11 +2088,8 @@ static int stmt_reset (lua_State *L) {
     size_t len;
     sword status;
 
-    if (stmt->cursor_open) {
-        lua_pushnil(L);
-        lua_pushstring(L, LUASQL_PREFIX"cannot reset statement with open cursor");
-        return 2;
-    }
+    if (stmt->cursor_open)
+        return luaL_error(L, LUASQL_PREFIX"cannot reset statement with open cursor");
     if (stmt->binds == LUA_NOREF) {    /* nothing bound */
         lua_pushboolean(L, 1);
         return 1;
@@ -2128,6 +2143,9 @@ its last row, before the next execute.
 @treturn[3] nil
 @treturn[3] string error message, e.g. with `ORA-01008` if a placeholder has
 no value
+@raise if a cursor of the statement is open, or if `params` is not valid:
+mixed keys, a value that is not a pair, an unknown type constant, or a value
+that does not match its type
 @usage
 local stmt = assert(conn:prepare("SELECT name FROM emp WHERE id = :id"))
 local cur = assert(stmt:execute{ id = {7, T.int} })
@@ -2145,11 +2163,8 @@ stmt:close()
 static int stmt_execute (lua_State *L) {
     stmt_data *stmt = getstatement (L);
 
-    if (stmt->cursor_open) {
-        lua_pushnil(L);
-        lua_pushstring(L, LUASQL_PREFIX"cannot execute: cursor still open");
-        return 2;
-    }
+    if (stmt->cursor_open)
+        return luaL_error(L, LUASQL_PREFIX"cannot execute: cursor still open");
 
     /* stmt:execute() and stmt:execute(nil) bind nothing new and run with
        the values bound last, as with the ODBC driver */
@@ -2159,11 +2174,11 @@ static int stmt_execute (lua_State *L) {
     }
     luaL_checktype(L, 2, LUA_TTABLE);
 
-    /* Validates the Params table (bind_data) */
+    /* Validates the Params table (bind_data); raises an error if it is
+       invalid, before anything is bound or allocated */
     int is_named;
     int num_params = 0;
-    if (!luasql_validate_params(L, 2, &is_named, &num_params))
-        return 2;  /* nil+errmsg already on stack */
+    luasql_validate_params(L, 2, &is_named, &num_params);
 
     if (num_params > 0) {
         int ret = stmt_bind(L, stmt, is_named);
@@ -2244,7 +2259,7 @@ static int stmt_execute (lua_State *L) {
 Commits the current transaction.
 @function commit
 @treturn[1] boolean `true`
-@treturn[2] nil
+@treturn[2] boolean `false`
 @treturn[2] string error message
 */
 /*
@@ -2252,8 +2267,9 @@ Commits the current transaction.
 */
 static int conn_commit (lua_State *L) {
 	conn_data *conn = getconnection (L);
-	ASSERT (L, OCITransCommit (conn->svchp, conn->errhp, OCI_DEFAULT),
-		conn->errhp);
+	sword status = OCITransCommit (conn->svchp, conn->errhp, OCI_DEFAULT);
+	if (status)   /* as ASSERT: everything but OCI_SUCCESS */
+		return checkerr_false (L, status, conn->errhp);
 /*
 	if (conn->auto_commit == 0)
 		ASSERT (L, OCITransStart (conn->svchp, conn->errhp...
@@ -2268,7 +2284,7 @@ static int conn_commit (lua_State *L) {
 Rolls back the current transaction.
 @function rollback
 @treturn[1] boolean `true`
-@treturn[2] nil
+@treturn[2] boolean `false`
 @treturn[2] string error message
 */
 /*
@@ -2276,8 +2292,9 @@ Rolls back the current transaction.
 */
 static int conn_rollback (lua_State *L) {
 	conn_data *conn = getconnection (L);
-	ASSERT (L, OCITransRollback (conn->svchp, conn->errhp, OCI_DEFAULT),
-		conn->errhp);
+	sword status = OCITransRollback (conn->svchp, conn->errhp, OCI_DEFAULT);
+	if (status)   /* as ASSERT: everything but OCI_SUCCESS */
+		return checkerr_false (L, status, conn->errhp);
 /*
 	if (conn->auto_commit == 0)
 		sql_begin(conn);
@@ -2300,7 +2317,7 @@ every DDL statement (e.g. `CREATE TABLE`), also with autocommit off.
 @function setautocommit
 @tparam boolean on `true` to turn autocommit on, `false` to turn it off
 @treturn[1] boolean `true`
-@treturn[2] nil
+@treturn[2] boolean `false`
 @treturn[2] string error message, if the rollback fails; autocommit then
 stays as it was
 */
@@ -2313,8 +2330,10 @@ static int conn_setautocommit (lua_State *L) {
 	conn_data *conn = getconnection (L);
 	if (lua_toboolean (L, 2)) {
 		/* Undo active transaction; autocommit is on only if that worked */
-		ASSERT (L, OCITransRollback (conn->svchp, conn->errhp,
-			OCI_DEFAULT), conn->errhp);
+		sword status = OCITransRollback (conn->svchp, conn->errhp,
+			OCI_DEFAULT);
+		if (status)   /* as ASSERT: everything but OCI_SUCCESS */
+			return checkerr_false (L, status, conn->errhp);
 		conn->auto_commit = 1;
 	}
 	else {
@@ -2352,9 +2371,8 @@ its result, the rows fetched ahead with the failing row are not delivered.
 @function setoption
 @tparam string name name of the option
 @param value new value: a string for `numbers`, an integer for `prefetch`
-@treturn[1] boolean `true`
-@treturn[2] nil
-@treturn[2] string error message for an unknown option or value
+@treturn boolean `true`
+@raise for an unknown option or an invalid value
 @usage
 assert(conn:setoption("numbers", "exact"))
 local cur = conn:execute("SELECT COUNT(*) FROM emp")
@@ -2364,7 +2382,7 @@ assert(conn:setoption("prefetch", 1000))   -- for a large result
 */
 /*
 ** Set a driver option of the connection. Affects cursors created afterwards.
-** Returns true, or nil plus an error message for an unknown option or value.
+** Returns true; raises an error for an unknown option or value.
 */
 static int conn_setoption (lua_State *L) {
 	conn_data *conn = getconnection (L);
@@ -2372,12 +2390,9 @@ static int conn_setoption (lua_State *L) {
 	if (strcmp (name, "prefetch") == 0) {
 		lua_Number n = lua_tonumber (L, 3);
 		if (lua_type (L, 3) != LUA_TNUMBER || n != floor (n)
-				|| n < 0 || n > (lua_Number) MINSWORDMAXVAL) {
-			lua_pushnil (L);
-			lua_pushliteral (L, LUASQL_PREFIX"invalid value for option 'prefetch', "
+				|| n < 0 || n > (lua_Number) MINSWORDMAXVAL)
+			return luaL_error (L, LUASQL_PREFIX"invalid value for option 'prefetch', "
 				"expected an integer from 0 to 2147483647");
-			return 2;
-		}
 		conn->prefetch = (ub4) n;
 		lua_pushboolean (L, 1);
 		return 1;
@@ -2392,14 +2407,10 @@ static int conn_setoption (lua_State *L) {
 				return 1;
 			}
 		}
-		lua_pushnil (L);
-		lua_pushfstring (L, LUASQL_PREFIX"invalid value '%s' for option 'numbers'",
+		return luaL_error (L, LUASQL_PREFIX"invalid value '%s' for option 'numbers'",
 			value);
-		return 2;
 	}
-	lua_pushnil (L);
-	lua_pushfstring (L, LUASQL_PREFIX"unknown option '%s'", name);
-	return 2;
+	return luaL_error (L, LUASQL_PREFIX"unknown option '%s'", name);
 }
 
 
@@ -2408,13 +2419,12 @@ static int conn_setoption (lua_State *L) {
 Reads a driver option of the connection.
 @function getoption
 @tparam string name name of the option, see @{connection:setoption}
-@treturn[1] string|integer current value
-@treturn[2] nil
-@treturn[2] string error message for an unknown option
+@treturn string|integer current value
+@raise for an unknown option
 */
 /*
-** Return the current value of a driver option of the connection,
-** or nil plus an error message for an unknown option.
+** Return the current value of a driver option of the connection;
+** raises an error for an unknown option.
 */
 static int conn_getoption (lua_State *L) {
 	conn_data *conn = getconnection (L);
@@ -2427,9 +2437,7 @@ static int conn_getoption (lua_State *L) {
 		lua_pushinteger (L, (lua_Integer) conn->prefetch);
 		return 1;
 	}
-	lua_pushnil (L);
-	lua_pushfstring (L, LUASQL_PREFIX"unknown option '%s'", name);
-	return 2;
+	return luaL_error (L, LUASQL_PREFIX"unknown option '%s'", name);
 }
 
 

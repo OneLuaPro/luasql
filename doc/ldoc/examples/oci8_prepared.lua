@@ -56,11 +56,11 @@ assert(find:reset())
 print(find:execute())  --> nil   LuaSQL: ORA-01008: ...
 find:close()
 
--- a wrong type is found before anything is sent to the server
+-- a wrong type raises an error before anything is sent to the server
 local upd = assert(conn:prepare(
   "UPDATE luasql_ex_person SET active = :1 WHERE id = :2"))
-print(upd:execute{ { "yes", T.boolean }, { 3, T.int } })
---> nil   LuaSQL: value does not match declared luasql.type
+print(pcall(upd.execute, upd, { { "yes", T.boolean }, { 3, T.int } }))
+--> false   LuaSQL: value does not match declared luasql.type
 print(upd:execute{ { true, T.boolean }, { 3, T.int } })   --> 1
 upd:close()
 

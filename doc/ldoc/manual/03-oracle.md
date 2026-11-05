@@ -219,6 +219,10 @@ Two consequences come from OCI and are kept as they are:
   an open transaction before logoff. Oracle itself would commit it; LuaSQL
   keeps only what was committed explicitly, as its other drivers do.
 - A statement that fails rolls back only itself, not the transaction.
+- `conn:commit()`, `conn:rollback()` and `conn:setautocommit()` return
+  `false` and the message of Oracle when they fail, e.g. `ORA-02091` for a
+  commit that violates a deferred constraint; Oracle has then rolled back
+  the transaction.
 
 ## Warnings
 
