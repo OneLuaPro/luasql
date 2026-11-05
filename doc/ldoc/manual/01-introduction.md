@@ -91,8 +91,11 @@ print(ok, err)   --> false   LuaSQL: unknown option 'no_such_option'
 
 The functions without a result of their own, `close`, `commit`, `rollback`
 and `setautocommit`, never raise an error for a failure: they return `true`,
-or `false` and a message, e.g. `close` of a connection with open cursors or
-a `commit` that Oracle refuses.
+or `false` and a message, e.g. for a `commit` that Oracle refuses. `close`
+returns `false` only if the object is already closed or still has open
+objects of its own (cursors, statements, connections); an error of Oracle
+while releasing the object is ignored, and the object is closed all the
+same.
 
 ## Closing
 

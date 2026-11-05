@@ -391,8 +391,8 @@ int checkerr (lua_State *L, sword status, OCIError *errhp) {
 
 /*
 ** Push false plus an error message, for the functions without a result
-** of their own (close, commit, rollback, setautocommit), as the LuaSQL
-** manual requires; all other functions return nil plus the message.
+** of their own (commit, rollback, setautocommit), as the LuaSQL manual
+** requires; all other functions return nil plus the message.
 */
 static int checkerr_false (lua_State *L, sword status, OCIError *errhp) {
 	int n = checkerr (L, status, errhp);   /* nil, message */
@@ -1682,13 +1682,14 @@ static void stmt_free_binds (lua_State *L, stmt_data *stmt) {
 Closes the statement.
 
 Returns `false` while a cursor of the statement is open, as `close` of a
-connection with open statements does. The garbage collector and a
-to-be-closed variable call it as well.
+connection with open statements does. If Oracle fails to release the
+statement, the error is ignored and the statement is closed all the same.
+The garbage collector and a to-be-closed variable call it as well.
 @function close
 @treturn[1] boolean `true`
 @treturn[2] boolean `false`
-@treturn[2] string error message, if a cursor is open, the statement is
-already closed, or Oracle fails to release it (the statement then stays open)
+@treturn[2] string error message, if a cursor is open or the statement is
+already closed
 */
 static int stmt_close (lua_State *L) {
 	conn_data *conn;
@@ -1706,10 +1707,9 @@ static int stmt_close (lua_State *L) {
 	}
 
 	if (stmt->stmthp) {
-		sword status = OCIStmtRelease (stmt->stmthp, stmt->errhp, NULL, 0, OCI_DEFAULT);
-		if (status) {
-			return checkerr_false (L, status, stmt->errhp);
-		}
+		/* Errors are ignored: close (and __gc) must not stop halfway,
+		   and the handle must never be released twice. */
+		OCIStmtRelease (stmt->stmthp, stmt->errhp, NULL, 0, OCI_DEFAULT);
 		stmt->stmthp = NULL;
 	}
 	stmt->closed = 1;
