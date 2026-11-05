@@ -88,11 +88,12 @@ local function expect(condition, message)
    end
 end
 
--- Raises an error unless a LuaSQL call failed with an error message that
--- matches pattern (if given; a list of patterns means any of them).
-local function expectFailure(what, value, err, pattern)
-   expect(value == nil or value == false,
-          what .. ": expected an error, got " .. tostring(value))
+-- Raises an error unless a LuaSQL call gave nil and an error message
+-- that matches pattern (if given; a list of patterns means any of
+-- them): an error of the DBMS.
+local function expectNil(what, value, err, pattern)
+   expect(value == nil, what .. ": expected nil and an error, got "
+          .. tostring(value))
    expect(type(err) == "string" and err ~= "",
           what .. ": failed without an error message")
    if pattern then
@@ -276,8 +277,8 @@ local function lockNowaitCase(ctx)
    check(b:setautocommit(false))
    lockRow(ctx, a, 1)
    local ok, err = tryLock(ctx, b, 1)
-   expectFailure("lock held by another session", ok, err,
-                 ctx.backend.lockBusyError)
+   expectNil("lock held by another session", ok, err,
+             ctx.backend.lockBusyError)
    -- B works on: another row can be locked.
    check(tryLock(ctx, b, 2))
    check(a:rollback())
@@ -297,8 +298,8 @@ local function lockWaitTimeoutCase(ctx)
    if cur then
       cur:close()
    end
-   expectFailure("lock with WAIT " .. lockWaitSeconds, cur, err,
-                 ctx.backend.lockTimeoutError)
+   expectNil("lock with WAIT " .. lockWaitSeconds, cur, err,
+             ctx.backend.lockTimeoutError)
    expect(seconds < hangSeconds, string.format(
           "the lock wait took %.1f s", seconds))
    check(a:rollback())

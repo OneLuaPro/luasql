@@ -14,11 +14,12 @@
 -- (backend.sessionCountQuery, needs the admin connection).
 --
 -- Cases, each runs once:
---   closeWithCursor   conn:close() with an open cursor fails cleanly,
---                     works after the cursor is closed
+--   closeWithCursor   conn:close() with an open cursor gives false and
+--                     a message, works after the cursor is closed
 --   closeWithStmt     the same with an open statement
 --   envCloseWithConn  env:close() with an open connection
 --   closeTwice        a second close() of connection and environment
+--                     gives false and a message
 --   gcAll             environment, connection, statement and cursors
 --                     dropped together; the GC frees all of them
 --   closableError     an error in the block of a to-be-closed
@@ -84,11 +85,13 @@ local function expect(condition, message)
    end
 end
 
--- Raises an error unless a LuaSQL call failed with an error message that
--- matches pattern (if given).
-local function expectFailure(what, value, err, pattern)
-   expect(value == nil or value == false,
-          what .. ": expected an error, got " .. tostring(value))
+-- Raises an error unless a LuaSQL call failed with result 'expected'
+-- and an error message that matches pattern (if given). As the error
+-- convention says (README, "Error convention"), a failed connect gives
+-- nil, a failed close false; close never raises an error.
+local function expectResult(what, expected, value, err, pattern)
+   expect(value == expected, string.format("%s: expected %s and an error,"
+          .. " got %s", what, tostring(expected), tostring(value)))
    expect(type(err) == "string" and err ~= "",
           what .. ": failed without an error message")
    if pattern and not err:find(pattern) then
@@ -96,13 +99,12 @@ local function expectFailure(what, value, err, pattern)
    end
 end
 
--- Calls fn in a way it must reject. A Lua error and a nil or false
--- result are both accepted; only a call that succeeds is wrong.
-local function expectRejected(what, fn, ...)
-   local ok, result = pcall(fn, ...)
-   if ok and result ~= nil and result ~= false then
-      error(what .. ": the call succeeded", 0)
-   end
+local function expectNil(what, value, err, pattern)
+   expectResult(what, nil, value, err, pattern)
+end
+
+local function expectFalse(what, value, err)
+   expectResult(what, false, value, err)
 end
 
 -- Opens a test connection, on env if given. Raises an error on failure.
@@ -188,7 +190,7 @@ local function closeWithCursorCase(ctx)
    local cur = check(conn:execute(ctx.backend.multiRowQuery))
    check(cur:fetch({}), nil, "fetch")
    local ok, err = conn:close()
-   expectFailure("close with open cursor", ok, err)
+   expectFalse("close with open cursor", ok, err)
    closeObject(cur, "cursor")
    closeObject(conn, "connection")
 end
@@ -197,7 +199,7 @@ local function closeWithStmtCase(ctx)
    local conn = open(ctx)
    local stmt = check(conn:prepare(ctx.backend.singleRowQuery))
    local ok, err = conn:close()
-   expectFailure("close with open statement", ok, err)
+   expectFalse("close with open statement", ok, err)
    closeObject(stmt, "statement")
    closeObject(conn, "connection")
 end
@@ -206,7 +208,7 @@ local function envCloseWithConnCase(ctx)
    local env = check(ctx.newEnvironment())
    local conn = open(ctx, env)
    local ok, err = env:close()
-   expectFailure("environment close with open connection", ok, err)
+   expectFalse("environment close with open connection", ok, err)
    closeObject(conn, "connection")
    closeObject(env, "environment")
 end
@@ -215,9 +217,11 @@ local function closeTwiceCase(ctx)
    local env = check(ctx.newEnvironment())
    local conn = open(ctx, env)
    closeObject(conn, "connection")
-   expectRejected("second connection close", conn.close, conn)
+   local ok, err = conn:close()
+   expectFalse("second connection close", ok, err)
    closeObject(env, "environment")
-   expectRejected("second environment close", env.close, env)
+   ok, err = env:close()
+   expectFalse("second environment close", ok, err)
 end
 
 -- Everything dropped at once, a cursor still open on a statement and
@@ -257,8 +261,9 @@ local function closableErrorCase(ctx)
    expect(not ok and err == "planned error",
           "unexpected result of the block: " .. tostring(err))
    expectSessions(ctx, base, "after the block")
-   -- Closed by the block: a second close must not succeed.
-   expectRejected("close after the block", outer.close, outer)
+   -- Closed by the block: a second close gives false.
+   local closed, closeErr = outer:close()
+   expectFalse("close after the block", closed, closeErr)
 end
 
 local function manyOpenCase(ctx)
@@ -302,7 +307,7 @@ local function failAndClose(ctx, weak, kind, pattern, base)
    if conn then
       conn:close()
    end
-   expectFailure("connect", conn, err, pattern)
+   expectNil("connect", conn, err, pattern)
    expectSessions(ctx, base, "after the failed connect")
    closeObject(env, "environment")
    weak[1] = env

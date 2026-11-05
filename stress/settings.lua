@@ -102,13 +102,18 @@ end
 -- Switches a connection to exact numbers if the driver supports it:
 -- integral values come back as Lua integers, all others as correctly
 -- rounded floats. Returns the mode in use, or nil and an error message.
+-- getoption and setoption raise an error for an unknown option or value.
 function settings.useExactNumbers(conn)
-   if conn.setoption == nil then
-      return "driver default (no setoption)"
+   if conn.setoption == nil or conn.getoption == nil then
+      return "driver default (no options)"
    end
-   local ok, err = conn:setoption("numbers", "exact")
-   if not ok then
-      return nil, "cannot switch to exact numbers: " .. tostring(err)
+   if not pcall(conn.getoption, conn, "numbers") then
+      return "driver default (no option numbers)"
+   end
+   local ok, result, err = pcall(conn.setoption, conn, "numbers", "exact")
+   if not ok or not result then
+      return nil, "cannot switch to exact numbers: "
+         .. tostring(ok and err or result)
    end
    return "exact"
 end

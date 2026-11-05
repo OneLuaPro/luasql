@@ -1315,9 +1315,11 @@ function dataTypes.run(ctx)
       limitCount = 0,
       timeZoneSet = false,
    }
-   -- nil if the driver has no number modes.
+   -- nil if the driver has no number modes (getoption raises an error
+   -- for an unknown option).
    if conn.getoption and conn.setoption then
-      typesCtx.numberMode = conn:getoption("numbers")
+      local ok, mode = pcall(conn.getoption, conn, "numbers")
+      typesCtx.numberMode = ok and mode or nil
    end
    for _, column in ipairs(backend.typesColumns) do
       typesCtx.columns[column] = true

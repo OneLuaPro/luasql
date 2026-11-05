@@ -7,8 +7,8 @@
 --
 -- Cases, each runs once:
 --   optionValues     the value read is an integer; valid values can be
---                    set and read back; invalid ones give nil and a
---                    message and keep the old value
+--                    set and read back; invalid ones raise an error of
+--                    LuaSQL and keep the old value
 --   rowsExecute      a large result through conn:execute with every
 --                    value of prefetchValues: every row exactly once,
 --                    in order
@@ -70,8 +70,9 @@ local prefetchValues = { 0, 1, 100, 1000, 1000000 }
 -- Largest value of the option (MINSWORDMAXVAL of OCI).
 local maxPrefetch = 2147483647
 
--- Values setoption must reject; 4294967295 is the largest value of the
--- unsigned type of the OCI attribute.
+-- Values setoption must reject with an error of LuaSQL (README, "Error
+-- convention"); 4294967295 is the largest value of the unsigned type of
+-- the OCI attribute.
 local invalidValues = { -1, 1.5, "100", 0 / 0, math.huge, maxPrefetch + 1,
                         4294967295 }
 
@@ -267,10 +268,11 @@ local function optionValuesCase(ctx)
    setPrefetch(conn, 100)
    for _, invalid in ipairs(invalidValues) do
       local what = string.format("%s %s", type(invalid), tostring(invalid))
-      local ok, err = conn:setoption("prefetch", invalid)
-      expect(ok == nil, what .. ": accepted")
-      expect(type(err) == "string" and err ~= "",
-             what .. ": rejected without a message")
+      local ok, err = pcall(conn.setoption, conn, "prefetch", invalid)
+      expect(not ok, what .. ": accepted")
+      expect(tostring(err):find("LuaSQL:", 1, true),
+             what .. ": raised an error without \"LuaSQL:\": "
+                .. tostring(err))
       expect(conn:getoption("prefetch") == 100,
              what .. ": value changed to "
                 .. tostring(conn:getoption("prefetch")))
@@ -599,8 +601,9 @@ function prefetch.run(ctx)
       report.print("  ", "skipped: driver has no options", "skip")
       return true
    end
-   local default = conn:getoption("prefetch")
-   if default == nil then
+   -- An unknown option raises an error.
+   local known, default = pcall(conn.getoption, conn, "prefetch")
+   if not known or default == nil then
       report.print("  ", "skipped: driver has no option prefetch", "skip")
       return true
    end

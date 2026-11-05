@@ -1,8 +1,10 @@
 -- scenarios/connectionLoss.lua
 -- Kills the server session of a connection of its own (never the test
 -- connection) and checks that every later call on that connection
--- fails cleanly: nil and a message about the lost connection, no crash,
--- no hang. Closing must work afterwards and nothing may stay behind.
+-- fails cleanly: a message about the lost connection with nil (execute,
+-- fetch) or false (commit, rollback, setautocommit), as the error
+-- convention says (README, "Error convention"); no crash, no hang.
+-- Closing must work afterwards and nothing may stay behind.
 -- The kill is done on the admin connection (backend.killSession);
 -- without it the scenario is skipped.
 --
@@ -28,7 +30,8 @@
 --   killThenAutocommit  autocommit off, kill, setautocommit(true): it
 --                       must fail (the rollback it needs cannot run),
 --                       a second time as well; the driver options are
---                       unchanged, commit fails, close works
+--                       unchanged, rollback and commit fail, close
+--                       works
 --
 -- Phase:
 --   killLoop  connect, query, kill, failing call, close; checks memory
@@ -84,11 +87,12 @@ local function expect(condition, message)
    end
 end
 
--- Raises an error unless a LuaSQL call failed with a message about the
--- lost connection (one of backend.lostConnectionErrors).
-local function expectLost(ctx, what, value, err)
-   expect(value == nil or value == false,
-          what .. ": expected an error, got " .. tostring(value))
+-- Raises an error unless a LuaSQL call failed with result 'expected'
+-- (nil, or false for commit, rollback and setautocommit) and a message
+-- about the lost connection (one of backend.lostConnectionErrors).
+local function expectLost(ctx, what, expected, value, err)
+   expect(value == expected, string.format("%s: expected %s and an error,"
+          .. " got %s", what, tostring(expected), tostring(value)))
    expect(type(err) == "string" and err ~= "",
           what .. ": failed without an error message")
    for _, pattern in ipairs(ctx.backend.lostConnectionErrors or {}) do
@@ -151,13 +155,26 @@ local function fetchUntilLost(ctx, cur, first, limit, expectedRow)
    for k = first, limit do
       local row, err = cur:fetch({})
       if row == nil then
-         expectLost(ctx, "fetch after the kill", row, err)
+         expectLost(ctx, "fetch after the kill", nil, row, err)
          return
       end
       expect(row[1] == expectedRow(k), string.format("fetch after the"
                 .. " kill: row %d has a wrong value", k))
    end
    error("fetch after the kill: all rows arrived", 0)
+end
+
+-- Value of a driver option of conn, nil if the driver does not know it
+-- (getoption raises an error for an unknown option).
+local function option(conn, name)
+   if conn.getoption == nil then
+      return nil
+   end
+   local ok, value = pcall(conn.getoption, conn, name)
+   if ok then
+      return value
+   end
+   return nil
 end
 
 -- Sets the driver option prefetch of conn, if a value is given.
@@ -174,7 +191,7 @@ local function killLoopStep(ctx)
    query(ctx, conn)
    kill(ctx, conn)
    local cur, err = conn:execute(ctx.backend.singleRowQuery)
-   expectLost(ctx, "execute after the kill", cur, err)
+   expectLost(ctx, "execute after the kill", nil, cur, err)
    closeObject(conn, "connection")
 end
 
@@ -191,9 +208,9 @@ local function killIdleCase(ctx)
    query(ctx, conn)
    kill(ctx, conn)
    local cur, err = conn:execute(ctx.backend.singleRowQuery)
-   expectLost(ctx, "first execute", cur, err)
+   expectLost(ctx, "first execute", nil, cur, err)
    cur, err = conn:execute(ctx.backend.singleRowQuery)
-   expectLost(ctx, "second execute", cur, err)
+   expectLost(ctx, "second execute", nil, cur, err)
    closeObject(conn, "connection")
    expectSessions(ctx, base, "after closing")
 end
@@ -244,7 +261,7 @@ local function killWithStmtCase(ctx)
    kill(ctx, conn)
    local err
    cur, err = stmt:execute({ { 2, int } })
-   expectLost(ctx, "execute after the kill", cur, err)
+   expectLost(ctx, "execute after the kill", nil, cur, err)
    closeObject(stmt, "statement")
    closeObject(conn, "connection")
 end
@@ -257,7 +274,7 @@ local function killInTransactionCase(ctx)
    check(dbutil.exec(conn, string.format(backend.lossInsert, id)))
    kill(ctx, conn)
    local ok, err = conn:commit()
-   expectLost(ctx, "commit after the kill", ok, err)
+   expectLost(ctx, "commit after the kill", false, ok, err)
    closeObject(conn, "connection")
    local count
    count, err = dbutil.queryValue(ctx.testConn,
@@ -291,7 +308,7 @@ local function killThenReconnectCase(ctx)
    local conn = open(ctx, env)
    kill(ctx, conn)
    local cur, err = conn:execute(ctx.backend.singleRowQuery)
-   expectLost(ctx, "execute after the kill", cur, err)
+   expectLost(ctx, "execute after the kill", nil, cur, err)
    closeObject(conn, "connection")
    local again = open(ctx, env)
    query(ctx, again)
@@ -307,23 +324,23 @@ local function killThenAutocommitCase(ctx)
    local conn = open(ctx)
    check(conn:setautocommit(false))
    local options = {}
-   if conn.getoption then
-      for _, name in ipairs({ "numbers", "prefetch" }) do
-         options[name] = conn:getoption(name)
-      end
+   for _, name in ipairs({ "numbers", "prefetch" }) do
+      options[name] = option(conn, name)
    end
    kill(ctx, conn)
    local ok, err = conn:setautocommit(true)
-   expectLost(ctx, "setautocommit(true) after the kill", ok, err)
+   expectLost(ctx, "setautocommit(true) after the kill", false, ok, err)
    ok, err = conn:setautocommit(true)
-   expectLost(ctx, "second setautocommit(true)", ok, err)
+   expectLost(ctx, "second setautocommit(true)", false, ok, err)
    for name, value in pairs(options) do
-      expect(conn:getoption(name) == value, string.format("option %s is"
+      expect(option(conn, name) == value, string.format("option %s is"
                 .. " %s after the failed call, was %s", name,
-                tostring(conn:getoption(name)), tostring(value)))
+                tostring(option(conn, name)), tostring(value)))
    end
+   ok, err = conn:rollback()
+   expectLost(ctx, "rollback after the kill", false, ok, err)
    ok, err = conn:commit()
-   expectLost(ctx, "commit after the kill", ok, err)
+   expectLost(ctx, "commit after the kill", false, ok, err)
    closeObject(conn, "connection")
    expectSessions(ctx, base, "after closing")
 end
@@ -349,7 +366,7 @@ local caseList = {
 
 -- True if the driver has the connection option prefetch.
 local function hasPrefetch(conn)
-   return conn.getoption ~= nil and conn:getoption("prefetch") ~= nil
+   return option(conn, "prefetch") ~= nil
 end
 
 -- Runs all cases, prints failures, limits, skips and a summary.
