@@ -391,8 +391,8 @@ int checkerr (lua_State *L, sword status, OCIError *errhp) {
 
 /*
 ** Push false plus an error message, for the functions without a result
-** of their own (commit, rollback, setautocommit), as the LuaSQL manual
-** requires; all other functions return nil plus the message.
+** of their own (close, commit, rollback, setautocommit), as the LuaSQL
+** manual requires; all other functions return nil plus the message.
 */
 static int checkerr_false (lua_State *L, sword status, OCIError *errhp) {
 	int n = checkerr (L, status, errhp);   /* nil, message */
@@ -1687,10 +1687,8 @@ to-be-closed variable call it as well.
 @function close
 @treturn[1] boolean `true`
 @treturn[2] boolean `false`
-@treturn[2] string error message, if a cursor is open or the statement is
-already closed
-@treturn[3] nil
-@treturn[3] string error message, if Oracle fails to release the statement
+@treturn[2] string error message, if a cursor is open, the statement is
+already closed, or Oracle fails to release it (the statement then stays open)
 */
 static int stmt_close (lua_State *L) {
 	conn_data *conn;
@@ -1710,7 +1708,7 @@ static int stmt_close (lua_State *L) {
 	if (stmt->stmthp) {
 		sword status = OCIStmtRelease (stmt->stmthp, stmt->errhp, NULL, 0, OCI_DEFAULT);
 		if (status) {
-			return checkerr (L, status, stmt->errhp);
+			return checkerr_false (L, status, stmt->errhp);
 		}
 		stmt->stmthp = NULL;
 	}
