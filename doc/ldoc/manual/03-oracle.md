@@ -159,7 +159,8 @@ local order = cjson.decode(cur:fetch())
 cur:close()
 ```
 
-A JSON column is written by binding the text as `T.string`.
+A JSON column is written by binding the text, as a plain string or as
+`T.string`.
 
 ### Time Zones
 
@@ -172,6 +173,36 @@ result sets the time zone itself:
 ```lua
 conn:execute("ALTER SESSION SET TIME_ZONE = 'Europe/Berlin'")
 ```
+
+### Parameters
+
+How Oracle receives the parameters of `stmt:execute` and `conn:execute` (the
+rules are in the @{02-prepared-statements.md|topic on prepared statements}):
+
+- **Booleans** are bound as the text `'1'` or `'0'`. Oracle converts them
+  for the column: a `BOOLEAN` column gets `TRUE` or `FALSE`, a `NUMBER`
+  column 1 or 0, a `VARCHAR2` column the text.
+- **`T.time`** is bound as text, since Oracle has no `TIME` type; the target
+  decides what becomes of it.
+- **A plain string for a `DATE` column** is converted by Oracle with the
+  session setting `NLS_DATE_FORMAT`. Its default comes from the settings of
+  the client, e.g. `DD.MM.RR` on a German Windows, and then `'2026-11-07'`
+  fails with `ORA-01861`. `{"2026-11-07", T.date}` does not depend on it.
+- **`T.binary`** is bound as `RAW` (`SQLT_BIN`), above 32767 bytes as
+  `LONG RAW` (`SQLT_LBI`), without a LOB object. How much Oracle takes
+  depends on where the value goes (measured with Oracle 23ai Free,
+  `MAX_STRING_SIZE = STANDARD`):
+    - `INSERT` and `UPDATE` of a `BLOB` column: any size up to 2 GB - 1
+      (the limit of OCI); 64 MB took about 2 seconds.
+    - A `RAW` column: its declared size, at most 2000 bytes with
+      `MAX_STRING_SIZE = STANDARD`; more gives `ORA-12899`.
+    - A PL/SQL variable or an SQL function (e.g. `UTL_RAW.LENGTH(:1)`,
+      `TO_BLOB(:1)`): up to 32767 bytes, more gives `ORA-01460`.
+    - `INSERT ... SELECT :1 FROM dual`: 4001 bytes worked, 40000 gave
+      `ORA-01461`.
+
+  Larger values for PL/SQL or SQL functions need a LOB object, which the
+  driver does not offer.
 
 ## Large Results
 
@@ -253,13 +284,13 @@ time:
 These come from Oracle or OCI, not from the driver, and are kept as they are:
 
 - Oracle stores an empty string as NULL, also in `CHAR`, `RAW` and `JSON`
-  columns: `''` is read back as `nil`.
-- Number parameters (`T.number`) keep 15 significant digits; bind integers as
-  `T.int`.
+  columns: `''` is read back as `nil`. An empty `T.binary` value is NULL as
+  well, in `RAW` and in `BLOB` columns.
+- Float parameters (plain floats and `T.number`) keep 15 significant digits;
+  bind integers as Lua integers or as `T.int`.
 - A timestamp parameter has no time zone: a value read from a
   `TIMESTAMP WITH TIME ZONE` column cannot be bound back as it is.
-- `T.time` is a string, converted with `NLS_DATE_FORMAT`; Oracle has no
-  `TIME` type.
+- `T.time` is bound as text; Oracle has no `TIME` type.
 - After a deadlock (`ORA-00060`) Oracle rolls back only the statement that
   waited; the transaction and its locks stay until the program rolls back.
 - A killed session gives `ORA-03113` or `ORA-00028` at the next call, then

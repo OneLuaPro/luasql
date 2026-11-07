@@ -16,6 +16,10 @@ local emptyRawAsNull = {
    limitNull = true,
    limitReason = "Oracle stores an empty RAW as NULL",
 }
+local emptyBinaryAsNull = {
+   limitNull = true,
+   limitReason = "Oracle stores an empty binary value as NULL",
+}
 
 return {
    sourceName = sourceName,
@@ -264,8 +268,22 @@ return {
       .. " FROM dual",
    -- Errors of a statement executed with placeholders never bound, and
    -- with more parameters than placeholders.
+   -- One named placeholder; a named key binds it with or without the
+   -- colon, in any case (Oracle).
+   paramsNamedQuery = "SELECT CAST(:a AS NUMBER) FROM dual",
+   -- Not a query: conn:execute frees its bindings after the execute.
+   -- A string that is not a number as :2 fails at the execute
+   -- (ORA-06502 in PL/SQL, ORA-01722 in SQL).
+   paramsDmlBlock = "DECLARE t TIMESTAMP(6) := :1; n NUMBER := :2;"
+      .. " BEGIN NULL; END;",
    missingParamsError = "ORA%-01008",
    tooManyParamsError = "ORA%-01036",
+   -- A boolean bound as a plain value, read back as text: luasql.oci8
+   -- binds it as '1' or '0'.
+   boolText = { [true] = "1", [false] = "0" },
+   -- Variable arguments of the wrong number (checked by luasql.oci8).
+   argCountError = "%d+ parameters?, %d+ given",
+   dmlValueError = { "ORA%-06502", "ORA%-01722" },
    -- Known limitations of the params scenario, with their reasons.
    paramsLimits = {
       partialParams = "unbound placeholders keep their last value"
@@ -285,6 +303,14 @@ return {
    volLobTableDrop = "DROP TABLE IF EXISTS luastress_vollob PURGE",
    volLobInsert = "INSERT INTO luastress_vollob (id, c) VALUES (:1, :2)",
    volLobSelect = "SELECT id, c FROM luastress_vollob ORDER BY id",
+   -- Phase binaryInsert: a temporary table whose rows go at the commit
+   -- (checked in SQL*Plus: the BLOB of such a row is no temporary LOB
+   -- in v$temporary_lobs, and the commit frees its temporary segments).
+   volBinaryTableCreate = "CREATE GLOBAL TEMPORARY TABLE luastress_volbin"
+      .. " (id NUMBER, b BLOB) ON COMMIT DELETE ROWS",
+   volBinaryTableDrop = "DROP TABLE IF EXISTS luastress_volbin PURGE",
+   volBinaryInsert = "INSERT INTO luastress_volbin (id, b) VALUES (:1, :2)",
+   volBinarySelect = "SELECT b FROM luastress_volbin WHERE id = :1",
    -- Full tablespace cases; %s (twice) is the small tablespace. fullFill
    -- inserts %d rows of 4000 bytes; it runs up to fullFillSteps times.
    fullTableCreate = "CREATE TABLE luastress_full (id NUMBER,"
@@ -475,6 +501,8 @@ return {
       emptyString = emptyAsNull,
       charEmpty = emptyAsNull,
       rawEmpty = emptyRawAsNull,
+      rawBinaryEmpty = emptyRawAsNull,
+      blobBinaryEmpty = emptyBinaryAsNull,
       -- A difference of timestamps is an interval.
       dsDifference = { columnType = "interval" },
       jsonEmpty = emptyAsNull,

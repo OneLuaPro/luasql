@@ -20,10 +20,10 @@ behavior of Oracle that is worth knowing.
 
 All objects follow the same rules:
 
-- A call that fails returns `nil` (or `false`) and an error message. The
-  message starts with `LuaSQL:`; errors of the server contain their `ORA-`
-  code. Using a closed object or passing an argument of the wrong type raises
-  an error instead.
+- A call that fails in the database returns `nil` (or `false`) and an error
+  message. The message starts with `LuaSQL:`; errors of the server contain
+  their `ORA-` code. A wrong use of the API raises an error instead: a closed
+  object, an argument of the wrong type, an invalid parameter.
 - An object is closed by its `close` method, by a to-be-closed variable
   (`<close>`) or by the garbage collector.
 - An object can be closed only after the objects it created: an environment
@@ -65,30 +65,39 @@ can use the driver at the same time, each with its own environment.
 */
 
 /***
-Type constants for the parameters of prepared statements.
+Type constants for parameters.
 
-A parameter of @{statement:execute} is a pair `{value, type}` with one of
-these constants as type, or `type.null` alone for NULL. Reading a field that
-does not exist raises an error, so a misspelled type is found at once. The
+A parameter of @{statement:execute} or @{connection:execute} is a plain Lua
+value or a pair `{value, type}` with one of these constants. A plain value is
+bound by its Lua type only, never by its content: an integer as `int`, a
+float as `number`, a string as `string`, a boolean as `boolean`. The pair is
+for what the Lua type does not say: binary data, dates and times, or a type
+wanted on purpose. `type.null` is NULL, alone or as the value of a pair
+(`{T.null, T.binary}`). Reading a field that does not exist raises an error,
+so a misspelled type is found at once. The
 @{02-prepared-statements.md|topic on prepared statements} explains the rules.
 
 @table type
-@field int an integer (Lua number), bound as an integer
-@field number a float (Lua number), bound as a double; Oracle keeps 15
+@field int an integer; a float only if its value is integral, e.g.
+`{3.0, T.int}`. Bound as a 64-bit integer, exact
+@field number a float (or an integer), bound as a double; Oracle keeps 15
 significant digits. Infinity and NaN are bound as `BINARY_DOUBLE`
 @field string a string of any length, also into `CLOB` columns; an embedded
 `"\0"` is kept
-@field boolean `true` or `false`, bound as `1` or `0`
+@field boolean `true` or `false`, bound as the text `'1'` or `'0'`
 @field date a string `"YYYY-MM-DD"` or `"YYYY-MM-DD HH24:MI:SS"`, with a
 leading minus sign for years before Christ
-@field time a string, converted by Oracle with `NLS_DATE_FORMAT`; Oracle
-has no `TIME` type
+@field time a string `"HH24:MI:SS"`, bound as text: Oracle has no `TIME`
+type
 @field timestamp a string `"YYYY-MM-DD HH24:MI:SS"` with an optional
 fraction of a second, e.g. `".500000"`; without time zone
-@field null NULL; used alone, without a value
+@field binary a string of bytes, bound unchanged as `RAW`, also into `BLOB`
+columns
+@field null NULL: a special value, not a number, the same in all drivers;
+alone or as the value of a pair
 @usage
 local T = require("luasql.oci8").type
-stmt:execute{ {42, T.int}, {"Grüße", T.string}, T.null }
+stmt:execute{ 42, "Grüße", {"2026-11-07", T.date}, {data, T.binary}, T.null }
 */
 
 
@@ -250,6 +259,21 @@ typedef struct {
 	OCIBind     *bindp;
 } bind_slot;
 
+/*
+** What binding a parameter needs besides the parameter itself.
+*/
+typedef struct {
+	OCIStmt    *stmthp;
+	OCIError   *errhp;
+	conn_data  *conn;
+	env_data   *env;
+	int         binds_idx;   /* stack index of the table of bind slots */
+} bind_ctx;
+
+static void free_bind_table (lua_State *L, int idx);
+static int bind_table (lua_State *L, bind_ctx *ctx, int tbl_idx);
+static int bind_args (lua_State *L, bind_ctx *ctx, int first, int last);
+
 
 typedef struct {
 	ub2           type;    /* database type */
@@ -280,6 +304,8 @@ typedef struct {
 	int           number_mode;        /* copied from the connection at creation */
   	short         has_lobs;           /* 1 if there is a CLOB/NCLOB column */
 	short         lobs_held;          /* 1 while the current row may hold temporary LOBs */
+	int           binds;              /* registry ref to the bind slots of a
+	                                     conn:execute with parameters, else LUA_NOREF */
 } cur_data;
 
 
@@ -1100,6 +1126,14 @@ static void cur_nullify (lua_State *L, cur_data *cur) {
 		}
 		cur->stmthp = NULL;
 	}
+	/* parameters of conn:execute: the handle that used them is gone */
+	if (cur->binds != LUA_NOREF) {
+		lua_rawgeti (L, LUA_REGISTRYINDEX, cur->binds);
+		free_bind_table (L, lua_gettop (L));
+		lua_pop (L, 1);
+		luaL_unref (L, LUA_REGISTRYINDEX, cur->binds);
+		cur->binds = LUA_NOREF;
+	}
 	if (cur->errhp) {
 		OCIHandleFree ((dvoid *)cur->errhp, OCI_HTYPE_ERROR);
 		cur->errhp = NULL;
@@ -1525,6 +1559,7 @@ static int create_cursor (lua_State *L, int o, conn_data *conn, OCIStmt *stmt,
 	                              let's just pass empty string. */
 	cur->has_lobs = 0;
 	cur->lobs_held = 0;
+	cur->binds = LUA_NOREF;
 	lua_pushvalue (L, o);
 	cur->conn = luaL_ref (L, LUA_REGISTRYINDEX);
 
@@ -1541,21 +1576,30 @@ static int create_cursor (lua_State *L, int o, conn_data *conn, OCIStmt *stmt,
 
 /*** @type connection */
 /***
-Runs an SQL statement.
+Runs an SQL statement, with parameters if given.
 
 The statement is given without a trailing `;`; a PL/SQL block ends with
 `END;` as usual. Each call prepares the statement again; for a statement that
-runs many times, or that needs parameters, use @{connection:prepare}.
+runs many times, use @{connection:prepare}.
+
+Parameters are given as in @{statement:execute}: one table of parameters, or
+variable arguments by position. With variable arguments, their number must be
+the number of placeholders (in SQL every occurrence, in PL/SQL every name
+once), else the result is `nil` and a message. Without parameters nothing is
+bound.
 
 @function execute
 @tparam string sql the SQL statement or PL/SQL block
+@param[opt] ... a table of parameters, or the parameters themselves
 @treturn[1] cursor a cursor for a query
 @treturn[2] integer the number of rows affected, for any other statement
 @treturn[3] nil
 @treturn[3] string error message
+@raise if a parameter is not valid, as in @{statement:execute}
 @usage
-local n = assert(conn:execute("UPDATE emp SET sal = sal * 1.1 WHERE deptno = 10"))
+local n = assert(conn:execute("UPDATE emp SET sal = sal * 1.1 WHERE deptno = :1", 10))
 print(n .. " rows updated")
+local cur = assert(conn:execute("SELECT name FROM emp WHERE id = :id", { id = 7 }))
 */
 /*
 ** Execute an SQL statement.
@@ -1571,6 +1615,19 @@ static int conn_execute (lua_State *L) {
 	ub4 mode;
 	ub2 type;
 	OCIStmt *stmthp;
+	/* parameters as in stmt:execute: one table, or variable arguments */
+	int nargs = lua_gettop (L) - 2;
+	int is_table = (nargs == 1 && lua_istable (L, 3));
+	int num_params = 0;
+	int binds_idx = 0;   /* stack index of the bind slots, 0 if none */
+
+	/* check the parameters before anything is allocated (raises an
+	   error if one is invalid) */
+	if (is_table) {
+		int is_named;
+		luasql_validate_params (L, 3, &is_named, &num_params);
+	} else
+		num_params = luasql_validate_args (L, 3, nargs + 2);
 
 	/* get environment */
 	env = getenvfromconn (L, conn);
@@ -1590,6 +1647,27 @@ static int conn_execute (lua_State *L) {
 		OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
 		return ret;
 	}
+	/* bind the parameters; the slots stay in a table until OCI no
+	   longer needs them: with the cursor of a query, else after the
+	   execute */
+	if (num_params > 0) {
+		int ret;
+		bind_ctx ctx;
+		lua_newtable (L);
+		binds_idx = lua_gettop (L);
+		ctx.stmthp = stmthp;
+		ctx.errhp = conn->errhp;
+		ctx.conn = conn;
+		ctx.env = env;
+		ctx.binds_idx = binds_idx;
+		ret = is_table ? bind_table (L, &ctx, 3)
+		               : bind_args (L, &ctx, 3, nargs + 2);
+		if (ret) {
+			OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
+			free_bind_table (L, binds_idx);
+			return ret;
+		}
+	}
 	if (type == OCI_STMT_SELECT)
 		iters = 0;
 	else
@@ -1606,6 +1684,8 @@ static int conn_execute (lua_State *L) {
 		if (status != OCI_SUCCESS) {
 			int ret = checkerr (L, status, conn->errhp);
 			OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
+			if (binds_idx)
+				free_bind_table (L, binds_idx);
 			return ret;
 		}
 	}
@@ -1616,12 +1696,25 @@ static int conn_execute (lua_State *L) {
 	   error) is a success, as in the ODBC driver */
 	if (status != OCI_SUCCESS && status != OCI_SUCCESS_WITH_INFO
 			&& status != OCI_NO_DATA) {
+		int ret = checkerr (L, status, conn->errhp);
 		OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
-		return checkerr (L, status, conn->errhp);
+		if (binds_idx)
+			free_bind_table (L, binds_idx);
+		return ret;
 	}
 	if (type == OCI_STMT_SELECT) {
 		/* create cursor — cursor owns the handle (conn:execute path) */
-		return create_cursor (L, 1, conn, stmthp, statement, LUA_NOREF);
+		int ret = create_cursor (L, 1, conn, stmthp, statement, LUA_NOREF);
+		if (binds_idx) {
+			if (ret == 1) {
+				/* the cursor keeps the slots until it is closed */
+				cur_data *cur = (cur_data *)lua_touserdata (L, -1);
+				lua_pushvalue (L, binds_idx);
+				cur->binds = luaL_ref (L, LUA_REGISTRYINDEX);
+			} else
+				free_bind_table (L, binds_idx); /* handle already freed */
+		}
+		return ret;
 	} else {
 		/* return number of rows */
 		ub4 rows_affected = 0;
@@ -1631,9 +1724,13 @@ static int conn_execute (lua_State *L) {
 		if (status != OCI_SUCCESS) {
 			int ret = checkerr (L, status, conn->errhp);
 			OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
+			if (binds_idx)
+				free_bind_table (L, binds_idx);
 			return ret;
 		}
 		OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
+		if (binds_idx)
+			free_bind_table (L, binds_idx);
 #if LUA_VERSION_NUM >= 503
 		lua_pushinteger (L, (lua_Integer)rows_affected);
 #else
@@ -1660,18 +1757,25 @@ static void free_bind_slot (bind_slot *slot) {
 }
 
 /*
+** Free all bind slots in the bind table at stack index idx.
+*/
+static void free_bind_table (lua_State *L, int idx) {
+	lua_pushnil (L);
+	while (lua_next (L, idx) != 0) {
+		if (lua_type (L, -1) == LUA_TUSERDATA)
+			free_bind_slot ((bind_slot *)lua_touserdata (L, -1));
+		lua_pop (L, 1);
+	}
+}
+
+/*
 ** Free all bind slots of a statement and drop its bind table.
 */
 static void stmt_free_binds (lua_State *L, stmt_data *stmt) {
 	if (stmt->binds == LUA_NOREF)
 		return;
 	lua_rawgeti (L, LUA_REGISTRYINDEX, stmt->binds);
-	lua_pushnil (L);
-	while (lua_next (L, -2) != 0) {
-		if (lua_type (L, -1) == LUA_TUSERDATA)
-			free_bind_slot ((bind_slot *)lua_touserdata (L, -1));
-		lua_pop (L, 1);
-	}
+	free_bind_table (L, lua_gettop (L));
 	lua_pop (L, 1);
 	luaL_unref (L, LUA_REGISTRYINDEX, stmt->binds);
 	stmt->binds = LUA_NOREF;
@@ -1747,7 +1851,8 @@ parameters given as placeholders `:1`, `:2`, ... or `:name`.
 @treturn[2] string error message
 @usage
 local stmt = assert(conn:prepare("INSERT INTO emp (id, name) VALUES (:1, :2)"))
-assert(stmt:execute{ {1, T.int}, {"Smith", T.string} })
+assert(stmt:execute(1, "Smith"))
+assert(stmt:execute{ {2, T.int}, {"Jones", T.string} })
 stmt:close()
 @see statement
 */
@@ -1825,237 +1930,255 @@ static int conn_prepare (lua_State *L) {
 
 
 /*
-** Binds the parameters of the table at index 2 to a prepared statement.
-** Each binding gets a new slot; it replaces the slot of the same key
-** only after OCI accepted the new binding. Keys not given keep their
-** binding from an earlier execute (OCI behaviour).
-** Returns 0 on success, or a Lua return value on error.
+** Binds the parameter at stack index val_idx (checked before with
+** luasql_check_param) to the placeholder named by the string, or at the
+** position given by the integer, at key_idx. The binding gets a new
+** slot; it replaces the slot of the same key only after OCI accepted
+** the new binding, so on error the old binding stays.
+** Returns 0 on success with the stack unchanged, or the number of
+** values pushed for an error (nil + message).
 */
-static int stmt_bind (lua_State *L, stmt_data *stmt, int is_named) {
-    env_data *env = NULL;
-    lua_rawgeti(L, LUA_REGISTRYINDEX, stmt->conn);
-    conn_data *conn = (conn_data *)lua_touserdata(L, -1);
-    if (conn) env = getenvfromconn(L, conn);
-    lua_pop(L, 1);
+static int bind_param (lua_State *L, bind_ctx *ctx, int key_idx, int val_idx) {
+    int is_null;
+    int luasql_type = luasql_check_param(L, val_idx, &is_null);
+    int value_idx = lua_gettop(L);   /* the value to bind, nil for NULL */
+    dvoid *bind_ptr = NULL;
+    sb4 bind_size = 0;
+    ub2 bind_type = 0;
+    sword status;
 
-    if (stmt->binds == LUA_NOREF) {
-        lua_newtable(L);
-        stmt->binds = luaL_ref(L, LUA_REGISTRYINDEX);
-    }
-    lua_rawgeti(L, LUA_REGISTRYINDEX, stmt->binds);
-    int binds_idx = lua_gettop(L);
+    /* new slot; stack: value, slot */
+    bind_slot *slot = (bind_slot *)LUASQL_NEWUD(L, sizeof(bind_slot));
+    memset(slot, 0, sizeof(bind_slot));
 
-    lua_pushnil(L);
-    while (lua_next(L, 2) != 0) {
-        /* fetching value and type: key at -2, value at -1 */
-        int luasql_type;
-        int is_null = 0;
-
-        if (lua_istable(L, -1)) {
-            /* {value, luasql.type} — get type from index 2 */
-            lua_rawgeti(L, -1, 2);
-            luasql_type = (int)lua_tointeger(L, -1);
-            lua_pop(L, 1);
-            if (luasql_type == LUASQL_TYPE_NULL)
-                is_null = 1;
-        } else {
-            /* luasql.type.null */
-            luasql_type = LUASQL_TYPE_NULL;
-            is_null = 1;
-        }
-
-        dvoid *bind_ptr = NULL;
-        sb4 bind_size = 0;
-        ub2 bind_type = 0;
-
-        /* new slot; stack: key, value, slot */
-        bind_slot *slot = (bind_slot *)LUASQL_NEWUD(L, sizeof(bind_slot));
-        memset(slot, 0, sizeof(bind_slot));
-
-        if (!is_null) {
-            slot->ind = 0; /* not null */
-            lua_rawgeti(L, -2, 1);
-            switch (luasql_type) {
-                case LUASQL_TYPE_INT:
-                    slot->val.i = (lua_Integer)lua_tointeger(L, -1);
-                    bind_ptr = &slot->val.i;
-                    bind_size = sizeof(lua_Integer);
-                    bind_type = SQLT_INT;
-                    break;
-                case LUASQL_TYPE_NUMBER:
-                    slot->val.d = (double)lua_tonumber(L, -1);
-                    bind_ptr = &slot->val.d;
-                    bind_size = sizeof(double);
-                    bind_type = SQLT_FLT;
-                    if (isnan(slot->val.d)
-                            || isinf(slot->val.d)) {
+    if (is_null) {
+        /* Oracle needs no type for NULL: a type given with
+           {luasql.type.null, type} is ignored */
+        slot->ind = -1;
+        bind_type = SQLT_STR;
+    } else {
+        slot->ind = 0;
+        switch (luasql_type) {
+            case LUASQL_TYPE_INT:
+                slot->val.i = (lua_Integer)lua_tointeger(L, value_idx);
+                bind_ptr = &slot->val.i;
+                bind_size = sizeof(lua_Integer);
+                bind_type = SQLT_INT;
+                break;
+            case LUASQL_TYPE_NUMBER:
+                slot->val.d = (double)lua_tonumber(L, value_idx);
+                bind_ptr = &slot->val.d;
+                bind_size = sizeof(double);
+                bind_type = SQLT_FLT;
+                if (isnan(slot->val.d) || isinf(slot->val.d)) {
 #ifdef SQLT_BDOUBLE
-                        /* SQLT_FLT is converted to NUMBER on the client,
-                           which stores NaN as an invalid NUMBER; SQLT_BDOUBLE
-                           carries NaN and infinity, and the server converts
-                           them: exact for BINARY_DOUBLE, ORA-03087 (NaN) or
-                           ORA-01426 (infinity) for NUMBER */
-                        bind_type = SQLT_BDOUBLE;
+                    /* SQLT_FLT is converted to NUMBER on the client,
+                       which stores NaN as an invalid NUMBER; SQLT_BDOUBLE
+                       carries NaN and infinity, and the server converts
+                       them: exact for BINARY_DOUBLE, ORA-03087 (NaN) or
+                       ORA-01426 (infinity) for NUMBER */
+                    bind_type = SQLT_BDOUBLE;
 #else
-                        lua_pop(L, 1); /* pop value from lua_rawgeti(L, -1, 1) */
-                        lua_pushnil(L);
-                        lua_pushstring(L, LUASQL_PREFIX"NaN and infinity cannot be bound as number");
-                        return 2;
+                    return luasql_faildirect(L, "NaN and infinity cannot be bound as number");
 #endif
-                    }
-                    break;
-                case LUASQL_TYPE_BOOLEAN:
-                    slot->val.s = lua_toboolean(L, -1) ? "1" : "0";
-                    bind_ptr = slot->val.s;
-                    bind_size = 1;
-                    bind_type = SQLT_CHR;
-                    break;
-                case LUASQL_TYPE_STRING:
-	        case LUASQL_TYPE_TIME: {
-		    size_t len;
-                    slot->val.s = (char *)lua_tolstring(L, -1, &len);
-                    bind_ptr = slot->val.s;
-                    if (memchr(slot->val.s, '\0', len) != NULL) {
-                        /* embedded zero: SQLT_STR would stop there,
-                           SQLT_AFC passes the buffer unchanged */
-                        bind_size = (sb4)len;
-                        bind_type = SQLT_AFC;
-                    } else {
-                        bind_size = (sb4)len + 1;
-                        bind_type = SQLT_STR;
-                    }
-                    break;
-		}
-                case LUASQL_TYPE_TIMESTAMP: {
-                    const char *date_str = lua_tostring(L, -1);
-#ifdef SQLT_TIMESTAMP
-                    bind_type = SQLT_TIMESTAMP;
-                    slot->type = bind_type;
-                    if (env) {
-                        sword rc = OCIDescriptorAlloc(env->envhp, (dvoid **)&slot->val.datetime, OCI_DTYPE_TIMESTAMP, 0, (void **)0);
-                        if (rc == OCI_SUCCESS) {
-                            rc = OCIDateTimeFromText(
-                                OCI8_DTHNDL(conn, env),
-                                stmt->errhp,
-                                (const oratext *)date_str, (size_t)strlen(date_str),
-                                /* same form as read; fraction and time
-                                   may be left out, S takes a minus sign */
-                                (const oratext *)"SYYYY-MM-DD HH24:MI:SS.FF", 25,
-                                NULL, 0,
-                                slot->val.datetime
-                            );
-                            if (rc != OCI_SUCCESS) {
-                                free_bind_slot(slot);
-                                lua_pop(L, 1); /* pop value from lua_rawgeti(L, -2, 1) */
-                                return checkerr(L, rc, stmt->errhp);
-                            }
-                        } else {
-                            lua_pop(L, 1);
-                            lua_pushnil(L);
-                            lua_pushstring(L, LUASQL_PREFIX"failed to allocate timestamp descriptor");
-                            return 2;
-                        }
-                    } else {
-                        lua_pop(L, 1);
-                        lua_pushnil(L);
-                        lua_pushstring(L, LUASQL_PREFIX"missing environment handle for timestamp");
-                        return 2;
-                    }
-                    bind_ptr  = &slot->val.datetime;
-                    bind_size = sizeof(OCIDateTime *);
-#else
-                    slot->val.s = (char *)date_str;
-                    bind_ptr  = slot->val.s;
-                    bind_size = strlen(slot->val.s) + 1;
-                    bind_type = SQLT_STR;
-#endif
-                    break;
                 }
-                case LUASQL_TYPE_DATE: {
-                    const char *date_str = lua_tostring(L, -1);
-#ifdef SQLT_ODT
-                    {
-                        sword rc = OCIDateFromText(
-                            stmt->errhp,
-                            (const oratext *)date_str, (ub4)strlen(date_str),
-                            /* same form as read; the time may be left
-                               out, S takes a minus sign */
-                            (const oratext *)"SYYYY-MM-DD HH24:MI:SS", 22,
-                            NULL, 0,
-                            &slot->val.date
-                        );
-                        if (rc != OCI_SUCCESS) {
-                            lua_pop(L, 1); /* pop value from lua_rawgeti(L, -1, 1) */
-                            lua_pushnil(L);
-                            lua_pushstring(L, LUASQL_PREFIX"invalid date format, expected YYYY-MM-DD [HH24:MI:SS]");
-                            return 2;
-                        }
-                    }
-                    bind_ptr  = &slot->val.date;
-                    bind_size = sizeof(OCIDate);
-                    bind_type = SQLT_ODT;
-#else
-                    slot->val.s = (char *)date_str;
-                    bind_ptr  = slot->val.s;
-                    bind_size = strlen(slot->val.s) + 1;
+                break;
+            case LUASQL_TYPE_BOOLEAN:
+                slot->val.s = lua_toboolean(L, value_idx) ? "1" : "0";
+                bind_ptr = slot->val.s;
+                bind_size = 1;
+                bind_type = SQLT_CHR;
+                break;
+            case LUASQL_TYPE_STRING:
+            case LUASQL_TYPE_TIME: {
+                size_t len;
+                slot->val.s = (char *)lua_tolstring(L, value_idx, &len);
+                if (len >= (size_t)MINSB4MAXVAL)
+                    return luasql_faildirect(L, "value too large to bind");
+                bind_ptr = slot->val.s;
+                if (memchr(slot->val.s, '\0', len) != NULL) {
+                    /* embedded zero: SQLT_STR would stop there,
+                       SQLT_AFC passes the buffer unchanged */
+                    bind_size = (sb4)len;
+                    bind_type = SQLT_AFC;
+                } else {
+                    bind_size = (sb4)len + 1;
                     bind_type = SQLT_STR;
-#endif
-                    break;
                 }
+                break;
             }
-            lua_pop(L, 1);
-        } else {
-            slot->ind = -1; /* NULL */
-            bind_type = SQLT_STR; /* default safe type for null */
-            bind_size = 0;
-            bind_ptr = NULL;
+            case LUASQL_TYPE_BINARY: {
+                size_t len;
+                slot->val.s = (char *)lua_tolstring(L, value_idx, &len);
+                if (len > (size_t)MINSB4MAXVAL)
+                    return luasql_faildirect(L, "value too large to bind");
+                bind_ptr = slot->val.s;
+                bind_size = (sb4)len;
+                /* bytes as they are, never converted: SQLT_BIN (RAW) up
+                   to the largest RAW of PL/SQL, SQLT_LBI (LONG RAW)
+                   above; both go into BLOB columns as well (data
+                   interface for LOBs) */
+                bind_type = (len > 32767) ? SQLT_LBI : SQLT_BIN;
+                break;
+            }
+            case LUASQL_TYPE_TIMESTAMP: {
+                const char *date_str = lua_tostring(L, value_idx);
+#ifdef SQLT_TIMESTAMP
+                sword rc;
+                bind_type = SQLT_TIMESTAMP;
+                slot->type = bind_type;
+                if (!ctx->env)
+                    return luasql_faildirect(L, "missing environment handle for timestamp");
+                rc = OCIDescriptorAlloc(ctx->env->envhp, (dvoid **)&slot->val.datetime,
+                                        OCI_DTYPE_TIMESTAMP, 0, (void **)0);
+                if (rc != OCI_SUCCESS)
+                    return luasql_faildirect(L, "failed to allocate timestamp descriptor");
+                rc = OCIDateTimeFromText(
+                    OCI8_DTHNDL(ctx->conn, ctx->env),
+                    ctx->errhp,
+                    (const oratext *)date_str, (size_t)strlen(date_str),
+                    /* same form as read; fraction and time
+                       may be left out, S takes a minus sign */
+                    (const oratext *)"SYYYY-MM-DD HH24:MI:SS.FF", 25,
+                    NULL, 0,
+                    slot->val.datetime
+                );
+                if (rc != OCI_SUCCESS) {
+                    int ret = checkerr(L, rc, ctx->errhp);
+                    free_bind_slot(slot);
+                    return ret;
+                }
+                bind_ptr  = &slot->val.datetime;
+                bind_size = sizeof(OCIDateTime *);
+#else
+                slot->val.s = (char *)date_str;
+                bind_ptr  = slot->val.s;
+                bind_size = strlen(slot->val.s) + 1;
+                bind_type = SQLT_STR;
+#endif
+                break;
+            }
+            case LUASQL_TYPE_DATE: {
+                const char *date_str = lua_tostring(L, value_idx);
+#ifdef SQLT_ODT
+                sword rc = OCIDateFromText(
+                    ctx->errhp,
+                    (const oratext *)date_str, (ub4)strlen(date_str),
+                    /* same form as read; the time may be left
+                       out, S takes a minus sign */
+                    (const oratext *)"SYYYY-MM-DD HH24:MI:SS", 22,
+                    NULL, 0,
+                    &slot->val.date
+                );
+                if (rc != OCI_SUCCESS)
+                    return luasql_faildirect(L, "invalid date format, expected YYYY-MM-DD [HH24:MI:SS]");
+                bind_ptr  = &slot->val.date;
+                bind_size = sizeof(OCIDate);
+                bind_type = SQLT_ODT;
+#else
+                slot->val.s = (char *)date_str;
+                bind_ptr  = slot->val.s;
+                bind_size = strlen(slot->val.s) + 1;
+                bind_type = SQLT_STR;
+#endif
+                break;
+            }
         }
-
-        /* bind data */
-        sword status;
-        if (is_named) {
-            const char *name = lua_tostring(L, -3);
-            status = OCIBindByName(stmt->stmthp, &slot->bindp, stmt->errhp,
-                                   (text *)name, strlen(name),
-                                   bind_ptr, bind_size, bind_type,
-                                   (dvoid *)&slot->ind, (ub2 *)0, (ub2 *)0,
-                                   (ub4)0, (ub4 *)0, OCI_DEFAULT);
-        } else {
-            ub4 pos = (ub4)lua_tointeger(L, -3); /*OCI also follows 1-based indexing*/
-            status = OCIBindByPos(stmt->stmthp, &slot->bindp, stmt->errhp,
-                                  pos, bind_ptr, bind_size, bind_type,
-                                  (dvoid *)&slot->ind, (ub2 *)0, (ub2 *)0,
-                                  (ub4)0, (ub4 *)0, OCI_DEFAULT);
-        }
-
-        if (status) {
-            free_bind_slot(slot);
-            lua_pop(L, 3); /* pop key, value and slot before returning */
-            return checkerr(L, status, stmt->errhp);
-        }
-        slot->type = bind_type;
-
-        /* OCI now uses the new slot: release the old one of this key */
-        lua_pushvalue(L, -3);
-        lua_rawget(L, binds_idx);
-        if (lua_type(L, -1) == LUA_TUSERDATA) {
-            free_bind_slot((bind_slot *)lua_touserdata(L, -1));
-            lua_pushnil(L);
-            lua_rawset(L, binds_idx);   /* binds[old slot] = nil */
-        } else {
-            lua_pop(L, 1);
-        }
-        lua_pushvalue(L, -3);
-        lua_pushvalue(L, -2);
-        lua_rawset(L, binds_idx);       /* binds[key] = slot */
-        if (lua_istable(L, -2)) {
-            lua_pushvalue(L, -1);
-            lua_rawgeti(L, -3, 1);
-            lua_rawset(L, binds_idx);   /* binds[slot] = value (anchor) */
-        }
-        lua_pop(L, 2); /* pop slot and value, keep key for lua_next */
     }
-    lua_pop(L, 1); /* pop bind table */
+
+    /* bind data: by name for a string key, by position otherwise */
+    if (lua_type(L, key_idx) == LUA_TSTRING) {
+        size_t nlen;
+        const char *name = lua_tolstring(L, key_idx, &nlen);
+        status = OCIBindByName(ctx->stmthp, &slot->bindp, ctx->errhp,
+                               (text *)name, (sb4)nlen,
+                               bind_ptr, bind_size, bind_type,
+                               (dvoid *)&slot->ind, (ub2 *)0, (ub2 *)0,
+                               (ub4)0, (ub4 *)0, OCI_DEFAULT);
+    } else {
+        ub4 pos = (ub4)lua_tointeger(L, key_idx); /* OCI counts from 1 too */
+        status = OCIBindByPos(ctx->stmthp, &slot->bindp, ctx->errhp,
+                              pos, bind_ptr, bind_size, bind_type,
+                              (dvoid *)&slot->ind, (ub2 *)0, (ub2 *)0,
+                              (ub4)0, (ub4 *)0, OCI_DEFAULT);
+    }
+    if (status) {
+        int ret = checkerr(L, status, ctx->errhp);
+        free_bind_slot(slot);
+        return ret;
+    }
+    slot->type = bind_type;
+
+    /* OCI now uses the new slot: release the old one of this key */
+    lua_pushvalue(L, key_idx);
+    lua_rawget(L, ctx->binds_idx);
+    if (lua_type(L, -1) == LUA_TUSERDATA) {
+        free_bind_slot((bind_slot *)lua_touserdata(L, -1));
+        lua_pushnil(L);
+        lua_rawset(L, ctx->binds_idx);   /* binds[old slot] = nil */
+    } else {
+        lua_pop(L, 1);
+    }
+    lua_pushvalue(L, key_idx);
+    lua_pushvalue(L, -2);
+    lua_rawset(L, ctx->binds_idx);       /* binds[key] = slot */
+    if (!lua_isnil(L, value_idx)) {
+        lua_pushvalue(L, -1);
+        lua_pushvalue(L, value_idx);
+        lua_rawset(L, ctx->binds_idx);   /* binds[slot] = value (anchor) */
+    }
+    lua_pop(L, 2); /* pop slot and value */
+    return 0;
+}
+
+/*
+** Binds the parameters of the table at tbl_idx (checked before with
+** luasql_validate_params). Keys not given keep their binding from an
+** earlier execute (OCI behaviour).
+** Returns 0 on success, or the number of values pushed for an error.
+*/
+static int bind_table (lua_State *L, bind_ctx *ctx, int tbl_idx) {
+    lua_pushnil(L);
+    while (lua_next(L, tbl_idx) != 0) {
+        /* key at -2, value at -1 */
+        int top = lua_gettop(L);
+        int ret = bind_param(L, ctx, top - 1, top);
+        if (ret)
+            return ret;
+        lua_pop(L, 1); /* pop value, keep key for lua_next */
+    }
+    return 0;
+}
+
+/*
+** Binds the variable arguments first..last (checked before with
+** luasql_validate_args) by position. Their number must be the number
+** of bind positions OCI reports: in SQL every occurrence of a
+** placeholder, in PL/SQL every name once. Without this check a
+** position not given would keep its value from an earlier execute.
+** Returns 0 on success, or the number of values pushed for an error.
+*/
+static int bind_args (lua_State *L, bind_ctx *ctx, int first, int last) {
+    int i, ret, given = last - first + 1;
+    ub4 count = 0;
+    sword status = OCIAttrGet((dvoid *)ctx->stmthp, (ub4)OCI_HTYPE_STMT,
+                              (dvoid *)&count, (ub4 *)0,
+                              (ub4)OCI_ATTR_BIND_COUNT, ctx->errhp);
+    if (status)
+        return checkerr(L, status, ctx->errhp);
+    if (count != (ub4)given) {
+        lua_pushnil(L);
+        lua_pushfstring(L, LUASQL_PREFIX"statement has %d parameter%s, %d given",
+                        (int)count, (count == 1) ? "" : "s", given);
+        return 2;
+    }
+    for (i = first; i <= last; i++) {
+        lua_pushinteger(L, (lua_Integer)(i - first + 1));
+        ret = bind_param(L, ctx, lua_gettop(L), i);
+        if (ret)
+            return ret;
+        lua_pop(L, 1); /* pop position */
+    }
     return 0;
 }
 
@@ -2125,28 +2248,42 @@ static int stmt_reset (lua_State *L) {
 /***
 Executes the statement.
 
-`params` binds values to the placeholders: a list for `:1`, `:2`, ...
-(by position) or a table with the names of the placeholders as keys (by
-name), never both. Each value is a pair `{value, type}` with a constant of
-@{type}, or `type.null` alone for NULL. Placeholders not given keep the value
-bound last; without `params`, the statement runs with the values bound last.
+It is called in one of three forms:
+
+- `stmt:execute()` runs with the values bound last.
+- `stmt:execute(params)` with one table binds the values in it: a list for
+  `:1`, `:2`, ... (by position) or a table with the names of the
+  placeholders as keys (by name), never both. Placeholders not given keep
+  the value bound last.
+- `stmt:execute(v1, v2, ...)` binds all values by position; `nil` is NULL.
+  Their number must be the number of placeholders (in SQL every occurrence,
+  in PL/SQL every name once), else the result is `nil` and a message.
+
+Each value is a plain Lua value or a pair `{value, type}` with a constant of
+@{type}; `type.null` is NULL. A single typed value therefore goes into a
+table: `stmt:execute{ {"2026-11-07", T.date} }`.
 
 Only one cursor of a statement can be open at a time: close it, or fetch
 its last row, before the next execute.
 
 @function execute
-@tparam[opt] table params the parameters
+@param[opt] ... a table of parameters, or the parameters themselves
 @treturn[1] cursor a cursor for a query
 @treturn[2] integer the number of rows affected, for any other statement
 @treturn[3] nil
 @treturn[3] string error message, e.g. with `ORA-01008` if a placeholder has
-no value
-@raise if a cursor of the statement is open, or if `params` is not valid:
-mixed keys, a value that is not a pair, an unknown type constant, or a value
-that does not match its type
+no value, `ORA-01036` for an unknown name, or a wrong number of variable
+arguments
+@raise if a cursor of the statement is open, or if a parameter is not
+valid: mixed keys, a Lua type that cannot be bound (e.g. a function), a
+table that is not a pair, an unknown type constant, or a value that does not
+match its type
 @usage
 local stmt = assert(conn:prepare("SELECT name FROM emp WHERE id = :id"))
-local cur = assert(stmt:execute{ id = {7, T.int} })
+local cur = assert(stmt:execute(7))
+print(cur:fetch())
+cur:close()
+cur = assert(stmt:execute{ id = 8 })
 print(cur:fetch())
 cur:close()
 stmt:close()
@@ -2164,24 +2301,42 @@ static int stmt_execute (lua_State *L) {
     if (stmt->cursor_open)
         return luaL_error(L, LUASQL_PREFIX"cannot execute: cursor still open");
 
-    /* stmt:execute() and stmt:execute(nil) bind nothing new and run with
-       the values bound last, as with the ODBC driver */
-    if (lua_isnoneornil(L, 2)) {
-        lua_settop(L, 1);
-        lua_newtable(L);
-    }
-    luaL_checktype(L, 2, LUA_TTABLE);
-
-    /* Validates the Params table (bind_data); raises an error if it is
-       invalid, before anything is bound or allocated */
-    int is_named;
+    /* stmt:execute() runs with the values bound last; one table is a
+       table of parameters; anything else are variable arguments, by
+       position (stmt:execute(nil) binds NULL to the first) */
+    int nargs = lua_gettop(L) - 1;
+    int is_table = (nargs == 1 && lua_istable(L, 2));
     int num_params = 0;
-    luasql_validate_params(L, 2, &is_named, &num_params);
+
+    /* check the parameters; raises an error if one is invalid, before
+       anything is bound or allocated */
+    if (is_table) {
+        int is_named;
+        luasql_validate_params(L, 2, &is_named, &num_params);
+    } else {
+        num_params = luasql_validate_args(L, 2, nargs + 1);
+    }
 
     if (num_params > 0) {
-        int ret = stmt_bind(L, stmt, is_named);
+        int ret;
+        bind_ctx ctx;
+        lua_rawgeti(L, LUA_REGISTRYINDEX, stmt->conn);
+        ctx.conn = (conn_data *)lua_touserdata(L, -1);
+        ctx.env = ctx.conn ? getenvfromconn(L, ctx.conn) : NULL;
+        lua_pop(L, 1);
+        ctx.stmthp = stmt->stmthp;
+        ctx.errhp = stmt->errhp;
+        if (stmt->binds == LUA_NOREF) {
+            lua_newtable(L);
+            stmt->binds = luaL_ref(L, LUA_REGISTRYINDEX);
+        }
+        lua_rawgeti(L, LUA_REGISTRYINDEX, stmt->binds);
+        ctx.binds_idx = lua_gettop(L);
+        ret = is_table ? bind_table(L, &ctx, 2)
+                       : bind_args(L, &ctx, 2, nargs + 1);
         if (ret)
             return ret;
+        lua_pop(L, 1); /* pop bind table */
     }
 
     /*
@@ -2191,7 +2346,7 @@ static int stmt_execute (lua_State *L) {
     */
     lua_rawgeti(L, LUA_REGISTRYINDEX, stmt->conn);
     conn_data *conn = (conn_data *)lua_touserdata(L, -1);
-    int conn_idx = lua_gettop(L);   /* stack: [stmt, params, conn] */
+    int conn_idx = lua_gettop(L);   /* stack: [stmt, params..., conn] */
 
     ub4 iters = (stmt->type == OCI_STMT_SELECT) ? 0 : 1;
     ub4 mode  = conn->auto_commit ? OCI_COMMIT_ON_SUCCESS : OCI_DEFAULT;

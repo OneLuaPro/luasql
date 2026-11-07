@@ -7,7 +7,9 @@
 --   prepareClose  prepare, execute, fetch, close the statement
 --   reuse         one statement, executed again and again
 --   noParams      one statement without placeholders, executed with
---                 execute(), execute(nil) and execute({}) in turn
+--                 execute() and execute({}); every 3rd execute(nil),
+--                 one variable argument too many, must give nil and a
+--                 message (backend.argCountError)
 --   partialFetch  one statement, fetch one of several rows, close the
 --                 cursor, execute again
 --   rebindNumber  one statement, binds int, number and null in turn
@@ -197,13 +199,27 @@ local function prepareSingleRowQuery(ctx)
    return prepare(ctx.testConn, ctx.backend.singleRowQuery)
 end
 
--- The three ways to execute without parameters, in turn.
-local function noParamsStep(_, i, stmt)
+-- The two ways to execute without parameters, and execute(nil): one
+-- variable argument (NULL) for a statement without placeholders, an
+-- error of the statement.
+local function noParamsStep(ctx, i, stmt)
    local cur, err
+   if i % 3 == 1 then
+      cur, err = stmt:execute(nil)
+      if cur ~= nil then
+         pcall(cur.close, cur)
+         error("execute(nil) without placeholders: expected nil and an"
+               .. " error", 0)
+      end
+      local pattern = ctx.backend.argCountError
+      if type(err) ~= "string" or (pattern and not err:find(pattern)) then
+         error("execute(nil) without placeholders: unexpected error: "
+               .. tostring(err), 0)
+      end
+      return
+   end
    if i % 3 == 0 then
       cur, err = stmt:execute()
-   elseif i % 3 == 1 then
-      cur, err = stmt:execute(nil)
    else
       cur, err = stmt:execute({})
    end

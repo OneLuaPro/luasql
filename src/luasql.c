@@ -19,6 +19,13 @@
 #define lua_rawlen lua_objlen
 #endif
 
+/* before Lua 5.3 every number is a float */
+#if LUA_VERSION_NUM >= 503
+#define luasql_isinteger(L, i) lua_isinteger (L, i)
+#else
+#define luasql_isinteger(L, i) 0
+#endif
+
 
 /*
 ** Typical database error situation
@@ -152,9 +159,191 @@ static int luasql_type_index (lua_State *L) {
 
 
 /*
+** Pushes the special value luasql.type.null. It is a userdata that no
+** program passes by chance (the number 7 could be a parameter). The
+** first driver loaded creates it in the registry; every other driver
+** of the same Lua state takes it from there, so luasql.type.null is the
+** same value in all drivers (luasql.c is linked into each of them).
+*/
+LUASQL_API void luasql_pushnull (lua_State *L) {
+	lua_getfield (L, LUA_REGISTRYINDEX, LUASQL_NULL_KEY);
+	if (lua_isnil (L, -1)) {
+		lua_pop (L, 1);
+		LUASQL_NEWUD (L, 0);
+		lua_newtable (L);                      /* metatable */
+		lua_pushliteral (L, "luasql.type.null");
+		lua_setfield (L, -2, "__name");        /* for tostring */
+		lua_setmetatable (L, -2);
+		lua_pushvalue (L, -1);
+		lua_setfield (L, LUA_REGISTRYINDEX, LUASQL_NULL_KEY);
+	}
+}
+
+
+/*
+** Returns 1 if the value at idx is luasql.type.null.
+*/
+LUASQL_API int luasql_isnull (lua_State *L, int idx) {
+	int r;
+	if (lua_type (L, idx) != LUA_TUSERDATA)
+		return 0;
+	idx = (idx < 0) ? lua_gettop (L) + idx + 1 : idx;
+	luasql_pushnull (L);
+	r = lua_rawequal (L, idx, -1);
+	lua_pop (L, 1);
+	return r;
+}
+
+
+/*
+** The value at idx as an integer, if it is a number with an integral
+** value that fits; returns 0 otherwise.
+*/
+static int luasql_tointeger (lua_State *L, int idx, lua_Integer *out) {
+	if (lua_type (L, idx) != LUA_TNUMBER)
+		return 0;
+#if LUA_VERSION_NUM >= 502
+	{
+		int ok;
+		*out = lua_tointegerx (L, idx, &ok);
+		return ok;
+	}
+#else
+	{
+		lua_Number n = lua_tonumber (L, idx);
+		*out = (lua_Integer)n;
+		return (lua_Number)*out == n;
+	}
+#endif
+}
+
+
+/*
+** Checks one parameter at stack index idx and pushes the value to bind,
+** or nil for NULL. Returns the luasql type it is bound with and sets
+** *is_null. A parameter is either
+** - a plain Lua value, bound by its Lua type only, never by its content:
+**   integer (int), float (number), string, boolean; luasql.type.null or
+**   nil (NULL, type null); or
+** - a pair {value, luasql.type.X}; {luasql.type.null, X} is NULL with
+**   type X, {value, luasql.type.null} is NULL.
+** Raises an error for anything else, before the caller allocates
+** anything (nil can only reach it from variable arguments).
+*/
+LUASQL_API int luasql_check_param (lua_State *L, int idx, int *is_null) {
+	lua_Integer type;
+	int ok = 0;
+
+	idx = (idx < 0) ? lua_gettop (L) + idx + 1 : idx;
+	*is_null = 0;
+	switch (lua_type (L, idx)) {
+		case LUA_TNIL:
+			*is_null = 1;
+			lua_pushnil (L);
+			return LUASQL_TYPE_NULL;
+		case LUA_TBOOLEAN:
+			lua_pushvalue (L, idx);
+			return LUASQL_TYPE_BOOLEAN;
+		case LUA_TNUMBER:
+			lua_pushvalue (L, idx);
+			return luasql_isinteger (L, idx) ? LUASQL_TYPE_INT
+				: LUASQL_TYPE_NUMBER;
+		case LUA_TSTRING:
+			lua_pushvalue (L, idx);
+			return LUASQL_TYPE_STRING;
+		case LUA_TUSERDATA:
+			if (luasql_isnull (L, idx)) {
+				*is_null = 1;
+				lua_pushnil (L);
+				return LUASQL_TYPE_NULL;
+			}
+			break;
+		case LUA_TTABLE:
+			break;
+		default:
+			break;
+	}
+	if (!lua_istable (L, idx))
+		return luaL_error (L, LUASQL_PREFIX"a %s cannot be bound as a parameter",
+			luaL_typename (L, idx));
+
+	/* must be exactly {value, luasql.type.X} */
+	if (lua_rawlen (L, idx) != (size_t)2)
+		return luaL_error (L, LUASQL_PREFIX"parameter must be a value or "
+			"{value, luasql.type.X}");
+	lua_rawgeti (L, idx, 2);
+	if (luasql_isnull (L, -1)) {
+		/* {value, luasql.type.null}: NULL, the value does not matter */
+		lua_pop (L, 1);
+		*is_null = 1;
+		lua_pushnil (L);
+		return LUASQL_TYPE_NULL;
+	}
+	if (!luasql_tointeger (L, -1, &type))
+		return luaL_error (L, LUASQL_PREFIX"second element must be a "
+			"luasql.type constant");
+	lua_pop (L, 1);
+	/* LUASQL_TYPE_NULL is internal: luasql.type.null is not a number */
+	if (type < 0 || type >= LUASQL_TYPE_COUNT || type == LUASQL_TYPE_NULL)
+		return luaL_error (L, LUASQL_PREFIX"unknown luasql.type constant: %d",
+			(int)type);
+
+	lua_rawgeti (L, idx, 1);
+	if (luasql_isnull (L, -1)) {
+		/* {luasql.type.null, X}: NULL with type X */
+		lua_pop (L, 1);
+		*is_null = 1;
+		lua_pushnil (L);
+		return (int)type;
+	}
+	switch ((int)type) {
+		case LUASQL_TYPE_INT: {
+			lua_Integer i;
+			ok = luasql_tointeger (L, -1, &i);
+			break;
+		}
+		case LUASQL_TYPE_NUMBER:
+			ok = (lua_type (L, -1) == LUA_TNUMBER);
+			break;
+		case LUASQL_TYPE_STRING:
+		case LUASQL_TYPE_DATE:
+		case LUASQL_TYPE_TIME:
+		case LUASQL_TYPE_TIMESTAMP:
+		case LUASQL_TYPE_BINARY:
+			ok = (lua_type (L, -1) == LUA_TSTRING);
+			break;
+		case LUASQL_TYPE_BOOLEAN:
+			ok = lua_isboolean (L, -1);
+			break;
+	}
+	if (!ok)
+		return luaL_error (L, LUASQL_PREFIX"value does not match declared "
+			"luasql.type");
+	return (int)type;   /* the value stays on the stack */
+}
+
+
+/*
+** Checks the variable arguments first..last of an execute with
+** luasql_check_param; nil is NULL. Returns their number. Raises an
+** error if one is invalid, so the caller must call it before
+** allocating anything for the execution.
+*/
+LUASQL_API int luasql_validate_args (lua_State *L, int first, int last) {
+	int i, is_null;
+	for (i = first; i <= last; i++) {
+		luasql_check_param (L, i, &is_null);
+		lua_pop (L, 1);
+	}
+	return (last >= first) ? last - first + 1 : 0;
+}
+
+
+/*
 ** Creates a "type" sub-table on the module table (assumed on top of stack).
 ** Registers driver-agnostic type constants: int, number, string, boolean,
-** date, time, timestamp, null.
+** date, time, timestamp, binary, and null (the special value of
+** luasql_pushnull).
 ** Sets an __index metamethod that throws on unknown keys.
 */
 LUASQL_API void luasql_set_types (lua_State *L) {
@@ -173,7 +362,9 @@ LUASQL_API void luasql_set_types (lua_State *L) {
 	lua_setfield (L, -2, "time");
 	lua_pushinteger (L, LUASQL_TYPE_TIMESTAMP);
 	lua_setfield (L, -2, "timestamp");
-	lua_pushinteger (L, LUASQL_TYPE_NULL);
+	lua_pushinteger (L, LUASQL_TYPE_BINARY);
+	lua_setfield (L, -2, "binary");
+	luasql_pushnull (L);
 	lua_setfield (L, -2, "null");
 
 	/* attach metatable with __index that errors on unknown keys */
@@ -186,7 +377,8 @@ LUASQL_API void luasql_set_types (lua_State *L) {
 }
 
 /*
-** Validates the entire params table passed to stmt:execute().
+** Validates the entire params table passed to stmt:execute(); each value
+** is checked with luasql_check_param (nil cannot occur in a table).
 ** tbl_idx: absolute stack index of the params table.
 ** is_named_out: set to 1 if string keys (named), 0 if integer keys (positional).
 **
@@ -227,61 +419,11 @@ LUASQL_API int luasql_validate_params (lua_State *L, int tbl_idx, int *is_named_
             return luaL_error(L, LUASQL_PREFIX "cannot mix positional and named parameters");
         }
 
-        /* validate value entry */
-        if (lua_istable(L, -1)) {
-            /* must be exactly {value, luasql.type.X} — length 2 */
-            if (lua_rawlen(L, -1) != (size_t)2) {
-                return luaL_error(L, LUASQL_PREFIX "parameter must be {value, luasql.type.X}");
-            }
-
-            /* get type (index 2) */
-            lua_rawgeti(L, -1, 2);
-            if (lua_type(L, -1) != LUA_TNUMBER) {
-                return luaL_error(L, LUASQL_PREFIX "second element must be a luasql.type constant");
-            }
-            int luasql_type = (int)lua_tointeger(L, -1);
-            lua_pop(L, 1);  /* pop type */
-
-            /* validate type constant range */
-            if (luasql_type < 0 || luasql_type >= LUASQL_TYPE_COUNT) {
-                return luaL_error(L, LUASQL_PREFIX "unknown luasql.type constant: %d", luasql_type);
-            }
-
-            /* get value (index 1) */
-            lua_rawgeti(L, -1, 1);
-
-            /* validate value matches type */
-            int ok = 1;
-            switch (luasql_type) {
-                case LUASQL_TYPE_INT:
-                case LUASQL_TYPE_NUMBER:
-                    ok = (lua_type(L, -1) == LUA_TNUMBER);
-                    break;
-                case LUASQL_TYPE_STRING:
-                case LUASQL_TYPE_DATE:
-                case LUASQL_TYPE_TIME:
-                case LUASQL_TYPE_TIMESTAMP:
-                    ok = (lua_type(L, -1) == LUA_TSTRING);
-                    break;
-                case LUASQL_TYPE_BOOLEAN:
-                    ok = lua_isboolean(L, -1);
-                    break;
-                case LUASQL_TYPE_NULL:
-                    ok = 1;  /* value doesn't matter when type is null */
-                    break;
-            }
-            lua_pop(L, 1);  /* pop value */
-
-            if (!ok) {
-                return luaL_error(L, LUASQL_PREFIX "value does not match declared luasql.type");
-            }
-
-        } else if (lua_type(L, -1) == LUA_TNUMBER && (int)lua_tointeger(L, -1) == LUASQL_TYPE_NULL) {
-            /* bare luasql.type.null constant — always valid */
-
-        } else {
-            /* anything else is an error */
-            return luaL_error(L, LUASQL_PREFIX "parameter must be {value, luasql.type.X} " "or luasql.type.null");
+        /* validate value entry: a plain value or {value, type} */
+        {
+            int is_null;
+            luasql_check_param(L, -1, &is_null);
+            lua_pop(L, 1);  /* pop the value it pushed */
         }
 
         lua_pop(L, 1);  /* pop value, keep key for next iteration */

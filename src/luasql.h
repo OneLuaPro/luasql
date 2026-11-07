@@ -32,8 +32,13 @@
 #define LUASQL_TYPE_DATE      4
 #define LUASQL_TYPE_TIME      5
 #define LUASQL_TYPE_TIMESTAMP 6
-#define LUASQL_TYPE_NULL      7
-#define LUASQL_TYPE_COUNT     8 // Always place it in the last. Used in validating the range of type constants. 
+#define LUASQL_TYPE_NULL      7  /* internal; luasql.type.null is a special value */
+#define LUASQL_TYPE_BINARY    8
+#define LUASQL_TYPE_COUNT     9 // Always place it in the last. Used in validating the range of type constants.
+
+/* registry key of the special value luasql.type.null, shared by all
+   drivers in one Lua state */
+#define LUASQL_NULL_KEY "LuaSQL null"
 
 // Macro to handle userdata creation across Lua versions
 #if LUA_VERSION_NUM >= 504
@@ -48,7 +53,11 @@ LUASQL_API int luasql_createmeta (lua_State *L, const char *name, const luaL_Reg
 LUASQL_API void luasql_setmeta (lua_State *L, const char *name);
 LUASQL_API void luasql_set_info (lua_State *L);
 LUASQL_API void luasql_set_types (lua_State *L);
+LUASQL_API void luasql_pushnull (lua_State *L);
+LUASQL_API int luasql_isnull (lua_State *L, int idx);
+LUASQL_API int luasql_check_param (lua_State *L, int idx, int *is_null);
 LUASQL_API int luasql_validate_params (lua_State *L, int tbl_idx, int *is_named_out, int *num_params_out);
+LUASQL_API int luasql_validate_args (lua_State *L, int first, int last);
 
 #if !defined LUA_VERSION_NUM || LUA_VERSION_NUM==501
 void luaL_setfuncs (lua_State *L, const luaL_Reg *l, int nup);

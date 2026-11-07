@@ -16,12 +16,37 @@ The [upstream documentation](https://lunarmodules.github.io/luasql/) describes t
 | Area                    | Addition                                                                                                       |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------- |
 | Build                   | `CMakeLists.txt` for Windows, used by the OneLuaPro build; finds Lua through its CMake package `liblua`         |
-| Prepared statements     | `conn:prepare()` and `stmt:execute()` for Oracle from upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), not yet merged upstream |
+| Prepared statements     | `conn:prepare()` and `stmt:execute()` for Oracle from upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), not yet merged upstream, extended by plain values, variable arguments and `luasql.type.binary` |
 | Oracle driver           | `luasql.oci8` reworked: data type coverage, typed parameters, prepared statement semantics, transactions, threads and many fixes; see [below](#oracle-driver-luasqloci8) |
 | Stress test suite       | [`stress/`](stress/README.md): a long-running test of driver robustness, implemented for Oracle so far; see [below](#stress-test-suite) |
 
 The guiding rule for the Oracle driver: *the driver uses OCI (Oracle Call Interface) correctly, it does not try to improve OCI.* It covers the OCI features well, but stays inside the frame of the LuaSQL API; additions are kept where another LuaSQL driver already offers the same, so that the drivers behave alike. Where Oracle or OCI behaves differently from what a user might expect, the driver does not hide it; such behavior is documented as a known limitation.
 
+
+## Differences from lunarmodules/luasql
+
+Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`), it is listed here. Changes that alter the behavior of existing code without an error message come first.
+
+**Changes without an error message**
+
+- **oci8: `conn:close()` rolls back an open transaction**, also when called by the garbage collector or a to-be-closed variable. LuaSQL leaves it to Oracle, which commits it at logoff.
+- **oci8: text is always UTF-8.** The client character set is AL32UTF8, independent of `NLS_LANG`; LuaSQL uses the character set of `NLS_LANG`.
+
+**Other changes**
+
+- **Errors** follow the section "Error handling" of the LuaSQL manual in all drivers documented here (so far oci8):
+  - A wrong use of the API raises an error: a closed object, an argument of the wrong type, an unknown option or value of `setoption`/`getoption`, an invalid parameter, `execute` or `reset` while the cursor of the statement is open.
+  - A failure in the database or the client library returns `nil` and a message.
+  - `commit`, `rollback` and `setautocommit` return `false` and a message on failure (LuaSQL: partly `nil`); code that tests for `nil` misses it.
+  - `close` returns `false` and a message only if the object is already closed or still has open objects of its own. An error of the client library while releasing an object is ignored, and the object is closed.
+- **oci8: `conn:execute(sql, ...)` binds further arguments as parameters**; LuaSQL ignores them.
+
+**Extensions**
+
+- Prepared statements for oci8: `conn:prepare`, statement objects with `execute`, `reset` and `close` (upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
+- `luasql.type` with the pairs `{value, type}`, `T.null` (a special value), `T.binary`, fixed forms for dates and times, `{T.null, type}`.
+- Plain Lua values and variable arguments as parameters, also for `conn:execute`.
+- The additions of oci8 described [below](#oracle-driver-luasqloci8): options `numbers` and `prefetch`, data types, threads.
 
 ## Oracle Driver `luasql.oci8`
 
@@ -69,30 +94,37 @@ Years before Christ get a minus sign, e.g. `"-4712-01-01 00:00:00"`. Not support
 
 ```lua
 local T = luasql.type
-local stmt = assert(conn:prepare("INSERT INTO t (id, name, born) VALUES (:1, :2, :3)"))
-assert(stmt:execute{ {1, T.int}, {"Grüße", T.string}, {"2026-10-24", T.date} })
-assert(stmt:execute{ {2, T.int}, T.null, {"2026-10-25 12:00:00", T.date} })
+local stmt = assert(conn:prepare("INSERT INTO t (id, name, born, photo) VALUES (:1, :2, :3, :4)"))
+assert(stmt:execute(1, "Grüße", {"2026-10-24", T.date}, {jpeg, T.binary}))
+assert(stmt:execute{ 2, T.null, {"2026-10-25 12:00:00", T.date}, T.null })
 stmt:close()
+local cur = assert(conn:execute("SELECT name FROM t WHERE id = :id", { id = 1 }))
 ```
 
-Each parameter is a pair `{value, type}` with a type from `luasql.type`, or `luasql.type.null` alone for NULL. Positional parameters use the keys 1, 2, …, named ones the name of the placeholder.
+A parameter is a plain Lua value, bound by its Lua type only, never by its content (integer as `int`, float as `number`, string as `string`, boolean as `boolean`), or a pair `{value, type}` with a type from `luasql.type` for what the Lua type does not say. `luasql.type.null` is NULL: a special value, not a number, alone or as the value of a pair (`{T.null, T.binary}`); as a variable argument `nil` is NULL too. A value that does not fit its type, an unknown type or a Lua type that cannot be bound (e.g. a function) raises an error.
+
+`stmt:execute()` runs with the values bound last; `stmt:execute{ ... }` with one table binds the values in it, by position (keys 1, 2, …) or by name (the names of the placeholders, with or without `:`, in any case), never both; any other call, e.g. `stmt:execute(5, "x")` or `stmt:execute(nil)`, binds variable arguments by position. A single typed value goes into a table: `stmt:execute{ {"2026-10-24", T.date} }`. `conn:execute(sql, ...)` takes parameters in the same forms.
+
+The number of variable arguments must be the number of placeholders, else the result is `nil` and a message. Bound by position, every occurrence of a placeholder in SQL counts (`SELECT :a + :a FROM dual` takes two values), in PL/SQL every name once; bound by name, one value serves all occurrences. An unknown name gives `ORA-01036`, a placeholder without a value `ORA-01008`.
 
 | Type                         | Bound as                                                                                                             |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `int`                        | integer                                                                                                              |
+| `int`                        | 64-bit integer, exact; also a float with an integral value                                                          |
 | `number`                     | double; OCI keeps 15 significant digits. Infinity and NaN go as `BINARY_DOUBLE`: exact into `BINARY_DOUBLE` columns, an error (`ORA-01426`, `ORA-03087`) for `NUMBER` |
 | `string`                     | text of any length, also into `CLOB` columns; embedded `\0` is kept                                                  |
-| `boolean`                    | `1` or `0`                                                                                                           |
+| `boolean`                    | the text `'1'` or `'0'`                                                                                              |
 | `date`                       | `"YYYY-MM-DD"` or `"YYYY-MM-DD HH24:MI:SS"`, also with a minus sign for years before Christ                          |
 | `timestamp`                  | `"YYYY-MM-DD HH24:MI:SS"` with optional fraction, e.g. `".500000"`; without time zone                                |
-| `time`                       | a string, converted by Oracle with `NLS_DATE_FORMAT` (Oracle has no `TIME` type)                                     |
+| `time`                       | `"HH24:MI:SS"`, bound as text (Oracle has no `TIME` type)                                                            |
+| `binary`                     | bytes of a string, unchanged, into `RAW` and `BLOB` columns (`SQLT_BIN`, above 32767 bytes `SQLT_LBI`); a `BLOB` column takes any size up to 2 GB - 1 (64 MB measured), PL/SQL variables and SQL functions up to 32767 bytes (`ORA-01460` above) |
+| `null`                       | NULL                                                                                                                 |
 
-Values as read from a `DATE` or `TIMESTAMP` column can be bound back unchanged.
+Values as read from a `DATE` or `TIMESTAMP` column can be bound back unchanged. A plain string for a `DATE` column is converted by Oracle with `NLS_DATE_FORMAT`, which depends on the client settings; bind dates as `date`.
 
 **Bindings stay on the statement**, as OCI and the ODBC driver of LuaSQL do: a placeholder keeps its value until it is bound again, `stmt:reset()` is called or the statement is closed.
 
-- `stmt:execute()`, `stmt:execute(nil)` and `stmt:execute{}` bind nothing new and run with the values bound last; a statement without placeholders needs no argument.
-- A parameter table binds only the keys it contains; placeholders not given keep their last value.
+- `stmt:execute()` and `stmt:execute{}` bind nothing new and run with the values bound last; a statement without placeholders needs no argument.
+- A parameter table binds only the keys it contains; placeholders not given keep their last value. Variable arguments bind all placeholders.
 - `stmt:reset()` drops all bindings, as in the ODBC driver; afterwards a missing parameter gives `ORA-01008`.
 
 ### Transactions and Results

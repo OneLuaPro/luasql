@@ -89,6 +89,10 @@ local ok, err = pcall(conn.setoption, conn, "no_such_option", 1)
 print(ok, err)   --> false   LuaSQL: unknown option 'no_such_option'
 ```
 
+An unknown parameter name and a wrong number of parameters depend on the SQL
+text, which only the client library knows: they return `nil` and a message,
+like a failure at the database.
+
 The functions without a result of their own, `close`, `commit`, `rollback`
 and `setautocommit`, never raise an error for a failure: they return `true`,
 or `false` and a message, e.g. for a `commit` that Oracle refuses. `close`
@@ -115,6 +119,48 @@ cursor is closed before the connection. A connection that still has open
 cursors or statements refuses to close, and a to-be-closed variable ignores
 that refusal: the connection then stays open until the garbage collector
 closes it.
+
+## Differences from lunarmodules/luasql
+
+Where this fork behaves differently from LuaSQL of lunarmodules (branch
+`master`), it is listed here. Changes that alter the behavior of existing
+code without an error message come first.
+
+**Changes without an error message**
+
+- **oci8: `conn:close()` rolls back an open transaction**, also when called
+  by the garbage collector or a to-be-closed variable. LuaSQL leaves it to
+  Oracle, which commits it at logoff.
+- **oci8: text is always UTF-8.** The client character set is AL32UTF8,
+  independent of `NLS_LANG`; LuaSQL uses the character set of `NLS_LANG`.
+
+**Other changes**
+
+- **Errors** follow the section "Error handling" of the LuaSQL manual (see
+  Errors above):
+    - A wrong use of the API raises an error, also in cases where LuaSQL
+      returns `nil` and a message.
+    - `commit`, `rollback` and `setautocommit` return `false` and a message
+      on failure (LuaSQL: partly `nil`); code that tests for `nil` misses
+      it.
+    - `close` returns `false` and a message only if the object is already
+      closed or still has open objects of its own. An error of the client
+      library while releasing an object is ignored, and the object is
+      closed.
+- **oci8: `conn:execute(sql, ...)` binds further arguments as parameters**;
+  LuaSQL ignores them.
+
+**Extensions**
+
+- Prepared statements for oci8: `conn:prepare` and statement objects (upstream
+  pull request [#209](https://github.com/lunarmodules/luasql/pull/209),
+  extended).
+- `luasql.type` with the pairs `{value, type}`, `T.null` (a special value),
+  `T.binary`, fixed forms for dates and times, `{T.null, type}`.
+- Plain Lua values and variable arguments as parameters, also for
+  `conn:execute`.
+- The additions of oci8 in the @{03-oracle.md|Oracle topic}: options
+  `numbers` and `prefetch`, data types, threads.
 
 ## Where to Go Next
 

@@ -2,11 +2,11 @@
 
 Moves large amounts of data through the driver. It checks that the memory stays constant however many rows pass, that every value arrives unchanged, that a large transaction can be rolled back, and that an exhausted tablespace gives a clean error after which the session works on.
 
-The scenario uses the tables `luastress_vol` (`id NUMBER PRIMARY KEY, n NUMBER, s VARCHAR2(100)`) and `luastress_vollob` (`id NUMBER PRIMARY KEY, c CLOB`); it is skipped if the backend has none or the driver has no `conn:prepare`. Tables left by an aborted run are dropped first.
+The scenario uses the tables `luastress_vol` (`id NUMBER PRIMARY KEY, n NUMBER, s VARCHAR2(100)`) and `luastress_vollob` (`id NUMBER PRIMARY KEY, c CLOB`), and for `binaryInsert` the temporary table `luastress_volbin` (`id NUMBER, b BLOB`, `ON COMMIT DELETE ROWS`); it is skipped if the backend has none or the driver has no `conn:prepare`. `binaryInsert` is skipped if the backend has no temporary table (`volBinaryTableCreate`) or the driver no `luasql.type.binary`. Tables left by an aborted run are dropped first.
 
 ## Phases
 
-Rows per phase: smoke 10 000, standard 100 000, nightly 1 000 000; the two LOB (Large Object) phases use a tenth of it. One iteration is one row.
+Rows per phase: smoke 10 000, standard 100 000, nightly 1 000 000; the two LOB (Large Object) phases use a tenth of it, `binaryInsert` smoke 200, standard 1000, nightly 5000. One iteration is one row.
 
 Row *i* holds `id` = *i*, `n` = *i* + 0.25 and a string `s` of 53 characters with the row number; in every 7th row `s` is NULL. The fetch phases compare every row with these values, in order.
 
@@ -21,8 +21,11 @@ Besides the usual server counters the phases count the open transactions of the 
 | `bigRollback`   | inserts a row with an id above the rows of `bulkInsert`, all in one transaction; at the end one rollback          | an insert fails, the table does not hold the same rows as before the phase after the rollback, or a counter or the memory grows                         |
 | `lobInsert`     | inserts a row with a CLOB (Character Large Object) of 4000 characters through a prepared statement               | an insert fails, or a counter or the memory grows                                                                                                        |
 | `lobFetch`      | fetches the next row with its CLOB and checks it                                                                 | a row or its CLOB is missing or wrong, or a counter or the memory grows                                                                                  |
+| `binaryInsert`  | inserts a row with `luasql.type.binary` of 32 767, 32 768, 100 000 and 1 048 576 bytes in turn (all byte values) into the BLOB (Binary Large Object) of the temporary table, autocommit off; every 10th row is read back and compared, then committed, which empties the table | an insert fails, a value read back differs, or a counter or the memory grows |
 
-Before `lobFetch` the scenario reads one CLOB. On the first LOB read from a table Oracle opens an internal cursor (`table_304_11_<object id>`) that stays open in the session; read inside the phase, it would count as a cursor leak.
+Before `lobFetch` the scenario reads one CLOB. On the first LOB read from a table Oracle opens an internal cursor (`table_304_11_<object id>`) that stays open in the session; read inside the phase, it would count as a cursor leak. For the same reason one row of `luastress_volbin` is written and read before `binaryInsert`.
+
+`binaryInsert` writes real BLOBs, up to 1 MB per row, without filling a tablespace: the rows of the temporary table go at each commit. With Oracle (checked in SQL*Plus) such a BLOB is no temporary LOB (`temp lobs` stays 0), and the commit frees its temporary segments. 32 767 and 32 768 bytes lie on both sides of the size where `luasql.oci8` changes its bind from `SQLT_BIN` to `SQLT_LBI`.
 
 After the phases a line shows the throughput of each phase in rows per second. It is information, not a check. From a nightly run (Oracle, local VM, prefetch 100, network encryption):
 

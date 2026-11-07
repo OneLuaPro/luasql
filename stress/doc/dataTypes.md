@@ -1,6 +1,6 @@
 # Scenario `dataTypes`
 
-Writes values of many types through prepared statements into a test table, reads them back and compares. It checks correctness at the boundaries of each type, not leaks: every case runs once per block, independent of the tier, and the scenario has no phases. It needs no admin connection.
+Writes values of many types through prepared statements into a test table, reads them back and compares. Values are bound as pairs `{value, type}` with a constant of `luasql.type`, or as plain Lua values, which the driver binds by their Lua type alone (integer, float, string, boolean). It checks correctness at the boundaries of each type, not leaks: every case runs once per block, independent of the tier, and the scenario has no phases. It needs no admin connection.
 
 The cases below are those of Oracle: the column types, the SQL literals, the locale setting and the limits come from `backend/oracle.lua`. Another DBMS has columns, literals and limits of its own; cases for types it does not have are skipped.
 
@@ -53,6 +53,14 @@ Column `n` is `NUMBER`, `bf` is `BINARY_FLOAT`, `bd` is `BINARY_DOUBLE`.
 | `infinity`          | `math.huge`.                                                                                       | Pass: reads back infinity, or the write fails cleanly. Fail: another value.                                              |
 | `infinityNeg`       | `-math.huge`.                                                                                      | As `infinity`.                                                                                                           |
 | `numberNull`        | `luasql.type.null`.                                                                                | Pass: reads back nil.                                                                                                    |
+| `numberNullTyped`   | `{luasql.type.null, luasql.type.int}`, NULL with a type.                                           | Pass: reads back nil.                                                                                                    |
+| `plainInt`          | 42 as plain value (a Lua integer).                                                                 | Pass: reads back 42 (integer).                                                                                           |
+| `plainInt53plus1`   | 2^53 + 1 as plain integer.                                                                         | Pass: reads back exactly: plain integers bind as 64 bits. Limit in float mode: a double cannot hold it.                  |
+| `plainIntMax`       | `math.maxinteger` as plain integer.                                                                | As `intMax`.                                                                                                             |
+| `plainIntMin`       | `math.mininteger` as plain integer.                                                                | As `intMax`.                                                                                                             |
+| `plainFloat`        | 0.1 as plain value (a Lua float).                                                                  | Pass: reads back 0.1.                                                                                                    |
+| `plainFloatWhole`   | 42.0, a float with an integral value: it is bound as a float, the server stores the integer.      | Pass: reads back 42, an integer in exact mode.                                                                           |
+| `plainFloatPi`      | `math.pi` as plain float.                                                                          | As `floatPi`: plain floats bind as double, like `luasql.type.number`.                                                    |
 | `intFetchNa`        | 42, read with fetch mode `"na"`.                                                                   | Pass: 42 under the numeric and the named key.                                                                            |
 | `floatFetchMulti`   | 0.25, read with fetch mode `"multi"`.                                                              | Pass: 0.25 as return value.                                                                                              |
 | `litPi`             | `3.141592653589793` written as SQL literal, so the read path is not hidden by the bind limit.      | Pass: reads back the double nearest to it. Limit in float mode: not correctly rounded.                                   |
@@ -134,6 +142,9 @@ Columns: `d` `DATE`, `ts` `TIMESTAMP(6)`, `tstz` `TIMESTAMP WITH TIME ZONE`, `ts
 | `booleanFalse`   | `false` into `BOOLEAN`.                              | Pass: reads back `false`.                        |
 | `booleanNull`    | NULL into `BOOLEAN`.                                 | Pass: reads back nil.                            |
 | `booleanFetchNa` | `true`, read with fetch mode `"na"`.                 | Pass: `true` under both keys.                    |
+| `plainTrue`      | `true` as plain value into `BOOLEAN`.                | Pass: reads back `true`.                         |
+| `plainFalse`     | `false` as plain value into `BOOLEAN`.               | Pass: reads back `false`.                        |
+| `plainTrueAsNumber` | `true` as plain value into `NUMBER`.              | Pass: reads back 1.                              |
 
 ## Strings
 
@@ -149,6 +160,9 @@ Columns: `s` `VARCHAR2(4000 BYTE)`, `ns` `NVARCHAR2(2000)`, `ch` `CHAR(10 CHAR)`
 | `emptyString`      | `""`.                                                                          | Limit (Oracle): an empty string is stored as NULL.                          |
 | `embeddedZero`     | `"ab\0cd"`.                                                                    | Pass: the zero byte and the rest come back.                                 |
 | `stringNull`       | NULL.                                                                          | Pass: reads back nil.                                                       |
+| `plainString`      | the test text as plain value.                                                  | Pass: reads back byte for byte.                                             |
+| `plainDateText`    | `2026-10-19` as plain value: it stays text.                                    | Pass: reads back unchanged.                                                 |
+| `plainZero`        | `"ab\0cd"` as plain value.                                                     | Pass: the zero byte and the rest come back.                                 |
 | `stringFetchA`     | the test text, read with fetch mode `"a"`.                                     | Pass: reads back under the column name.                                     |
 | `stringFetchMulti` | the test text, read with fetch mode `"multi"`.                                 | Pass: reads back as return value.                                           |
 | `nvarchar`         | the test text into `NVARCHAR2` (national character set).                       | Pass: reads back.                                                           |
@@ -176,7 +190,7 @@ Columns: `s` `VARCHAR2(4000 BYTE)`, `ns` `NVARCHAR2(2000)`, `ch` `CHAR(10 CHAR)`
 
 ## Raw
 
-Column `rw` is `RAW(2000)`. Binds and literals are hex text; reads give the bytes, which are also checked as hex on the server.
+Column `rw` is `RAW(2000)`. Binds as string and literals are hex text, binds as `luasql.type.binary` are the bytes themselves; reads give the bytes, which are also checked as hex on the server.
 
 | Test            | Checks                                                  | Results                                                     |
 | --------------- | ------------------------------------------------------- | ----------------------------------------------------------- |
@@ -190,6 +204,13 @@ Column `rw` is `RAW(2000)`. Binds and literals are hex text; reads give the byte
 | `rawEmpty`      | `""`.                                                   | Limit (Oracle): an empty `RAW` is stored as NULL.           |
 | `rawNull`       | NULL.                                                   | Pass: reads back nil.                                       |
 | `rawFetchNa`    | read with fetch mode `"na"`.                            | Pass: the same bytes under both keys.                       |
+| `rawBinary`     | the bytes `00 FF 41 00` as `luasql.type.binary`.        | Pass: the same bytes.                                       |
+| `rawBinaryAll`  | all 256 byte values as binary.                          | Pass: reads back unchanged.                                 |
+| `rawBinaryMax`  | 2000 bytes as binary, the largest `RAW`.                | Pass: reads back unchanged.                                 |
+| `rawBinaryTooLong` | 2001 bytes as binary.                                | Pass: the write fails cleanly (with Oracle `ORA-12899`).    |
+| `rawBinaryEmpty` | `""` as binary.                                        | Pass: reads back `""`. Limit (Oracle): an empty `RAW` is stored as NULL. |
+| `rawBinaryNull` | `{luasql.type.null, luasql.type.binary}`.               | Pass: reads back nil.                                       |
+| `rawPlainHex`   | `00FF4100` as plain string: text, which the server reads as hex. | Pass: the bytes `00 FF 41 00`.                      |
 
 ## CLOB
 
@@ -212,7 +233,7 @@ Columns `c` `CLOB` (Character Large Object) and `nc` `NCLOB` (CLOB in the nation
 
 ## BLOB
 
-Column `bl` is `BLOB` (Binary Large Object), written as hex text or RAW, read as bytes.
+Column `bl` is `BLOB` (Binary Large Object), written as hex text, RAW or `luasql.type.binary`, read as bytes.
 
 | Test          | Checks                                                      | Results                                   |
 | ------------- | ----------------------------------------------------------- | ----------------------------------------- |
@@ -222,6 +243,12 @@ Column `bl` is `BLOB` (Binary Large Object), written as hex text or RAW, read as
 | `blobNull`    | NULL.                                                       | Pass: reads back nil.                     |
 | `blobFetchNa` | read with fetch mode `"na"`.                                | Pass: the same bytes under both keys.     |
 | `blobLarge`   | 100 000 bytes built on the server, more than one read piece. | Pass: reads back unchanged.               |
+| `blobBinary`  | the bytes `00 FF 41 00` as `luasql.type.binary`.            | Pass: the same bytes.                     |
+| `blobBinary32767` | 32 767 bytes as binary (all byte values in turn).       | Pass: reads back unchanged.               |
+| `blobBinary32768` | 32 768 bytes: `luasql.oci8` binds from here on as `SQLT_LBI` instead of `SQLT_BIN`. | Pass: reads back unchanged. |
+| `blobBinary1M` | 1 048 576 bytes as binary.                                 | Pass: reads back unchanged.               |
+| `blobBinaryEmpty` | `""` as binary.                                         | Pass: reads back `""`. Limit (Oracle): an empty binary value is stored as NULL. |
+| `blobBinaryNull` | `{luasql.type.null, luasql.type.binary}`.                | Pass: reads back nil.                     |
 
 ## JSON
 

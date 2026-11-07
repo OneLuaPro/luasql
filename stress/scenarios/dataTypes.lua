@@ -2,6 +2,8 @@
 -- Writes values of many types through prepared statements into a test
 -- table, reads them back and compares. Checks correctness at type
 -- boundaries, not leaks; every case runs once, independent of the tier.
+-- Values are bound as pairs {value, type} or as plain Lua values, which
+-- the driver binds by their Lua type.
 --
 -- Blocks, in this order:
 --   numbers, dates, booleans  once per test locale of the backend
@@ -15,9 +17,9 @@
 --   rowids                    ROWIDs read as strings must find their
 --                             row again, also logical ROWIDs and
 --                             ROWIDs stored in a column
---   raw                       binary data, written as hex text, read
---                             as bytes; also checked as hex on the
---                             server
+--   raw                       binary data, written as hex text or as
+--                             luasql.type.binary, read as bytes; also
+--                             checked as hex on the server
 --   clob, blob, json          last: a failed LOB read may leave the
 --                             session unusable; the driver reads JSON
 --                             through a CLOB
@@ -116,6 +118,16 @@ local utf8Clob = string.rep(utf8Text, 100)
 local largeClob = string.rep(utf8Text, 5000)
 local zeroClob = "ab\0cd" .. asciiClob
 
+-- n bytes of all byte values 0 to 255 in turn, for luasql.type.binary.
+local allBytes = {}
+for byte = 0, 255 do
+   allBytes[#allBytes + 1] = string.char(byte)
+end
+allBytes = table.concat(allBytes)
+local function binaryOf(n)
+   return string.rep(allBytes, n // 256 + 1):sub(1, n)
+end
+
 -- Builds the case list. A case has: name, block, column, param (as for
 -- stmt:execute) and expected; optional: nullResult (expect NULL),
 -- expectError, errorAllowed (an error is fine, a wrong value is not),
@@ -191,6 +203,18 @@ local function makeCases(t)
    add("infinityNeg", "numbers", "n", { -math.huge, t.number }, -math.huge,
        { errorAllowed = true })
    add("numberNull", "numbers", "n", t.null, nil, null)
+   add("numberNullTyped", "numbers", "n", { t.null, t.int }, nil, null)
+   -- Plain values, bound by their Lua type: integers as 64 bits, floats
+   -- as double; a float with an integral value stays a float, the
+   -- server stores the integer.
+   add("plainInt", "numbers", "n", 42, 42)
+   add("plainInt53plus1", "numbers", "n", 9007199254740993,
+       9007199254740993)
+   add("plainIntMax", "numbers", "n", math.maxinteger, math.maxinteger)
+   add("plainIntMin", "numbers", "n", math.mininteger, math.mininteger)
+   add("plainFloat", "numbers", "n", 0.1, 0.1)
+   add("plainFloatWhole", "numbers", "n", 42.0, 42)
+   add("plainFloatPi", "numbers", "n", math.pi, math.pi)
    add("intFetchNa", "numbers", "n", { 42, t.int }, 42,
        { fetchMode = "na" })
    add("floatFetchMulti", "numbers", "n", { 0.25, t.number }, 0.25,
@@ -366,6 +390,9 @@ local function makeCases(t)
    add("booleanColumn", "booleans", "b", { true, t.boolean }, true)
    add("booleanFalse", "booleans", "b", { false, t.boolean }, false)
    add("booleanNull", "booleans", "b", t.null, nil, null)
+   add("plainTrue", "booleans", "b", true, true)
+   add("plainFalse", "booleans", "b", false, false)
+   add("plainTrueAsNumber", "booleans", "n", true, 1)
    add("booleanFetchNa", "booleans", "b", { true, t.boolean }, true,
        { fetchMode = "na" })
 
@@ -379,6 +406,10 @@ local function makeCases(t)
    add("emptyString", "strings", "s", { "", t.string }, "")
    add("embeddedZero", "strings", "s", { "ab\0cd", t.string }, "ab\0cd")
    add("stringNull", "strings", "s", t.null, nil, null)
+   -- Plain strings stay text, also when they look like a date.
+   add("plainString", "strings", "s", utf8Text, utf8Text)
+   add("plainDateText", "strings", "s", "2026-10-19", "2026-10-19")
+   add("plainZero", "strings", "s", "ab\0cd", "ab\0cd")
    add("stringFetchA", "strings", "s", { utf8Text, t.string }, utf8Text,
        { fetchMode = "a" })
    add("stringFetchMulti", "strings", "s", { utf8Text, t.string },
@@ -438,6 +469,18 @@ local function makeCases(t)
    add("rawInvalidHex", "raw", "rw", { "XYZ", t.string }, nil, fails)
    add("rawEmpty", "raw", "rw", { "", t.string }, "")
    add("rawNull", "raw", "rw", t.null, nil, null)
+   -- luasql.type.binary: the bytes as they are, no hex text.
+   add("rawBinary", "raw", "rw", { bytes, t.binary }, bytes)
+   add("rawBinaryAll", "raw", "rw", { binaryOf(256), t.binary },
+       binaryOf(256))
+   add("rawBinaryMax", "raw", "rw", { binaryOf(2000), t.binary },
+       binaryOf(2000))
+   add("rawBinaryTooLong", "raw", "rw", { binaryOf(2001), t.binary }, nil,
+       fails)
+   add("rawBinaryEmpty", "raw", "rw", { "", t.binary }, "")
+   add("rawBinaryNull", "raw", "rw", { t.null, t.binary }, nil, null)
+   -- A plain string is text: the server reads it as hex.
+   add("rawPlainHex", "raw", "rw", "00FF4100", bytes)
    add("rawFetchNa", "raw", "rw", { "00FF4100", t.string }, bytes,
        { fetchMode = "na" })
 
@@ -447,6 +490,17 @@ local function makeCases(t)
    add("blobHexBind", "blob", "bl", { "00FF4100", t.string }, bytes)
    add("blobEmpty", "blob", "bl", nil, "", { literal = "EMPTY_BLOB()" })
    add("blobNull", "blob", "bl", t.null, nil, null)
+   -- luasql.type.binary into a BLOB, below and above 32767 bytes, where
+   -- the bind of the driver may change (luasql.oci8: SQLT_BIN, SQLT_LBI).
+   add("blobBinary", "blob", "bl", { bytes, t.binary }, bytes)
+   add("blobBinary32767", "blob", "bl", { binaryOf(32767), t.binary },
+       binaryOf(32767))
+   add("blobBinary32768", "blob", "bl", { binaryOf(32768), t.binary },
+       binaryOf(32768))
+   add("blobBinary1M", "blob", "bl", { binaryOf(1048576), t.binary },
+       binaryOf(1048576))
+   add("blobBinaryEmpty", "blob", "bl", { "", t.binary }, "")
+   add("blobBinaryNull", "blob", "bl", { t.null, t.binary }, nil, null)
    add("blobFetchNa", "blob", "bl", { "00FF4100", t.string }, bytes,
        { fetchMode = "na" })
    -- 100000 bytes, more than one read piece in the driver.
@@ -832,9 +886,11 @@ end
 local function numberBindLimit(ctx, case, stored, expected)
    local limits = ctx.backend.limits or {}
    local digits = limits.numberBindDigits
+   -- A float, plain or as luasql.type.number, is bound as a double.
+   local doubleBind = math.type(case.param) == "float"
+      or type(case.param) == "table" and case.param[2] == ctx.types.number
    if not digits or not stored or stored.value == expected
-      or type(expected) ~= "number" or type(case.param) ~= "table"
-      or case.param[2] ~= ctx.types.number then
+      or type(expected) ~= "number" or not doubleBind then
       return nil
    end
    local cut = tonumber(string.format("%." .. digits .. "g", expected))

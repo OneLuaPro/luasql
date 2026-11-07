@@ -16,6 +16,13 @@
 --   lobFetch       read back and checked; one CLOB is read before the
 --                  phase, so the internal LOB cursor that Oracle opens
 --                  on the first read does not count as a leak
+-- and with its own, smaller numbers of rows (binaryRows):
+--   binaryInsert   luasql.type.binary of 32767, 32768, 100000 and
+--                  1048576 bytes in turn into a BLOB of a temporary
+--                  table that empties itself at the commit, so the
+--                  tablespace does not grow; every 10th row is read
+--                  back and compared, then committed. Skipped if the
+--                  backend has no such table (volBinaryTableCreate).
 -- After the phases a line shows the throughput of each phase in rows
 -- per second; it is information, not a check.
 --
@@ -49,6 +56,23 @@ local commitEvery = 1000
 
 -- Characters of the CLOB in the LOB phases.
 local lobChars = 4000
+
+-- Rows of phase binaryInsert per tier: up to 1 MB per row, so far fewer
+-- than in the other phases.
+local binaryRows = {
+   smoke = 200,
+   standard = 1000,
+   nightly = 5000,
+}
+
+-- Bytes of the binary value of each row, in turn: both sides of 32767
+-- (where luasql.oci8 changes from SQLT_BIN to SQLT_LBI), 100000 and
+-- 1 MB.
+local binarySizes = { 32767, 32768, 100000, 1048576 }
+
+-- Every this many rows phase binaryInsert reads the row back, then
+-- commits.
+local binaryCheckEvery = 10
 
 -- Wall clock time in seconds for the throughput, from luv if there.
 local hasUv, uv = pcall(require, "luv")
@@ -300,6 +324,101 @@ local function finishLobInsert(ctx, shared)
    finishTiming(ctx, "lobInsert", shared, shared.rows)
 end
 
+-- Phase binaryInsert. The binary value of row i: its size from
+-- binarySizes, the row number at the start, all byte values after it.
+local binaryBlock = {}
+for byte = 0, 255 do
+   binaryBlock[#binaryBlock + 1] = string.char(byte)
+end
+binaryBlock = table.concat(binaryBlock)
+
+local function binaryOf(i)
+   local size = binarySizes[i % #binarySizes + 1]
+   local head = string.pack(">I4", i)
+   return head .. string.rep(binaryBlock, size // 256 + 1):sub(1,
+                                                              size - #head)
+end
+
+-- Where a binary value read back differs from the one written.
+local function binaryDifference(value, data)
+   if type(value) ~= "string" then
+      return string.format("got %s, expected %d bytes", describe(value),
+                           #data)
+   end
+   local at = 1
+   while at <= #value and value:byte(at) == data:byte(at) do
+      at = at + 1
+   end
+   return string.format("got %d bytes, expected %d; first difference at"
+                        .. " byte %d", #value, #data, at)
+end
+
+-- Reads row id of the binary table back; returns the value.
+local function readBinary(stmt, id)
+   local cur, err = stmt:execute({ id })
+   check(cur, err, "select")
+   local row
+   row, err = cur:fetch({})
+   expect(row ~= nil, "select: no row " .. id .. ": " .. tostring(err))
+   local extra = cur:fetch({})
+   expect(extra == nil, "select: more than one row " .. id)
+   return row[1]
+end
+
+-- Precheck of binaryInsert: one row is written and read before the
+-- phase takes its counters, for the internal LOB cursor of the first
+-- read (see primeLobRead).
+local function primeBinaryRead(ctx)
+   local conn = ctx.testConn
+   local ok, err = pcall(function()
+      setAutocommit(conn, false)
+      local insert = prepare(conn, ctx.backend.volBinaryInsert)
+      local query = prepare(conn, ctx.backend.volBinarySelect)
+      check(insert:execute(0, { binaryOf(0), ctx.types.binary }), nil,
+            "insert")
+      -- Only read here; the phase checks the values.
+      readBinary(query, 0)
+      commit(conn)
+      closeStatement(insert)
+      closeStatement(query)
+   end)
+   pcall(rollback, conn)
+   setAutocommit(conn, true)
+   if not ok then
+      return tostring(err)
+   end
+end
+
+local function setupBinaryInsert(ctx)
+   setAutocommit(ctx.testConn, false)
+   return { insert = prepare(ctx.testConn, ctx.backend.volBinaryInsert),
+            select = prepare(ctx.testConn, ctx.backend.volBinarySelect),
+            rows = 0, started = now() }
+end
+
+local function binaryInsertStep(ctx, i, shared)
+   local data = binaryOf(i)
+   check(shared.insert:execute(i, { data, ctx.types.binary }), nil,
+         "insert")
+   shared.rows = i
+   if i % binaryCheckEvery == 0 then
+      local value = readBinary(shared.select, i)
+      if value ~= data then
+         error(string.format("row %d: %s", i, binaryDifference(value, data)),
+               0)
+      end
+      commit(ctx.testConn)
+   end
+end
+
+local function finishBinaryInsert(ctx, shared)
+   commit(ctx.testConn)
+   closeStatement(shared.insert)
+   closeStatement(shared.select)
+   setAutocommit(ctx.testConn, true)
+   finishTiming(ctx, "binaryInsert", shared, shared.rows)
+end
+
 -- Precheck of lobFetch: reads one CLOB before the phase takes its
 -- counters. On the first LOB read from a table Oracle opens an internal
 -- cursor (table_304_11_<object id>) that stays open in the session; it
@@ -351,6 +470,12 @@ local lobPhaseList = {
      finish = finishLobInsert, confirm = false },
    { name = "lobFetch", precheck = primeLobRead, setup = setupLobFetch,
      step = lobFetchStep, finish = finishFetch("lobFetch") },
+}
+
+local binaryPhaseList = {
+   { name = "binaryInsert", precheck = primeBinaryRead,
+     setup = setupBinaryInsert, step = binaryInsertStep,
+     finish = finishBinaryInsert },
 }
 
 -- Prints the throughput of the phases.
@@ -543,6 +668,18 @@ function volume.run(ctx)
       { backend.volTableCreate, backend.volTableDrop },
       { backend.volLobTableCreate, backend.volLobTableDrop },
    }
+   -- luasql.type raises an error for a name it does not have.
+   local binarySkip
+   if backend.volBinaryTableCreate == nil then
+      binarySkip = "backend has no volBinaryTableCreate"
+   elseif rawget(ctx.driver.type, "binary") == nil then
+      binarySkip = "driver has no luasql.type.binary"
+   end
+   local hasBinary = binarySkip == nil
+   if hasBinary then
+      tables[#tables + 1] = { backend.volBinaryTableCreate,
+                              backend.volBinaryTableDrop }
+   end
    local function dropTables()
       for _, statements in ipairs(tables) do
          local ok, err = dbutil.exec(conn, statements[2])
@@ -566,6 +703,12 @@ function volume.run(ctx)
    if ok and result then
       ok, result, err = pcall(phases.run, volCtx, lobPhaseList,
                               rowCount // 10)
+   end
+   if ok and result and hasBinary then
+      ok, result, err = pcall(phases.run, volCtx, binaryPhaseList,
+                              binaryRows[ctx.tier])
+   elseif not hasBinary then
+      report.print("  ", "binaryInsert   skipped: " .. binarySkip, "skip")
    end
    if not ok then
       problems[#problems + 1] = tostring(result)

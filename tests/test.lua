@@ -911,7 +911,7 @@ function type_constants_test ()
 	end
 	table.sort(types)
 
-	assert2 ("boolean, date, int, null, number, string, time, timestamp", table.concat(types, ", "),
+	assert2 ("binary, boolean, date, int, null, number, string, time, timestamp", table.concat(types, ", "),
 		"luasql.type contains unexpected or missing types")
 end
 

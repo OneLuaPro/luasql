@@ -722,9 +722,9 @@ vp = cp and cp:fetch()
 if cp then cp:close() end
 check("execute() runs a statement without placeholders", tonumber(vp) == 42, ep or tostring(vp))
 if sp then cp, ep = sp:execute(nil) end
-vp = cp and cp:fetch()
-if cp then cp:close() end
-check("execute(nil) is the same", tonumber(vp) == 42, ep or tostring(vp))
+check("execute(nil) is one parameter: nil, msg without placeholders",
+      cp == nil and tostring(ep):find("statement has 0 parameters, 1 given", 1, true) ~= nil,
+      tostring(ep))
 if sp then cp, ep = sp:execute() end
 vp = cp and cp:fetch()
 if cp then cp:close() end
@@ -756,8 +756,6 @@ for i = 1, 3 do
    ok1, a1 = run(s1)
    check("execute() repeats 42 (" .. i .. ")", ok1 and tonumber(a1) == 42, tostring(a1))
 end
-ok1, a1 = run(s1, nil)
-check("execute(nil) repeats 42", ok1 and tonumber(a1) == 42, tostring(a1))
 ok1, a1 = run(s1, {})
 check("execute({}) repeats 42", ok1 and tonumber(a1) == 42, tostring(a1))
 ok1, a1 = run(s1, { { 7, T.int } })
@@ -835,7 +833,9 @@ local bad_params = {
    { "mixed keys", { a = { 1, T.int }, [1] = { 2, T.int } }, "cannot mix" },
    { "wrong type", { a = { "x", T.int } }, "does not match" },
    { "unknown type constant", { a = { 1, 999 } }, "unknown luasql.type constant" },
-   { "value without type", { a = 1 }, "parameter must be" },
+   { "a function as value", { a = print }, "a function cannot be bound" },
+   { "a table that is not a pair", { a = { 1, 2, 3 } }, "parameter must be a value or" },
+   { "a float as T.int", { a = { 3.7, T.int } }, "does not match" },
 }
 for _, b in ipairs(bad_params) do
    r7, e7 = pcall(s8.execute, s8, b[2])
@@ -845,6 +845,200 @@ end
 ok1, a1 = run(s8, { a = { 5, T.int } })
 check("statement usable after the errors", ok1 and tonumber(a1) == 5, tostring(a1))
 s8:close()
+
+print("-- plain values and T.null")
+check("T.null is not a number", type(T.null) == "userdata", type(T.null))
+check("T.binary is a type constant", math.type(T.binary) == "integer")
+drop("lt_oci8_pv")
+exec("CREATE TABLE lt_oci8_pv (id NUMBER, n NUMBER, f BINARY_DOUBLE,"
+     .. " s VARCHAR2(20), b BOOLEAN, z VARCHAR2(5))")
+local spv = assert(conn:prepare("INSERT INTO lt_oci8_pv VALUES (:1, :2, :3, :4, :5, :6)"))
+local rpv, epv = spv:execute(1, 9007199254740993, 0.1, TXT, true, nil)
+check("variable arguments of all Lua types", rpv == 1, epv)
+rpv, epv = spv:execute{ 2, -7, 1.5, "", false, T.null }
+check("table of plain values", rpv == 1, epv)
+spv:close()
+conn:setoption("numbers", "exact")
+do
+   local cpv = assert(exec("SELECT n, f, s, b, z FROM lt_oci8_pv ORDER BY id"))
+   local num, f, s, b, z = cpv:fetch()
+   check("integer above 2^53 is exact", num == 9007199254740993 and math.type(num) == "integer",
+         tostring(num))
+   check("float as double", f == 0.1, tostring(f))
+   check("string as text", s == TXT, tostring(s))
+   check("true as TRUE", b == true, tostring(b))
+   check("nil as variable argument is NULL", z == nil, tostring(z))
+   num, f, s, b, z = cpv:fetch()
+   check("second row: -7, 1.5, NULL, false, NULL",
+         num == -7 and f == 1.5 and s == nil and b == false and z == nil,
+         table.concat({ tostring(num), tostring(f), tostring(s), tostring(b), tostring(z) }, ", "))
+   cpv:close()
+end
+conn:setoption("numbers", "float")
+drop("lt_oci8_pv")
+
+local s9 = assert(conn:prepare("select nvl2(:1, 'value', 'null') from dual"))
+ok1, a1 = run(s9, { 7 })
+check("execute{7} binds the number 7", ok1 and a1 == "value", tostring(a1))
+ok1, a1 = run(s9, { T.null })
+check("execute{T.null} binds NULL", ok1 and a1 == "null", tostring(a1))
+ok1, a1 = run(s9, nil)
+check("execute(nil) binds NULL", ok1 and a1 == "null", tostring(a1))
+ok1, a1 = run(s9, { { T.null, T.int } })
+check("{T.null, T.int} is NULL", ok1 and a1 == "null", tostring(a1))
+ok1, a1 = run(s9, { { "x", T.null } })
+check("{value, T.null} is NULL", ok1 and a1 == "null", tostring(a1))
+s9:close()
+
+local s10 = assert(conn:prepare("select cast(:1 as number) from dual"))
+ok1, a1 = run(s10, { { 3.0, T.int } })
+check("{3.0, T.int} binds 3", ok1 and tonumber(a1) == 3, tostring(a1))
+r7, e7 = pcall(s10.execute, s10, { { 3.7, T.int } })
+check("{3.7, T.int} raises an error",
+      not r7 and tostring(e7):find("does not match", 1, true) ~= nil, tostring(e7))
+for _, bad in ipairs{ { "a function", print }, { "a thread", coroutine.create(print) },
+                      { "a userdata", io.stdout }, { "a table that is not a pair", { 1, 2, 3 } } } do
+   r7, e7 = pcall(s10.execute, s10, bad[2], 1)
+   check("variable argument: " .. bad[1] .. " raises an error",
+         not r7 and tostring(e7):find("LuaSQL:", 1, true) ~= nil, tostring(e7))
+end
+ok1, a1 = run(s10)
+check("bindings kept after the errors", ok1 and tonumber(a1) == 3, tostring(a1))
+s10:close()
+
+local s11 = assert(conn:prepare("select to_char(:1, 'YYYY-MM-DD') from dual"))
+ok1, a1 = run(s11, { { "2026-11-07", T.date } })
+check("single typed value in a table", ok1 and a1 == "2026-11-07", tostring(a1))
+ok1, e1 = run(s11, { "2026-11-07", T.date })
+check("a pair alone is a table of two parameters: ORA-01036",
+      not ok1 and tostring(e1):find("ORA%-01036") ~= nil, tostring(e1))
+s11:close()
+
+print("-- T.binary")
+local bytes = {}
+for i = 0, 255 do bytes[#bytes + 1] = string.char(i) end
+bytes = table.concat(bytes)          -- "\0" and bytes above 0x7F
+local big = string.rep(bytes, 400)   -- 102400 bytes, bound as SQLT_LBI
+drop("lt_oci8_bin")
+exec("CREATE TABLE lt_oci8_bin (id NUMBER, r RAW(2000), b BLOB)")
+local sb = assert(conn:prepare("INSERT INTO lt_oci8_bin VALUES (:1, :2, :3)"))
+rpv, epv = sb:execute(1, { bytes, T.binary }, { bytes, T.binary })
+check("binary into RAW and BLOB", rpv == 1, epv)
+rpv, epv = sb:execute(2, { T.null, T.binary }, { big, T.binary })
+check("NULL with type, 102400 bytes into BLOB", rpv == 1, epv)
+sb:close()
+do
+   local cbin = assert(exec("SELECT r, b FROM lt_oci8_bin ORDER BY id"))
+   local raw, blob = cbin:fetch()
+   check("RAW: length and content", raw == bytes, raw and #raw)
+   check("BLOB: length and content", blob == bytes, blob and #blob)
+   raw, blob = cbin:fetch()
+   check("RAW NULL", raw == nil, raw and #raw)
+   check("BLOB of 102400 bytes", blob == big, blob and #blob)
+   cbin:close()
+end
+local mb = string.rep(bytes, 4096)   -- 1 MiB
+rpv, epv = conn:execute("INSERT INTO lt_oci8_bin (id, b) VALUES (3, :1)", { { mb, T.binary } })
+check("1 MiB into BLOB", rpv == 1, epv)
+check("1 MiB read back", scalar("SELECT b FROM lt_oci8_bin WHERE id = 3") == mb)
+rpv, epv = conn:execute("DECLARE x BLOB := :1; BEGIN NULL; END;",
+                        { { bytes:rep(128), T.binary } })
+check("PL/SQL with 32768 bytes: nil, msg with ORA-01460",
+      rpv == nil and tostring(epv):find("ORA%-01460") ~= nil, tostring(epv))
+rpv, epv = conn:execute("DECLARE x BLOB := :1; BEGIN NULL; END;",
+                        { { bytes:rep(128):sub(2), T.binary } })
+check("PL/SQL with 32767 bytes", rpv ~= nil, epv)
+drop("lt_oci8_bin")
+
+print("-- variable arguments and the number of placeholders")
+local s12 = assert(conn:prepare("select cast(:1 as number), cast(:2 as number) from dual"))
+ok1, a1, b1 = run(s12, 1, 2)
+check("two variable arguments", ok1 and tonumber(a1) == 1 and tonumber(b1) == 2,
+      tostring(a1) .. ", " .. tostring(b1))
+ok1, e1 = run(s12, 5)
+check("execute(1, 2), then execute(5): nil, msg",
+      not ok1 and tostring(e1):find("statement has 2 parameters, 1 given", 1, true) ~= nil,
+      tostring(e1))
+ok1, e1 = run(s12, 1, 2, 3)
+check("three for two: nil, msg",
+      not ok1 and tostring(e1):find("3 given", 1, true) ~= nil, tostring(e1))
+ok1, a1, b1 = run(s12)
+check("bindings kept after a wrong number", ok1 and tonumber(a1) == 1 and tonumber(b1) == 2,
+      tostring(a1) .. ", " .. tostring(b1))
+s12:close()
+
+local s13 = assert(conn:prepare("SELECT :a + :a FROM dual"))
+ok1, a1 = run(s13, { a = 5 })
+check("SELECT :a + :a by name: one value", ok1 and tonumber(a1) == 10, tostring(a1))
+ok1, a1 = run(s13, 5, 7)
+check("SELECT :a + :a as variable arguments: two values", ok1 and tonumber(a1) == 12,
+      tostring(a1))
+ok1, e1 = run(s13, 5)
+check("SELECT :a + :a with one variable argument: nil, msg",
+      not ok1 and tostring(e1):find("statement has 2 parameters", 1, true) ~= nil,
+      tostring(e1))
+s13:close()
+
+local s14 = assert(conn:prepare("DECLARE x NUMBER; BEGIN x := :a + :a; END;"))
+rpv, epv = s14:execute(5)
+check("PL/SQL with a repeated name: one variable argument", rpv ~= nil, epv)
+rpv, epv = s14:execute(5, 7)
+check("PL/SQL with a repeated name: two give nil, msg",
+      rpv == nil and tostring(epv):find("statement has 1 parameter, 2 given", 1, true) ~= nil,
+      tostring(epv))
+s14:close()
+
+print("-- conn:execute with parameters")
+do
+   local function first_row(...)
+      local c, ce = conn:execute(...)
+      if type(c) ~= "userdata" then return nil, ce end
+      local val = c:fetch()
+      c:close()
+      return val
+   end
+   a1, e1 = first_row("select cast(:1 as number) from dual", 41)
+   check("variable arguments", tonumber(a1) == 41, e1 or tostring(a1))
+   a1, e1 = first_row("select cast(:id as number) from dual", { id = 42 })
+   check("table by name", tonumber(a1) == 42, e1 or tostring(a1))
+   a1, e1 = first_row("select :1 || :2 from dual", { "a", "b" })
+   check("table by position", a1 == "ab", e1 or tostring(a1))
+   a1, e1 = first_row("select :1 + :2 from dual", 1)
+   check("wrong number: nil, msg",
+         a1 == nil and tostring(e1):find("statement has 2 parameters, 1 given", 1, true) ~= nil,
+         tostring(e1))
+   a1, e1 = first_row("select :1 + :2 from dual", { 1 })
+   check("table without a value for :2: ORA-01008",
+         a1 == nil and tostring(e1):find("ORA%-01008") ~= nil, tostring(e1))
+   a1, e1 = first_row("select :x from dual", { y = 1 })
+   check("unknown name: ORA-01036",
+         a1 == nil and tostring(e1):find("ORA%-01036") ~= nil, tostring(e1))
+   -- the cursor keeps the parameters until it is closed
+   local c, ce = conn:execute("select :1, :2 from dual connect by level <= 3",
+                              { "2026-11-07 12:00:00.25", T.timestamp },
+                              string.rep("y", 100))
+   check("query with parameters", type(c) == "userdata", ce)
+   if type(c) == "userdata" then
+      for _ = 1, 3 do collectgarbage("collect") end
+      local t, s = c:fetch()
+      check("parameters kept by the cursor",
+            t == "2026-11-07 12:00:00.250000" and s == string.rep("y", 100), tostring(t))
+      c:close()
+   end
+   drop("lt_oci8_ce")
+   exec("CREATE TABLE lt_oci8_ce (id NUMBER, s VARCHAR2(10))")
+   rpv, epv = conn:execute("INSERT INTO lt_oci8_ce VALUES (:1, :2)", 1, "x")
+   check("DML with variable arguments", rpv == 1, epv)
+   rpv, epv = conn:execute("INSERT INTO lt_oci8_ce VALUES (:id, :s)", { id = 2, s = T.null })
+   check("DML with a table", rpv == 1, epv)
+   check("two rows", tonumber(scalar("SELECT COUNT(*) FROM lt_oci8_ce")) == 2)
+   drop("lt_oci8_ce")
+   r7, e7 = pcall(conn.execute, conn, "select 1 from dual", print)
+   check("invalid parameter raises an error",
+         not r7 and tostring(e7):find("cannot be bound", 1, true) ~= nil, tostring(e7))
+   a1, e1 = first_row("select 7 from dual")
+   check("without parameters as before", tonumber(a1) == 7, e1 or tostring(a1))
+end
 
 print("-- TIMESTAMP WITH LOCAL TIME ZONE follows the session time zone")
 local ltz_instants = { "2026-07-19 13:45:30 Europe/Berlin", "2026-12-19 13:45:30 Europe/Berlin" }

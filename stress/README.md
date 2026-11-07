@@ -222,7 +222,7 @@ The steps and scenarios run in this order. *Admin connection* tells whether a sc
 
 Possible further scenarios, not covered yet:
 
-- Named parameters (`stmt:execute{ name = {value, type} }`): `luasql.oci8` binds them by name, but the suite tests positional parameters only.
+- Named parameters beyond one placeholder: `params` binds one name in several spellings and then by position, but not several names, nor a name that occurs twice in the SQL.
 - A network interruption that is not a killed session, e.g. a stopped listener or a cut connection during a long fetch.
 
 
@@ -231,11 +231,11 @@ Possible further scenarios, not covered yet:
 LuaSQL reports an error in one of two ways, as section [Error handling](https://lunarmodules.github.io/luasql/manual.html#errors) of the LuaSQL manual says. The suite checks every error it provokes against this convention, also for the functions that the manual does not describe (prepared statements, parameters, `setoption` and `getoption`):
 
 - **An error of the database** returns `nil` and a message. This is every error the DBMS or its client library reports: SQL, constraints, locks, a lost connection, a value the client library cannot convert, a column type the driver cannot fetch.
-- **A misuse of the API** raises an error whose message contains `LuaSQL:`: a call on a closed object (except `close`); a parameter table that is not valid (positional and named keys mixed, a key that is neither a string nor a positive integer, a parameter that is not a pair `{value, type}`, an unknown type constant, a value that does not match its type); `stmt:execute` or `stmt:reset` while a cursor of the statement is open; `setoption` or `getoption` with an unknown option or an invalid value. An argument of the wrong Lua type, e.g. a number as parameter table, raises an error as well; its message may come from the argument check of Lua, without `LuaSQL:`.
+- **A misuse of the API** raises an error whose message contains `LuaSQL:`: a call on a closed object (except `close`); a parameter that is not valid, in a table or as variable argument (positional and named keys mixed, a key that is neither a string nor a positive integer, a table that is no pair `{value, type}`, an unknown type constant, a value that does not match its type, a Lua value that cannot be bound such as a function); `stmt:execute` or `stmt:reset` while a cursor of the statement is open; `setoption` or `getoption` with an unknown option or an invalid value. An argument of the wrong Lua type raises an error as well; its message may come from the argument check of Lua, without `LuaSQL:`.
 - **`close`** of an environment, connection, cursor or statement never raises an error. If it cannot close the object, because the object is already closed or still has open cursors, statements or connections, it returns `false` and a message.
 - **`commit`, `rollback` and `setautocommit`** return `false` and a message when they fail, e.g. on a killed session.
 
-A result that breaks the convention fails the test, even if the call fails for the right reason: `false` instead of `nil`, an error raised instead of returned, or the other way round. Some misuses, e.g. more parameters than placeholders, are found either by the driver (an error raised) or only by the DBMS (`nil` and its message); with `luasql.oci8` it is OCI, and the scenarios expect `nil` and `ORA-01036`. Most of these checks are in [`errorPaths`](doc/errorPaths.md), [`params`](doc/params.md), [`connectionLifecycle`](doc/connectionLifecycle.md) and [`connectionLoss`](doc/connectionLoss.md).
+A result that breaks the convention fails the test, even if the call fails for the right reason: `false` instead of `nil`, an error raised instead of returned, or the other way round. A wrong number of parameters and an unknown parameter name give `nil` and a message, whoever finds them, because they depend on the SQL: with `luasql.oci8` OCI reports too many parameters in a table (`ORA-01036`) and a placeholder without a value (`ORA-01008`), the driver a wrong number of variable arguments. Most of these checks are in [`errorPaths`](doc/errorPaths.md), [`params`](doc/params.md), [`connectionLifecycle`](doc/connectionLifecycle.md) and [`connectionLoss`](doc/connectionLoss.md).
 
 
 ## DBMS-Specific Notes
