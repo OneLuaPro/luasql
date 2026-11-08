@@ -286,8 +286,6 @@ return {
    dmlValueError = { "ORA%-06502", "ORA%-01722" },
    -- Known limitations of the params scenario, with their reasons.
    paramsLimits = {
-      partialParams = "unbound placeholders keep their last value"
-         .. " (OCI); use stmt:reset()",
       failedBindKeeps = "a failed execute keeps the bindings made before"
          .. " the error (OCI binds one by one)",
    },

@@ -15,7 +15,8 @@
 --   keepAfterBind    after a bind, execute() and execute({}) run with
 --                    the values bound last; execute(nil) binds NULL,
 --                    which execute() then keeps
---   partialParams    a table without all placeholders
+--   partialParams    a table with only some of the placeholders binds
+--                    only these; the others keep their values
 --   tooManyFresh     too many parameters give nil and the error of the
 --                    DBMS, the statement works afterwards
 --   failedBindKeeps  too many parameters after a bind: what the failed
@@ -259,8 +260,9 @@ local function keepAfterBindCase(ctx)
                "execute() after nil")
 end
 
--- Two placeholders bound, then a table with only the first. A clean
--- error is fine; the old value of the second is a limit.
+-- Two placeholders bound, then a table with only the first: it binds
+-- only the first, the second keeps its value, as LuaSQL defines it for
+-- all drivers.
 local function partialParamsCase(ctx)
    local int = ctx.types.int
    local stmt = prepareCase(ctx, ctx.backend.paramsPairQuery)
@@ -270,17 +272,10 @@ local function partialParamsCase(ctx)
           string.format("bind both: got %s, %s", describe(row[1]),
                         describe(row[2])))
    cur, err = stmt:execute({ { 3, int } })
-   if cur == nil then
-      expectNil("bind first only", cur, err)
-      return
-   end
-   row = fetchRow(cur)
-   if row[1] == 3 and row[2] == 2 then
-      return "limit", limitReason(ctx, "partialParams",
-                                  "unbound placeholders keep their value")
-   end
-   error(string.format("bind first only: got %s, %s", describe(row[1]),
-                       describe(row[2])), 0)
+   row = fetchRow(check(cur, err, "bind first only"))
+   expect(row[1] == 3 and row[2] == 2,
+          string.format("bind first only: expected 3, 2, got %s, %s",
+                        describe(row[1]), describe(row[2])))
 end
 
 local function tooManyFreshCase(ctx)

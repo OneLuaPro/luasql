@@ -250,7 +250,6 @@ Tested with Oracle AI Database 26ai Free 23.26.3 on Windows 10, with the `luasql
 
 | Scenario       | Test                                                         | Limitation                                                   |
 | -------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| `params`       | `partialParams`                                              | unbound placeholders keep their last value (OCI); use `stmt:reset()` |
 | `params`       | `failedBindKeeps`                                            | a failed execute keeps the bindings made before the error (OCI binds one by one) |
 | `prefetch`     | `maxValue`                                                   | with prefetch 2147483647, OCI cannot allocate the buffer (`ORA-01019`): it allocates it for the full prefetch value at every query, independent of the size of the result; the server cursor of the failed execute stays open until the session ends |
 | `prefetch`     | `errorMidBlock`                                              | if a row of a result fails, OCI drops the prefetched rows of the block that contains it: fewer rows come before the error, e.g. 100 instead of 149 with prefetch 100 |
