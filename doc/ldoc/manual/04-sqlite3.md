@@ -153,8 +153,10 @@ Two consequences are worth knowing:
   when it succeeds.
 - `conn:setautocommit(false)` begins a transaction. `conn:commit()` and
   `conn:rollback()` end it and begin the next one, so with autocommit off a
-  transaction is always open. Calling `setautocommit(false)` again does
-  nothing.
+  transaction is always open. If the driver cannot begin the next one,
+  `commit` and `rollback` still return `true`, since the data is committed
+  or rolled back; the next execute begins it. Calling
+  `setautocommit(false)` again does nothing.
 - `conn:setautocommit(true)` rolls back an open transaction.
 - `conn:close()`, the garbage collector and a to-be-closed variable roll
   back an open transaction (SQLite does it when the database is closed).

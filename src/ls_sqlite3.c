@@ -1544,8 +1544,10 @@ commit fails and SQLite has ended the transaction itself (it rolls back
 the whole transaction after some errors, see the
 @{04-sqlite3.md|SQLite topic}), a new transaction begins as well; if the
 transaction is still open (e.g. the database is busy), it stays open and
-the commit can be tried again. With autocommit on there is no
-transaction, and SQLite reports an error.
+the commit can be tried again. If the driver cannot begin the new
+transaction after a successful commit, the result is still `true`: the
+data is committed, and the next execute begins the transaction. With
+autocommit on there is no transaction, and SQLite reports an error.
 @function commit
 @treturn[1] boolean `true`
 @treturn[2] boolean `false`
@@ -1565,8 +1567,11 @@ static int conn_commit(lua_State *L)
 	(void) sqlite3_exec(conn->sql_conn, "BEGIN", NULL, NULL, NULL);
       return 2;
     }
-  if (conn->auto_commit == 0 && !tx_exec(L, conn, "BEGIN"))
-    return 2;
+  /* the data is committed: a failed BEGIN does not make it false (a
+     program would repeat the work); the next execute begins the
+     transaction (step_vm) */
+  if (conn->auto_commit == 0)
+    (void) sqlite3_exec(conn->sql_conn, "BEGIN", NULL, NULL, NULL);
   lua_pushboolean(L, 1);
   return 1;
 }
@@ -1578,8 +1583,10 @@ Rolls back the current transaction.
 
 With autocommit off, a new transaction begins after the rollback. If no
 transaction is open (SQLite has already rolled it back, e.g. after an
-error), only the new one begins, and the result is `true`. With autocommit
-on there is no transaction, and SQLite reports an error.
+error), only the new one begins, and the result is `true`. If the driver
+cannot begin the new transaction, the result is still `true`; the next
+execute begins it. With autocommit on there is no transaction, and SQLite
+reports an error.
 @function rollback
 @treturn[1] boolean `true`
 @treturn[2] boolean `false`
@@ -1601,8 +1608,9 @@ static int conn_rollback(lua_State *L)
     {
       if (tx_open(conn) && !tx_exec(L, conn, "ROLLBACK"))
 	return 2;
-      if (!tx_exec(L, conn, "BEGIN"))
-	return 2;
+      /* rolled back: a failed BEGIN does not change that; the next
+	 execute begins the transaction (step_vm) */
+      (void) sqlite3_exec(conn->sql_conn, "BEGIN", NULL, NULL, NULL);
     }
   lua_pushboolean(L, 1);
   return 1;
