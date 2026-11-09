@@ -19,11 +19,17 @@
 --                        in turn with different binds
 --   interleavedLobs      temporary CLOBs on 2 connections in turn
 --   readConsistency      a cursor keeps its rows while another session
---                        deletes them and commits
+--                        deletes them and commits; a limit if the DBMS
+--                        rejects the delete while the reader is open
+--                        (backend.concurrencyLimits.readerBlocksWriter)
 --   lockNowait           a row locked by A: NOWAIT in B fails cleanly,
---                        works after A's rollback
+--                        B can lock another row, works after A's
+--                        rollback; a limit if the DBMS locks the whole
+--                        database (concurrencyLimits.databaseLock)
 --   lockWaitTimeout      the same with WAIT 1: a clean error after
---                        about a second, no hang
+--                        about a second, no hang; the wait may be set
+--                        on B first (backend.concLockWaitSetup, e.g. a
+--                        busy timeout)
 --   lockReleasedOnClose  closing A releases its lock
 --   lockReleasedOnGc     so does collecting A
 --
@@ -55,6 +61,10 @@ local interleaveRows = 3
 -- which the case counts as hanging.
 local lockWaitSeconds = 1
 local hangSeconds = 10
+
+-- With a wait time set by backend.concLockWaitSetup, the wait must
+-- take at least this share of it (the timer of the DBMS is not exact).
+local minWaitShare = 0.8
 
 -- Full GC cycles at most until a connection is collected.
 local maxGcCycles = 8
@@ -248,8 +258,20 @@ local function interleavedLobsCase(ctx)
    end
 end
 
+-- The limit of backend.concurrencyLimits[name] if err matches its
+-- error, else nil.
+local function knownLimit(ctx, name, err)
+   local limit = (ctx.backend.concurrencyLimits or {})[name]
+   if limit and tostring(err):find(limit.error) then
+      return limit
+   end
+   return nil
+end
+
 -- B reads part of the table, A deletes all rows and commits, B must
--- still get every row: a query sees the data as of its start.
+-- still get every row: a query sees the data as of its start. A DBMS
+-- whose readers block writers (concurrencyLimits.readerBlocksWriter)
+-- rejects the delete instead; B must then get every row as well.
 local function readConsistencyCase(ctx)
    local backend = ctx.backend
    local reader = openTracked(ctx)
@@ -263,14 +285,24 @@ local function readConsistencyCase(ctx)
    local count = check(value, err, "count rows")
    expect(tonumber(count) == backend.concRows, "unexpected row count "
           .. tostring(count))
-   check(dbutil.exec(writer, backend.concDeleteAll))   -- autocommit on
+   local ok, deleteErr = dbutil.exec(writer, backend.concDeleteAll)
+   local limit
+   if not ok then   -- autocommit on
+      limit = knownLimit(ctx, "readerBlocksWriter", deleteErr)
+      check(limit, deleteErr, "delete")
+   end
    for r = first + 1, backend.concRows do
       expectRow(cur, r, "row " .. r .. " after the delete")
    end
    expectEnd(cur, "after the delete")
    resetTable(ctx)
+   if limit then
+      return "limit", limit.reason
+   end
 end
 
+-- A DBMS that locks the whole database instead of rows
+-- (concurrencyLimits.databaseLock) does not let B lock another row.
 local function lockNowaitCase(ctx)
    local a, b = openTracked(ctx), openTracked(ctx)
    check(a:setautocommit(false))
@@ -280,14 +312,28 @@ local function lockNowaitCase(ctx)
    expectNil("lock held by another session", ok, err,
              ctx.backend.lockBusyError)
    -- B works on: another row can be locked.
-   check(tryLock(ctx, b, 2))
+   local limit
+   ok, err = tryLock(ctx, b, 2)
+   if not ok then
+      limit = knownLimit(ctx, "databaseLock", err)
+      check(limit, err, "lock another row")
+   end
    check(a:rollback())
    check(tryLock(ctx, b, 1))
    check(b:rollback())
+   if limit then
+      return "limit", limit.reason
+   end
 end
 
+-- With backend.concLockWaitSetup (%d: milliseconds) B sets its wait
+-- time first, e.g. a busy timeout; B must then wait about that long.
 local function lockWaitTimeoutCase(ctx)
    local a, b = openTracked(ctx), openTracked(ctx)
+   local setup = ctx.backend.concLockWaitSetup
+   if setup then
+      check(dbutil.exec(b, string.format(setup, lockWaitSeconds * 1000)))
+   end
    check(a:setautocommit(false))
    check(b:setautocommit(false))
    lockRow(ctx, a, 1)
@@ -302,6 +348,11 @@ local function lockWaitTimeoutCase(ctx)
              ctx.backend.lockTimeoutError)
    expect(seconds < hangSeconds, string.format(
           "the lock wait took %.1f s", seconds))
+   if setup then
+      expect(seconds >= lockWaitSeconds * minWaitShare, string.format(
+             "the lock wait took %.2f s, expected about %d s", seconds,
+             lockWaitSeconds))
+   end
    check(a:rollback())
    check(b:rollback())
 end

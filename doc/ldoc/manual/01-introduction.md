@@ -7,9 +7,10 @@ the results row by row. This is the documentation of LuaSQL for
 [LuaSQL](https://github.com/lunarmodules/luasql) of the Lunar Modules
 project.
 
-So far it covers the Oracle driver `luasql.oci8`, which has been reworked
-for OneLuaPro and tested in depth. The other drivers follow the same API;
-their documentation will be added here.
+So far it covers the Oracle driver `luasql.oci8` and the SQLite driver
+`luasql.sqlite3`, which have been reworked for OneLuaPro and tested in
+depth. The other drivers follow the same API; their documentation will be
+added here.
 
 ## Objects
 
@@ -17,7 +18,7 @@ Every driver works with the same four kinds of objects:
 
 <table>
 <tr><th>Object</th><th>Created by</th><th>Purpose</th></tr>
-<tr><td>environment</td><td><code>driver.oci8()</code></td><td>holds the client library of the driver; opens connections</td></tr>
+<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code></td><td>holds the client library of the driver; opens connections</td></tr>
 <tr><td>connection</td><td><code>env:connect(...)</code></td><td>a session on the database server; runs statements and controls transactions</td></tr>
 <tr><td>cursor</td><td><code>conn:execute(...)</code>, <code>stmt:execute(...)</code></td><td>the rows of a query, read one by one</td></tr>
 <tr><td>statement</td><td><code>conn:prepare(...)</code></td><td>a prepared statement, executed many times with parameters</td></tr>
@@ -95,11 +96,11 @@ like a failure at the database.
 
 The functions without a result of their own, `close`, `commit`, `rollback`
 and `setautocommit`, never raise an error for a failure: they return `true`,
-or `false` and a message, e.g. for a `commit` that Oracle refuses. `close`
-returns `false` only if the object is already closed or still has open
-objects of its own (cursors, statements, connections); an error of Oracle
-while releasing the object is ignored, and the object is closed all the
-same.
+or `false` and a message, e.g. for a `commit` that the database refuses.
+`close` returns `false` only if the object is already closed or still has
+open objects of its own (cursors, statements, connections); an error of the
+client library while releasing the object is ignored, and the object is
+closed all the same.
 
 ## Closing
 
@@ -133,6 +134,23 @@ code without an error message come first.
   Oracle, which commits it at logoff.
 - **oci8: text is always UTF-8.** The client character set is AL32UTF8,
   independent of `NLS_LANG`; LuaSQL uses the character set of `NLS_LANG`.
+- **sqlite3: a wrong number of parameters and an unknown parameter name
+  return `nil` and a message**; LuaSQL raises an error. Code that does not
+  check the result goes on without noticing.
+- **sqlite3: `true` is bound as 1**; LuaSQL binds it as 0.
+- **sqlite3: with autocommit off, statements after an error with which
+  SQLite rolls back the whole transaction** (e.g. `database or disk is
+  full`, `ON CONFLICT ROLLBACK`) **need `conn:commit()`**, and so do
+  statements after a commit that fails for this reason: the driver begins a
+  new transaction. LuaSQL goes on without a transaction, so each following
+  statement is committed at once and cannot be rolled back.
+- **sqlite3: the module `unicode` of sqlean, if the build of sqlean has
+  it, replaces `lower`, `upper`, `LIKE` and the collation `NOCASE`** with
+  versions that know the case of all letters, not only of ASCII. An index
+  with `COLLATE NOCASE` that holds non-ASCII letters and was built without
+  it no longer matches (see the @{04-sqlite3.md|SQLite topic}).
+- **sqlite3: statements other than `INSERT`, `UPDATE` and `DELETE` return
+  0**; LuaSQL returns the count of the last `INSERT`, `UPDATE` or `DELETE`.
 
 **Other changes**
 
@@ -149,18 +167,43 @@ code without an error message come first.
       closed.
 - **oci8: `conn:execute(sql, ...)` binds further arguments as parameters**;
   LuaSQL ignores them.
+- **sqlite3: transactions:**
+    - The message of an error with which SQLite rolls back the whole
+      transaction ends with `(LuaSQL: SQLite rolled back the transaction)`.
+    - `conn:rollback()` with autocommit off returns `true` if SQLite has
+      already rolled back; LuaSQL returns `nil` and a message.
+    - `conn:setautocommit(false)` while autocommit is off does nothing and
+      returns `true`; LuaSQL raises an error.
+    - `conn:setautocommit(true)` returns `false` and a message if the
+      rollback fails, and autocommit stays off; LuaSQL ignores the failure.
+- **sqlite3: positional and named keys in one table of parameters** raise
+  an error; LuaSQL accepts them.
+- **sqlite3: an SQL text without a statement** (`""`, `";"`, a comment)
+  returns 0; LuaSQL returns `nil` and `"not an error"`.
+- **sqlite3: an empty result** closes the cursor at the first `fetch`, which
+  returns `nil`; LuaSQL returns a row of `nil` values and closes the cursor
+  only at the second `fetch`.
+- **sqlite3: `env:close()` with open connections** returns `false` and a
+  message, and a to-be-closed connection or environment with open objects
+  stays open, as with `close`; LuaSQL closes them all the same.
+- **sqlite3: `cur:getcoltypes()`** gives `""` for a column without a
+  declared type; LuaSQL leaves a gap in the list.
 
 **Extensions**
 
-- Prepared statements for oci8: `conn:prepare` and statement objects (upstream
-  pull request [#209](https://github.com/lunarmodules/luasql/pull/209),
-  extended).
+- Prepared statements for oci8 and sqlite3: `conn:prepare` and statement
+  objects (upstream pull request
+  [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
 - `luasql.type` with the pairs `{value, type}`, `T.null` (a special value),
   `T.binary`, fixed forms for dates and times, `{T.null, type}`.
 - Plain Lua values and variable arguments as parameters, also for
   `conn:execute`.
 - The additions of oci8 in the @{03-oracle.md|Oracle topic}: options
   `numbers` and `prefetch`, data types, threads.
+- The additions of sqlite3 in the @{04-sqlite3.md|SQLite topic}: the
+  functions of sqlean on every connection, names of parameters without a
+  prefix (`id` for `:id`) and `?NNN` as a name, dates and times checked
+  against the calendar.
 
 ## Where to Go Next
 
@@ -168,5 +211,8 @@ code without an error message come first.
   how they stay bound.
 - @{03-oracle.md|Oracle}: setup of the driver, data types, transactions,
   threads and the behavior of Oracle worth knowing.
-- The reference of the module @{luasql.oci8} with every function.
+- @{04-sqlite3.md|SQLite}: connecting, data types, the functions of sqlean,
+  transactions and the behavior of SQLite worth knowing.
+- The reference of the modules @{luasql.oci8} and @{luasql.sqlite3} with
+  every function.
 - The examples, ready to run against your own database.

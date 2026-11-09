@@ -5,7 +5,8 @@ many times with different values. The values are not part of the SQL text,
 so they need no quoting and cannot change the statement (no SQL injection).
 Prepared statements come from upstream pull request
 [#209](https://github.com/lunarmodules/luasql/pull/209) of LuaSQL; so far the
-Oracle driver offers them. `conn:execute` takes parameters in the same way.
+Oracle and the SQLite driver offer them. `conn:execute` takes parameters in
+the same way.
 
 ## Placeholders and Parameters
 
@@ -78,7 +79,7 @@ values in it; placeholders not in it keep their value (see below).
 `conn:execute(sql, ...)` takes parameters in the same forms; without further
 arguments it binds nothing. It prepares the statement at each call, so a
 table binds only the values in it and a placeholder without a value gives
-`ORA-01008`.
+`ORA-01008` in Oracle and is NULL in SQLite.
 
 ## Names and Positions
 
@@ -105,8 +106,17 @@ cur:close()
   portable code binds such statements by name.
 - An unknown name gives `ORA-01036`, a placeholder without a value
   `ORA-01008`, both as `nil` and a message.
+- In SQLite, a name without a prefix gets `:` (`id` binds to `:id`), and a
+  name with a prefix (`[":id"]`, `["@id"]`, `["$id"]`, `["?3"]`) is used as
+  it is. Case matters, and `:id`, `@id` and `$id` are three different
+  parameters. An unknown name gives `nil` and a message; a placeholder
+  without a value is NULL. See the @{04-sqlite3.md|SQLite topic}.
 
 ## Types
+
+How a type is stored depends on the database. The table shows Oracle; the
+@{04-sqlite3.md|SQLite topic} shows SQLite, which has no date and no
+boolean type.
 
 <table>
 <tr><th>Type</th><th>Lua value</th><th>Bound as</th></tr>
@@ -128,7 +138,8 @@ exactly into `BINARY_DOUBLE` columns and give an error for `NUMBER` columns
 (`ORA-01426`, `ORA-03087`).
 
 Dates and times have one fixed form, the same in all drivers of LuaSQL;
-dates and timestamps can have a minus sign for years before Christ. A value
+in Oracle, dates and timestamps can have a minus sign for years before
+Christ. A value
 read from a `DATE` or `TIMESTAMP` column can be bound back unchanged. A date
 in another form gives `nil` and a message. A plain string for a `DATE` column
 is converted by Oracle with the session setting `NLS_DATE_FORMAT` instead
@@ -144,7 +155,8 @@ way; in PL/SQL and SQL functions the limit is 32767 bytes (see the
 
 A value bound to a placeholder stays bound to the statement until the
 placeholder is bound again, `stmt:reset()` is called or the statement is
-closed. This is how OCI works, and the ODBC driver of LuaSQL does the same.
+closed. This is how OCI and SQLite work, and the ODBC driver of LuaSQL does
+the same.
 
 - `stmt:execute()`, without parameters, runs the statement again with the
   values bound last. A statement without placeholders needs no parameters at
@@ -153,7 +165,7 @@ closed. This is how OCI works, and the ODBC driver of LuaSQL does the same.
   keep the value bound last.
 - Variable arguments bind all placeholders, as their number must match.
 - `stmt:reset()` drops all bound values. Afterwards, a placeholder without a
-  value gives `ORA-01008`.
+  value gives `ORA-01008` in Oracle and is NULL in SQLite.
 
 ```lua
 local stmt = assert(conn:prepare("SELECT :1 * 2 FROM dual"))
@@ -171,9 +183,11 @@ print(stmt:execute())   --> nil   LuaSQL: ORA-01008: ...
 stmt:close()
 ```
 
-If an execute fails while binding, e.g. with a date in a wrong format, the
-parameters bound before the error stay bound. Call `stmt:reset()` if a
-statement must start from a clean state.
+If an execute fails while binding in Oracle, e.g. with a date in a wrong
+format, the parameters bound before the error stay bound. Call
+`stmt:reset()` if a statement must start from a clean state. The SQLite
+driver checks names, positions and dates of all parameters before it binds
+the first one, so after such an error nothing of that execute is bound.
 
 ## Cursors of a Statement
 

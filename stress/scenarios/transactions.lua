@@ -20,7 +20,9 @@
 --   stmtAcrossCommit     a prepared statement stays usable across
 --                        commit() and rollback()
 --   rowCounts            row counts of INSERT, UPDATE, DELETE, also 0
---   rowCountType         row counts are integers
+--   rowCountType         row counts are integers; floats with an
+--                        integral value are a limit if the backend says
+--                        so (backend.rowCountFloat)
 --   plsqlAutocommit      a PL/SQL block with DML is committed
 --   closeOpen            conn:close() with an open transaction rolls it
 --                        back
@@ -101,6 +103,18 @@ end
 
 local function rollback(conn)
    local ok, err = conn:rollback()
+   check(ok, err, "rollback")
+end
+
+-- rollback() to make sure no transaction is open: in autocommit mode
+-- some drivers report that there is none (false and a message that
+-- matches backend.noTransactionError), which is fine here.
+local function rollbackIfOpen(ctx, conn)
+   local ok, err = conn:rollback()
+   local pattern = ctx.backend.noTransactionError
+   if ok or (ok == false and pattern and tostring(err):find(pattern)) then
+      return
+   end
    check(ok, err, "rollback")
 end
 
@@ -332,9 +346,18 @@ local function rowCountType(ctx)
    if not ok then
       error(fromStatement, 0)
    end
+   local floats = false
    for _, value in ipairs({ fromExecute, fromStatement }) do
-      expect(math.type(value) == "integer", "row count is a "
-                .. (math.type(value) or type(value)))
+      if math.type(value) == "float" and ctx.backend.rowCountFloat
+         and math.tointeger(value) then
+         floats = true
+      else
+         expect(math.type(value) == "integer", "row count is a "
+                   .. (math.type(value) or type(value)))
+      end
+   end
+   if floats then
+      return "limit", ctx.backend.rowCountFloat
    end
 end
 
@@ -445,7 +468,7 @@ end
 -- No open transaction, autocommit on, empty table. Raises an error on
 -- failure.
 local function resetState(ctx)
-   rollback(ctx.testConn)
+   rollbackIfOpen(ctx, ctx.testConn)
    setAutocommit(ctx.testConn, true)
    exec(ctx.testConn, ctx.backend.txDeleteAll, "clear table")
 end
@@ -567,12 +590,12 @@ local function checkTransactionCounter(ctx)
    end
    local conn = ctx.testConn
    local ok, result = pcall(function()
-      local sql = string.format(counter.query, phases.sessionId(ctx))
+      local sid = phases.sessionId(ctx)
       setAutocommit(conn, false)
       insertRow(ctx, conn, -1)
-      local open = countRows(ctx.adminConn, sql)
+      local open = phases.readCounter(ctx, counter, sid)
       rollback(conn)
-      local closed = countRows(ctx.adminConn, sql)
+      local closed = phases.readCounter(ctx, counter, sid)
       return open == 1 and closed == 0
    end)
    pcall(rollback, conn)

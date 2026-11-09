@@ -780,7 +780,7 @@ function numrows()
 end
 
 ---------------------------------------------------------------------
--- Test prepared statements (OCI8 specific for now)
+-- Test prepared statements (oci8 and sqlite3 for now)
 ---------------------------------------------------------------------
 function prepared_statements_test ()
 	local luasql_type = luasql.type
@@ -968,7 +968,7 @@ tests = {
 	{ "finalization", finalization },
 }
 
-if driver == "oci8" then
+if driver == "oci8" or driver == "sqlite3" then
 	table.insert(tests, 2, { "type constants", type_constants_test })
 	table.insert(tests, 4, { "prepared statements", prepared_statements_test })
 end

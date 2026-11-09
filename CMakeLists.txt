@@ -118,6 +118,11 @@ set(SQLITE3_INCLUDE_DIR "${LIBLUA_INCLUDEDIR}"
   CACHE PATH "Path to sqlite3 header")
 set(SQLITE3_LIBRARY "${LIBLUA_LIBDIR}/sqlean.lib"
   CACHE FILEPATH "sqlite3 lib")
+# SQLITE3_LIBRARY is sqlean.lib, SQLite with the extensions of sqlean: the
+# driver registers the sqlean functions on every connection. Turn it off
+# for a plain SQLite library.
+option(LUASQL_SQLITE3_SQLEAN
+  "sqlite3: register the sqlean functions (needs sqlean.lib)" ON)
 set(MYSQL_INCLUDE_DIR "${LIBLUA_INCLUDEDIR}/mariadb"
   CACHE PATH "Path to mysql.h")
 set(MYSQL_LIBRARY "${LIBLUA_LIBDIR}/mariadb/mariadbclient.lib"
@@ -245,6 +250,9 @@ add_luasql_driver(odbc "src/ls_odbc.c" "" "odbc32.lib")
 message(STATUS "Configuring LuaSQL-SQLite3...")
 add_luasql_driver(sqlite3 "src/ls_sqlite3.c"
   "${SQLITE3_INCLUDE_DIR}" "${SQLITE3_LIBRARY}")
+if(LUASQL_SQLITE3_SQLEAN)
+  target_compile_definitions(luasql_sqlite3 PRIVATE LUASQL_SQLITE3_SQLEAN)
+endif()
 message(STATUS "Configuring LuaSQL-MySQL...")
 add_luasql_driver(mysql "src/ls_mysql.c"
   "${MYSQL_INCLUDE_DIR}" "${MYSQL_LIBRARY}")

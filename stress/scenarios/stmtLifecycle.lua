@@ -15,6 +15,10 @@
 --   rebindNumber  one statement, binds int, number and null in turn
 --   rebindString  one statement, binds strings of changing length and
 --                 null in turn
+--   closeRelease  one statement, its cursor closed after one row or left
+--                 to the GC; with the statement still open, the server
+--                 counters must be as after a cursor read to its end
+--                 (with SQLite: no lock left on the file)
 --   gcClose       prepare, execute, drop both; only the GC closes them
 --   clobRead      one statement, temporary CLOBs of changing length and
 --                 NULL in turn
@@ -51,6 +55,10 @@ local iterations = {
 -- up to about twice this number is open on the server at a time. Must
 -- stay well below the server's cursor limit.
 local gcEvery = 10
+
+-- Phase closeRelease compares the server counters with its baseline
+-- every this many iterations (a check takes a few queries).
+local releaseCheckEvery = 25
 
 -- Non-ASCII text for string binds: a-umlaut, o-umlaut, u-umlaut, euro.
 local utf8Text = "\u{E4}\u{F6}\u{FC}\u{20AC}"
@@ -265,6 +273,57 @@ local function rebindStringStep(ctx, i, stmt)
    expectValue(fetchSingle(execute(stmt, { param })), expected)
 end
 
+-- Phase closeRelease: one statement, read to its end once in setup; the
+-- server counters then are the baseline. Every step closes a cursor
+-- after one row, or leaves it to the GC (every 3rd); every
+-- releaseCheckEvery steps, with the statement still open, the counters
+-- must be back at the baseline. The counters before and after a phase
+-- cannot show this, finish closes the statement first.
+local function setupCloseRelease(ctx)
+   local stmt = prepareMultiRowQuery(ctx)
+   local cur = execute(stmt, { { 10, ctx.types.int } })
+   local row = cur:fetch({})
+   while row ~= nil do
+      row = cur:fetch({})
+   end
+   local snapshot = phases.snapshot(ctx)
+   return { stmt = stmt, baseline = snapshot and snapshot.counters }
+end
+
+-- Opens a cursor of the statement, reads one row and drops it.
+local function dropCursor(ctx, stmt)
+   local cur = execute(stmt, { { 10, ctx.types.int } })
+   check(cur:fetch({}), nil, "fetch")
+end
+
+local function closeReleaseStep(ctx, i, shared)
+   if i % 3 == 0 then
+      dropCursor(ctx, shared.stmt)
+      dbutil.scrubStack()
+      collectgarbage("collect")
+   else
+      local cur = execute(shared.stmt, { { 10, ctx.types.int } })
+      check(cur:fetch({}), nil, "fetch")
+      local ok, err = cur:close()
+      check(ok, err, "close cursor")
+   end
+   if shared.baseline and i % releaseCheckEvery == 0 then
+      local now = phases.snapshot(ctx).counters
+      for k, counter in ipairs(ctx.backend.serverCounters) do
+         if now[k] > shared.baseline[k] then
+            error(string.format("%s %d -> %d with the statement open and"
+                                .. " its cursor %s", counter.label,
+                                shared.baseline[k], now[k],
+                                i % 3 == 0 and "collected" or "closed"), 0)
+         end
+      end
+   end
+end
+
+local function finishCloseRelease(_, shared)
+   closeStatement(shared.stmt)
+end
+
 local function gcCloseStep(ctx, i)
    -- Both statement and cursor are dropped right away.
    execute(prepareBindQuery(ctx), { { i, ctx.types.int } })
@@ -384,6 +443,8 @@ local phaseList = {
      step = rebindNumberStep, finish = finishStatement },
    { name = "rebindString", setup = prepareStringQuery,
      step = rebindStringStep, finish = finishStatement },
+   { name = "closeRelease", setup = setupCloseRelease,
+     step = closeReleaseStep, finish = finishCloseRelease },
    { name = "gcClose", step = gcCloseStep },
    { name = "clobRead", precheck = dbutil.checkTempLobs,
      setup = prepareClobQuery, step = clobReadStep,

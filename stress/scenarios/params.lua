@@ -11,7 +11,10 @@
 --
 -- Cases, each runs once:
 --   neverBound       execute() before any bind gives nil and the error
---                    of the DBMS
+--                    of the DBMS, or NULL, a limit, for a DBMS that
+--                    takes such a placeholder as NULL
+--                    (backend.paramsLimits.unboundIsNull; also in
+--                    resetClears, resetOpenCursor and phase argCount)
 --   keepAfterBind    after a bind, execute() and execute({}) run with
 --                    the values bound last; execute(nil) binds NULL,
 --                    which execute() then keeps
@@ -66,7 +69,9 @@
 --   connDml         conn:execute of a statement that is not a query,
 --                   with a timestamp and a number; every 5th fails
 --   spellings       one named placeholder bound as a, :a, A and by
---                   position, in turn
+--                   position, in turn; A is an unknown name (nil and a
+--                   message) where names are case sensitive
+--                   (backend.namesCaseSensitive)
 --
 -- Skipped if the driver has no prepare() or the backend lacks a query;
 -- cases and phases that need another backend key are skipped without
@@ -232,6 +237,21 @@ local function limitReason(ctx, name, generic)
    return (ctx.backend.paramsLimits or {})[name] or generic
 end
 
+-- What an execute with placeholders that never got a value gives: nil
+-- and the error of the DBMS (backend.missingParamsError), or, if the
+-- DBMS takes them as NULL (backend.paramsLimits.unboundIsNull), a row
+-- of NULL. Returns true for the NULL row, which the caller reports as a
+-- limit.
+local function expectUnbound(ctx, what, cur, err)
+   if not limitReason(ctx, "unboundIsNull") then
+      expectNil(what, cur, err, ctx.backend.missingParamsError)
+      return false
+   end
+   local row = fetchRow(check(cur, err, what))
+   expect(row[1] == nil, what .. ": expected NULL, got " .. describe(row[1]))
+   return true
+end
+
 -- Cases. Each returns nothing for a pass, or "limit" and the reason;
 -- raises an error on failure. ctx.stmts collects the statements, which
 -- are closed after the case.
@@ -245,7 +265,9 @@ end
 local function neverBoundCase(ctx)
    local stmt = prepareCase(ctx, ctx.backend.bindNumberQuery)
    local cur, err = stmt:execute()
-   expectNil("execute()", cur, err, ctx.backend.missingParamsError)
+   if expectUnbound(ctx, "execute()", cur, err) then
+      return "limit", limitReason(ctx, "unboundIsNull")
+   end
 end
 
 local function keepAfterBindCase(ctx)
@@ -480,10 +502,12 @@ local function resetClearsCase(ctx)
    expectValue(value(stmt, "bind", { { 42, int } }), 42, "bind")
    reset(stmt)
    local cur, err = stmt:execute()
-   expectNil("execute() after reset", cur, err,
-             ctx.backend.missingParamsError)
+   local asNull = expectUnbound(ctx, "execute() after reset", cur, err)
    expectValue(value(stmt, "bind after reset", { { 43, int } }), 43,
                "bind after reset")
+   if asNull then
+      return "limit", limitReason(ctx, "unboundIsNull")
+   end
 end
 
 local function resetUnboundCase(ctx)
@@ -504,8 +528,9 @@ local function resetOpenCursorCase(ctx)
    closeCursor(cur)
    reset(stmt)
    cur, err = stmt:execute()
-   expectNil("execute() after reset", cur, err,
-             ctx.backend.missingParamsError)
+   if expectUnbound(ctx, "execute() after reset", cur, err) then
+      return "limit", limitReason(ctx, "unboundIsNull")
+   end
 end
 
 local caseList = {
@@ -735,8 +760,7 @@ local function argCountStep(ctx, i, shared)
       expectNil("conn:execute(sql, i, i)", cur, err, pattern)
    else
       cur, err = ctx.testConn:execute(backend.bindNumberQuery)
-      expectNil("conn:execute(sql) without values", cur, err,
-                backend.missingParamsError)
+      expectUnbound(ctx, "conn:execute(sql) without values", cur, err)
    end
    if i % 10 == 0 then
       expectValue(value(shared.number, "execute(i)", i), i, "execute(i)")
@@ -796,7 +820,10 @@ local function connDmlStep(ctx, i)
       return
    end
    check(result, err, "conn:execute")
-   expect(math.type(result) == "integer",
+   -- A float with an integral value only where the backend says so
+   -- (transactions reports it as a limit in rowCountType).
+   expect(math.type(result) == "integer"
+          or (backend.rowCountFloat and math.tointeger(result) ~= nil),
           "conn:execute: expected a number of rows, got " .. describe(result))
 end
 
@@ -804,7 +831,9 @@ local function prepareNamedQuery(ctx)
    return prepare(ctx.testConn, ctx.backend.paramsNamedQuery)
 end
 
-local function spellingsStep(_, i, stmt)
+-- With a DBMS whose names are case sensitive (backend.namesCaseSensitive)
+-- A is an unknown name: nil and a message (backend.unknownNameError).
+local function spellingsStep(ctx, i, stmt)
    local k = i % 4
    local bindings
    if k == 0 then
@@ -813,6 +842,11 @@ local function spellingsStep(_, i, stmt)
       bindings = { [":a"] = i }
    elseif k == 2 then
       bindings = { A = i }
+      if ctx.backend.namesCaseSensitive then
+         local cur, err = stmt:execute(bindings)
+         expectNil("bind {A = i}", cur, err, ctx.backend.unknownNameError)
+         return
+      end
    else
       bindings = { i }
    end

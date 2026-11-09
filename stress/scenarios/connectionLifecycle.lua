@@ -26,12 +26,13 @@
 --                     connection still closes it
 --   manyOpen          20 connections open at the same time
 --   envReleased       a closed environment can be collected (checks
---                     the method of the two cases below)
---   unknownUser       connect as a user that does not exist: clean
---                     error, no session, the environment is not kept
---   closedPort        connect to a port without listener: the same
--- A failing connect takes seconds (a server side delay for an unknown
--- user, TCP retries for a closed port), so these are cases, not
+--                     the method of the failing connects below)
+-- and one case per connect that must fail (backend.failingConnects,
+-- e.g. with Oracle unknownUser, a user that does not exist, and
+-- closedPort, a port without listener): clean error, no session, the
+-- environment is not kept.
+-- A failing connect may take seconds (a server side delay for an
+-- unknown user, TCP retries for a closed port), so these are cases, not
 -- phases. "The environment is not kept" means: after env:close() and
 -- dropping it, a full GC collects it. A failed connect must not leave a
 -- reference to it (and with it, the handles of the failed connection).
@@ -323,12 +324,11 @@ local function failingConnect(ctx, kind, pattern)
           .. " collected after " .. maxGcCycles .. " GC cycles)")
 end
 
-local function unknownUserCase(ctx)
-   failingConnect(ctx, "unknownUser", ctx.backend.unknownUserError)
-end
-
-local function closedPortCase(ctx)
-   failingConnect(ctx, "closedPort", ctx.backend.closedPortError)
+-- The case of an entry of backend.failingConnects.
+local function failingConnectCase(entry)
+   return function(ctx)
+      failingConnect(ctx, entry.name, entry.error)
+   end
 end
 
 local caseList = {
@@ -340,8 +340,6 @@ local caseList = {
    { name = "closableError", run = closableErrorCase },
    { name = "manyOpen", run = manyOpenCase },
    { name = "envReleased", run = envReleasedCase },
-   { name = "unknownUser", run = unknownUserCase, needs = "unknownUser" },
-   { name = "closedPort", run = closedPortCase, needs = "closedPort" },
 }
 
 -- Runs all cases, prints failures, limits, skips and a summary.
@@ -349,7 +347,11 @@ local caseList = {
 local function runCases(ctx)
    print("  cases:")
    local passed, limits, failed, skipped = 0, 0, 0, 0
-   for _, case in ipairs(caseList) do
+   local list = table.move(caseList, 1, #caseList, 1, {})
+   for _, entry in ipairs(ctx.backend.failingConnects or {}) do
+      list[#list + 1] = { name = entry.name, run = failingConnectCase(entry) }
+   end
+   for _, case in ipairs(list) do
       local prefix = string.format("    %-17s ", case.name)
       local reason
       if case.usesPrepare and ctx.testConn.prepare == nil then

@@ -451,7 +451,11 @@ local function openSession(options, handles, cleanups)
          return nil, adminErr
       end
       handles[#handles + 1] = adminConn
-      say(string.format("admin:  connected as %s", values.admin.user))
+      if values.admin.user then
+         say(string.format("admin:  connected as %s", values.admin.user))
+      else
+         say("admin:  second connection to the test database")
+      end
       local prepOk, prepErr = runPrep(options, config, values, adminConn,
                                       cleanups)
       if not prepOk then
@@ -465,8 +469,13 @@ local function openSession(options, handles, cleanups)
       return nil, testErr
    end
    handles[#handles + 1] = testConn
-   say(string.format("test:   connected as %s to %s", values.test.user,
-                       backend.sourceName(values.test)))
+   if values.test.user then
+      say(string.format("test:   connected as %s to %s", values.test.user,
+                        backend.sourceName(values.test)))
+   else
+      say(string.format("test:   connected to %s",
+                        backend.sourceName(values.test)))
+   end
 
    local numbers, numbersErr = settings.useExactNumbers(testConn)
    if not numbers then
@@ -484,7 +493,9 @@ local function openSession(options, handles, cleanups)
    -- Lets scenarios open more test connections without handing out the
    -- credentials.
    local extra = {
-      testUser = values.test.user,
+      -- The owner of the test tables: the test user, or for a DBMS
+      -- without users the schema of config.testSchema.
+      testUser = values.test.user or config.testSchema,
       -- The small tablespace of the prep step, if it ran.
       smallTablespace = values.admin and config.tablespaceName or nil,
       -- A test connection on otherEnv, or on the environment of the run.
@@ -497,25 +508,30 @@ local function openSession(options, handles, cleanups)
          return driver[config.driverName]()
       end,
       -- A connect that must fail, on otherEnv or the environment of the
-      -- run; returns what env:connect returns. kind: "unknownUser" (a
-      -- user that does not exist, backend.unknownUser) or "closedPort"
-      -- (the test host on a port without listener, backend.closedPort).
-      -- Never a wrong password of the test user: that may lock it.
+      -- run; returns what env:connect returns. kind is the name of an
+      -- entry of backend.failingConnects, whose field change replaces
+      -- some of the test settings, e.g. a user that does not exist or a
+      -- port without listener. Never a wrong password of the test user:
+      -- that may lock it.
       openFailingConnection = function(kind, otherEnv)
+         local entry
+         for _, candidate in ipairs(backend.failingConnects or {}) do
+            if candidate.name == kind then
+               entry = candidate
+            end
+         end
+         if not entry then
+            error("unknown kind of failing connection: " .. tostring(kind))
+         end
          local failing = {}
          for key, value in pairs(values.test) do
             failing[key] = value
          end
-         if kind == "unknownUser" then
-            failing.user = backend.unknownUser
-            failing.password = "wrong"
-         elseif kind == "closedPort" then
-            failing.port = backend.closedPort
-         else
-            error("unknown kind of failing connection: " .. tostring(kind))
+         for key, value in pairs(entry.change) do
+            failing[key] = value
          end
-         return (otherEnv or env):connect(backend.sourceName(failing),
-                                          failing.user, failing.password)
+         return (otherEnv or env):connect(settings.connectArgs(backend,
+                                                               failing))
       end,
       -- A connection to the test database as another user, e.g. one a
       -- scenario created itself, on otherEnv or the environment of the
@@ -526,8 +542,8 @@ local function openSession(options, handles, cleanups)
             other[key] = value
          end
          other.user, other.password = user, password
-         return (otherEnv or env):connect(backend.sourceName(other), user,
-                                          password)
+         return (otherEnv or env):connect(settings.connectArgs(backend,
+                                                               other))
       end,
       -- What a lane needs to open a test connection itself (laneconn.lua):
       -- the DBMS and the module paths, no credentials.

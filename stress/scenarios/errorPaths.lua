@@ -17,7 +17,9 @@
 --                    (raise an error), close them again (false)
 --   emptyStatement   a statement the DBMS rejects already when it is
 --                    prepared (backend.emptyStatement), via conn:execute
---                    and, every second time, conn:prepare
+--                    and, every second time, conn:prepare; or, with
+--                    backend.emptyStatementCount, a statement without
+--                    effect that gives this row count
 --
 -- A phase is skipped if the driver has no prepare() but the phase needs
 -- it, or if the backend lacks a query the phase needs.
@@ -216,16 +218,42 @@ local function useAfterCloseStep(ctx)
 end
 
 -- A statement that fails before it is executed: a driver that frees
--- its handles only on the execute path leaks them here.
+-- its handles only on the execute path leaks them here. A DBMS that
+-- takes an empty statement as a statement without effect
+-- (backend.emptyStatementCount, e.g. 0) gives that row count instead,
+-- through conn:execute and through a prepared statement, which must be
+-- closable afterwards.
 local function emptyStatementStep(ctx, i)
    local conn = ctx.testConn
    local sql = ctx.backend.emptyStatement
+   local count = ctx.backend.emptyStatementCount
    local cur, err = conn:execute(sql)
-   expectNil("execute of an empty statement", cur, err)
+   if count then
+      check(cur, err, "execute of an empty statement")
+      if cur ~= count then
+         error(string.format("execute of an empty statement: expected %s,"
+                             .. " got %s", tostring(count), tostring(cur)), 0)
+      end
+   else
+      expectNil("execute of an empty statement", cur, err)
+   end
    if i % 2 == 0 and conn.prepare ~= nil then
       local stmt
       stmt, err = conn:prepare(sql)
-      expectNil("prepare of an empty statement", stmt, err)
+      if not count then
+         expectNil("prepare of an empty statement", stmt, err)
+         return
+      end
+      check(stmt, err, "prepare of an empty statement")
+      local result
+      result, err = stmt:execute()
+      closeStatement(stmt)
+      if result ~= count then
+         error(string.format("execute of a prepared empty statement:"
+                             .. " expected %s, got %s (%s)",
+                             tostring(count), tostring(result),
+                             tostring(err)), 0)
+      end
    end
 end
 

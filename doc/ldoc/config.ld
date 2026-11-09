@@ -12,11 +12,12 @@ SQL statements and reads the results row by row. Start with the
 @{01-introduction.md|introduction}.
 ]]
 
-file = { '../../src/ls_oci8.c' }
+file = { '../../src/ls_oci8.c', '../../src/ls_sqlite3.c' }
 topics = {
    'manual/01-introduction.md',
    'manual/02-prepared-statements.md',
    'manual/03-oracle.md',
+   'manual/04-sqlite3.md',
 }
 examples = {
    'examples/oci8_basics.lua',
@@ -24,6 +25,7 @@ examples = {
    'examples/oci8_transactions.lua',
    'examples/oci8_lobs_json.lua',
    'examples/oci8_lanes.lua',
+   'examples/sqlite3_prepared.lua',
 }
 
 format = 'markdown'

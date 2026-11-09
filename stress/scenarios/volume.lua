@@ -34,9 +34,25 @@
 --   lobSegmentFull  a CLOB insert into the full tablespace fails cleanly
 --   fullPrepared    a prepared insert fails, fails again, and works once
 --                   there is space again
+--   fullCommit      with autocommit off: after a full error, commit()
+--                   gives true, or false and a message if the DBMS has
+--                   ended the transaction itself; a row written next is
+--                   gone after rollback(), a transaction is open again
+--   fullKeepsTx     with autocommit off: a row written after a full
+--                   error, before commit() or rollback(), is gone after
+--                   rollback()
+-- In both, if the DBMS ends the transaction at the error itself, the
+-- message must say so (backend.rolledBackHint).
+-- A DBMS without tablespaces limits the size of the database for the
+-- test connection instead (backend.fullSetup and backend.fullReset).
+-- Value case, independent of the tablespace:
+--   maxLength       the longest value the DBMS takes
+--                   (backend.maxValueLength) as text and as binary data,
+--                   and one byte more, which gives nil and a message;
+--                   needs about twice that much memory
 --
 -- Skipped if the driver has no prepare() or the backend has no volume
--- table; the cases are skipped without small tablespace.
+-- table; the tablespace cases are skipped without small tablespace.
 
 local dbutil = require("dbutil")
 local phases = require("phases")
@@ -506,14 +522,15 @@ local function expectFull(ctx, what, result, err)
           what .. ": unexpected error " .. tostring(err))
 end
 
-local function tablespaceFull(ctx)
+-- Fills the full table: big steps on the server first, then single
+-- rows through the prepared statement stmt (backend.fullInsert) until
+-- one fails, which must be the error of a full tablespace. A failing
+-- step rolls back as a whole. Returns the id of the failing row.
+local function fillUp(ctx, stmt)
    local backend = ctx.backend
-   local conn = ctx.testConn
-   -- Big steps on the server first, then single rows through the
-   -- driver: a failing step rolls back as a whole.
    local full = false
    for _ = 1, backend.fullFillSteps do
-      local result, err = conn:execute(
+      local result, err = ctx.testConn:execute(
          string.format(backend.fullFill, backend.fullFillRows))
       if result == nil then
          expectFull(ctx, "fill", result, err)
@@ -522,25 +539,49 @@ local function tablespaceFull(ctx)
       end
    end
    expect(full, "tablespace not full after the fill steps")
-   local stmt = prepare(conn, backend.fullInsert)
    local text = string.rep("z", 4000)
    local result, err
    for i = 1, backend.fullFillRows do
       result, err = stmt:execute({ { i, ctx.types.int },
                                    { text, ctx.types.string } })
       if result == nil then
-         break
+         expectFull(ctx, "insert", result, err)
+         return i, err
       end
    end
+   error("insert: no error after " .. backend.fullFillRows .. " rows", 0)
+end
+
+-- rollback() in autocommit mode: some drivers report that there is no
+-- transaction (false and backend.noTransactionError), which is fine.
+local function rollbackIfOpen(ctx, conn)
+   local ok, err = conn:rollback()
+   local pattern = ctx.backend.noTransactionError
+   if ok or (ok == false and pattern and tostring(err):find(pattern)) then
+      return
+   end
+   check(ok, err, "rollback")
+end
+
+-- Rows of the full table with id, as the test session sees them.
+local function countFull(ctx, id)
+   return countRows(ctx.testConn, string.format(ctx.backend.fullCount, id))
+end
+
+local function tablespaceFull(ctx)
+   local stmt = prepare(ctx.testConn, ctx.backend.fullInsert)
+   local ok, err = pcall(fillUp, ctx, stmt)
    closeStatement(stmt)
-   expectFull(ctx, "insert", result, err)
+   if not ok then
+      error(err, 0)
+   end
 end
 
 local function fullThenUsable(ctx)
    local conn = ctx.testConn
    local value, err = dbutil.queryValue(conn, ctx.backend.singleRowQuery)
    check(value, err, "query after the error")
-   rollback(conn)
+   rollbackIfOpen(ctx, conn)
    expect(countRows(conn, ctx.backend.volCount) >= 0, "count failed")
 end
 
@@ -570,11 +611,139 @@ local function fullPrepared(ctx)
    end
 end
 
+-- Runs fn(stmt) with autocommit off on an empty full table, with the
+-- prepared insert stmt; then autocommit on again, the table empty.
+local function inTransaction(ctx, fn)
+   local conn = ctx.testConn
+   exec(conn, ctx.backend.fullTruncate, "truncate")
+   local stmt = prepare(conn, ctx.backend.fullInsert)
+   setAutocommit(conn, false)
+   local ok, err = pcall(fn, stmt)
+   closeStatement(stmt)
+   pcall(rollback, conn)
+   setAutocommit(conn, true)
+   exec(conn, ctx.backend.fullTruncate, "truncate")
+   if not ok then
+      error(err, 0)
+   end
+end
+
+-- Writes row id with a short text, then rolls back: with a transaction
+-- open, the row is gone. A table that is still full (the rows before
+-- stay) gives the error of a full tablespace instead, which is fine.
+local function expectRolledBack(ctx, stmt, id, what)
+   local result, err = stmt:execute({ { id, ctx.types.int },
+                                      { "x", ctx.types.string } })
+   if result == nil then
+      expectFull(ctx, what, result, err)
+      return
+   end
+   rollback(ctx.testConn)
+   expect(countFull(ctx, id) == 0, what .. ": the row stays after"
+          .. " rollback(), it was written without a transaction")
+end
+
+-- Fills the table in a transaction. If the DBMS ends the transaction at
+-- the error of a single row insert (SQLite), the driver must say so at
+-- the end of the message (backend.rolledBackHint).
+local function fillUpInTransaction(ctx, stmt)
+   local _, err = fillUp(ctx, stmt)
+   local hint = ctx.backend.rolledBackHint
+   if hint then
+      expect(tostring(err):find(hint, 1, true) ~= nil, "insert: the message"
+             .. " does not say that the transaction was rolled back: "
+             .. tostring(err))
+   end
+end
+
+-- commit() after a full error in a transaction: true, or false and a
+-- message if the DBMS has ended the transaction itself (SQLite rolls it
+-- back after a single row insert fails). With autocommit off, the
+-- driver must then be in a transaction again.
+local function fullCommit(ctx)
+   inTransaction(ctx, function(stmt)
+      fillUpInTransaction(ctx, stmt)
+      local ok, err = ctx.testConn:commit()
+      expect(ok == true or (ok == false and type(err) == "string"),
+             "commit after the error: " .. tostring(ok) .. ", "
+                .. tostring(err))
+      expectRolledBack(ctx, stmt, -1, "insert after the commit")
+   end)
+end
+
+-- A statement after a full error in a transaction, before commit() or
+-- rollback(): it must still be part of a transaction.
+local function fullKeepsTransaction(ctx)
+   inTransaction(ctx, function(stmt)
+      fillUpInTransaction(ctx, stmt)
+      expectRolledBack(ctx, stmt, -2, "insert after the error")
+   end)
+end
+
 local caseList = {
    { name = "tablespaceFull", run = tablespaceFull },
    { name = "fullThenUsable", run = fullThenUsable },
    { name = "lobSegmentFull", run = lobSegmentFull },
    { name = "fullPrepared", run = fullPrepared },
+   { name = "fullCommit", run = fullCommit },
+   { name = "fullKeepsTx", run = fullKeepsTransaction },
+}
+
+-- Value cases, independent of the full tablespace.
+
+-- The longest value the DBMS takes (backend.maxValueLength, in bytes),
+-- as text and as binary data through valueLengthQuery, which gives its
+-- length; one byte more must give nil and a message. Needs about twice
+-- the value in memory, the bound value is a copy.
+local function maxLength(ctx)
+   local backend = ctx.backend
+   local types = ctx.types
+   local max = backend.maxValueLength
+   local stmt = prepare(ctx.testConn, backend.valueLengthQuery)
+   local ok, err = pcall(function()
+      local value = string.rep("a", max)
+      for _, param in ipairs({ { value, types.string },
+                               { value, types.binary } }) do
+         local cur, execErr = stmt:execute({ param })
+         check(cur, execErr, string.format("execute with %d bytes", max))
+         local row = cur:fetch({})
+         cur:close()
+         expect(row and row[1] == max, string.format("length of %d bytes"
+                   .. " read as %s", max, tostring(row and row[1])))
+         -- Frees the copy of the bound value.
+         stmt:reset()
+      end
+      -- The copy is gone, so the new value fits next to the old one.
+      value = string.rep("a", max + 1)
+      for _, param in ipairs({ { value, types.string },
+                               { value, types.binary } }) do
+         local cur, execErr = stmt:execute({ param })
+         expect(cur == nil and type(execErr) == "string",
+                string.format("%d bytes: expected nil and a message, got %s",
+                              max + 1, tostring(cur)))
+      end
+      local cur, execErr = ctx.testConn:execute(backend.valueLengthQuery,
+                                                value)
+      expect(cur == nil and type(execErr) == "string",
+             string.format("conn:execute with %d bytes: expected nil and"
+                           .. " a message, got %s", max + 1, tostring(cur)))
+      -- The statement works on.
+      cur, execErr = stmt:execute({ { "abc", types.string } })
+      local row = check(cur, execErr, "execute afterwards"):fetch({})
+      cur:close()
+      expect(row and row[1] == 3, "length afterwards: "
+                .. tostring(row and row[1]))
+   end)
+   closeStatement(stmt)
+   collectgarbage("collect")
+   if not ok then
+      error(err, 0)
+   end
+end
+
+local valueCaseList = {
+   { name = "maxLength", run = maxLength,
+     needs = { "maxValueLength", "valueLengthQuery" } },
 }
 
 -- Runs the cases, prints failures, skips and a summary. Returns the
@@ -596,6 +765,13 @@ local function runCases(ctx)
                        ctx.smallTablespace))
       if not ok then
          reason = "cannot create table: " .. err
+      elseif backend.fullSetup then
+         -- A DBMS without tablespaces limits the size of the database
+         -- for the test connection instead (e.g. max_page_count).
+         ok, err = backend.fullSetup(ctx.testConn)
+         if not ok then
+            reason = "cannot limit the database: " .. tostring(err)
+         end
       end
    end
    for _, case in ipairs(caseList) do
@@ -618,8 +794,40 @@ local function runCases(ctx)
          end
       end
    end
+   if backend.fullReset then
+      local ok, err = backend.fullReset(ctx.testConn)
+      if not ok then
+         failed = failed + 1
+         report.print("    ", "FAILED: cannot lift the limit of the"
+                      .. " database: " .. tostring(err), "fail")
+      end
+   end
    if backend.fullTableDrop then
       dbutil.exec(ctx.testConn, backend.fullTableDrop)
+   end
+   for _, case in ipairs(valueCaseList) do
+      local prefix = string.format("    %-17s ", case.name)
+      local missing
+      for _, key in ipairs(case.needs) do
+         if backend[key] == nil and missing == nil then
+            missing = "backend has no " .. key
+         end
+      end
+      if missing then
+         skipped = skipped + 1
+         report.print(prefix, "skipped: " .. missing, "skip")
+      else
+         local ok, err = pcall(case.run, ctx)
+         if ok then
+            passed = passed + 1
+            if report.verbose then
+               report.print(prefix, "passed", "pass")
+            end
+         else
+            failed = failed + 1
+            report.print(prefix, "FAILED: " .. tostring(err), "fail")
+         end
+      end
    end
    report.print("    ", string.format("%d passed, %d failed, %d skipped",
                                     passed, failed, skipped),

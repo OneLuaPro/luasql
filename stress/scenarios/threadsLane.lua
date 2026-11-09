@@ -158,11 +158,24 @@ function threadsLane.connectLoop(spec, rounds)
    return rounds
 end
 
+-- Sets the wait time for locks of the connection, if the DBMS needs one
+-- (backend.threadsLockSetup, %d: milliseconds; e.g. a busy timeout).
+local function setLockWait(link, seconds)
+   local setup = link.backend.threadsLockSetup
+   if setup then
+      check("lock wait setup", dbutil.exec(link.conn,
+                                           string.format(setup,
+                                                         seconds * 1000)))
+   end
+end
+
 -- Locks row 1 (v = 1), sends "holder" with its session id, waits for
--- "release" and commits.
+-- "release" and commits. The holder may have to wait for the lock of
+-- the commit, too (a reader blocks it in SQLite).
 function threadsLane.lockHolder(spec, linda)
    local link = open(spec)
    local conn, backend = link.conn, link.backend
+   setLockWait(link, messageSeconds)
    check("autocommit off", conn:setautocommit(false))
    check("lock row 1",
          dbutil.exec(conn, string.format(backend.threadsUpdate, 1, 1)))
@@ -178,6 +191,7 @@ end
 function threadsLane.lockWaiter(spec, linda, seconds)
    local link = open(spec)
    local conn, backend = link.conn, link.backend
+   setLockWait(link, seconds)
    check("autocommit off", conn:setautocommit(false))
    linda:send("waiter", sessionId(link))
    local cur = check("lock row 1",

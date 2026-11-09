@@ -43,9 +43,15 @@
 -- Cancelling a lane does not interrupt a call inside the driver: Lanes
 -- can only stop a lane between Lua instructions. Not tested here.
 --
--- Skipped without Lanes, without ctx.laneSpec or without the threads
--- table of the backend. Cases that count sessions or kill one need the
--- admin connection.
+-- For a DBMS without sessions (e.g. SQLite) the cases that count
+-- sessions count backend.leftoverCounter instead, e.g. the locks other
+-- connections hold on the file. With backend.threadsLockSetup the lanes
+-- of lockWait set their wait time for locks first (a busy timeout).
+--
+-- Skipped without Lanes, without ctx.laneSpec or without the queries
+-- of the backend; lockWait and deadlock are skipped without the
+-- threads table. Cases that count sessions or kill one need the admin
+-- connection.
 
 local dbutil = require("dbutil")
 local phases = require("phases")
@@ -223,9 +229,33 @@ local function adminValue(ctx, sql, what)
    return math.tointeger(tonumber(check(what, value, err)))
 end
 
--- Live sessions of the test user (without killed ones).
+-- What lanes may leave behind: the live sessions of the test user
+-- (without killed ones), or for a DBMS without sessions the counter
+-- backend.leftoverCounter (e.g. locks of other connections on a file).
 local function liveSessions(ctx)
-   return adminValue(ctx, ctx.sessionQuery, "count sessions")
+   if ctx.sessionQuery then
+      return adminValue(ctx, ctx.sessionQuery, "count sessions")
+   end
+   return phases.readCounter(ctx, ctx.backend.leftoverCounter)
+end
+
+-- What liveSessions must be back at after a case: its value now, or the
+-- idle value of a counter that only says whether something is held
+-- (e.g. a lock), so that something left by an earlier case counts too.
+local function baseSessions(ctx)
+   local counter = ctx.backend.leftoverCounter
+   if not ctx.sessionQuery and counter.idle then
+      return counter.idle
+   end
+   return liveSessions(ctx)
+end
+
+-- Name of what liveSessions counts, for messages.
+local function leftoverLabel(ctx)
+   if ctx.sessionQuery then
+      return "sessions of the test user"
+   end
+   return ctx.backend.leftoverCounter.label
 end
 
 -- Waits until the live sessions of the test user are back at 'base',
@@ -239,9 +269,9 @@ local function expectSessionsBack(ctx, base, what)
       lanes.sleep(0.2)
       count = liveSessions(ctx)
    end
-   expect(count <= base, string.format("%s: %d sessions of the test user"
-                                       .. " after %d s, expected %d", what,
-                                       count, releaseSeconds, base))
+   expect(count <= base, string.format("%s: %d %s after %d s, expected %d",
+                                       what, count, leftoverLabel(ctx),
+                                       releaseSeconds, base))
 end
 
 -- Waits until session sid of lane 'handle' waits for a lock of session
@@ -369,7 +399,7 @@ local function parallelPreparedCase(ctx)
 end
 
 local function parallelConnectCase(ctx)
-   local base = liveSessions(ctx)
+   local base = baseSessions(ctx)
    local handles = {}
    for tag = 1, ctx.laneCount do
       handles[tag] = start(ctx, "connectLoop", ctx.connectRounds)
@@ -470,7 +500,7 @@ local function deadlockCase(ctx)
 end
 
 local function killDuringCallCase(ctx)
-   local base = liveSessions(ctx)
+   local base = baseSessions(ctx)
    local handle = start(ctx, "sleeper", ctx.linda, sleepSeconds)
    local sid = track(ctx, waitMessage(ctx, "sleeper", messageSeconds,
                                       "sleeping lane"))
@@ -515,14 +545,14 @@ local function runAndDrop(ctx, task, failing)
 end
 
 local function laneErrorCleanupCase(ctx)
-   local base = liveSessions(ctx)
+   local base = baseSessions(ctx)
    runAndDrop(ctx, "errorWithOpen", true)
    dbutil.scrubStack()
    expectSessionsBack(ctx, base, "after the lane ended")
 end
 
 local function laneEndCleanupCase(ctx)
-   local base = liveSessions(ctx)
+   local base = baseSessions(ctx)
    runAndDrop(ctx, "endWithOpen", false)
    dbutil.scrubStack()
    expectSessionsBack(ctx, base, "after the lane ended")
@@ -545,19 +575,28 @@ local function envNotSendableCase(ctx)
    check("close environment", env:close())
 end
 
+-- Backend keys of the cases that use the threads table, and of the
+-- cases that count what lanes leave behind (needsLeftovers).
+local tableKeys = { "threadsTableCreate", "threadsTableDrop", "threadsFill",
+                    "threadsReset", "threadsUpdate", "threadsValue" }
+
 local caseList = {
    { name = "parallelQueries", run = parallelQueriesCase },
    { name = "parallelPrepared", run = parallelPreparedCase },
    { name = "parallelConnect", run = parallelConnectCase,
-     needsAdmin = true },
-   { name = "lockWait", run = lockWaitCase },
-   { name = "deadlock", run = deadlockCase },
+     needsAdmin = true, needsLeftovers = true },
+   { name = "lockWait", run = lockWaitCase, needsTable = true,
+     needs = { "threadsLockWait" } },
+   { name = "deadlock", run = deadlockCase, needsTable = true,
+     needs = { "deadlockError" } },
    { name = "killDuringCall", run = killDuringCallCase, needsAdmin = true,
+     needsLeftovers = true,
      needs = { "killSession", "serialQuery", "lostConnectionErrors",
-               "sleepingSessionQuery" } },
+               "sleepingSessionQuery", "sleepBlock" } },
    { name = "laneErrorCleanup", run = laneErrorCleanupCase,
-     needsAdmin = true },
-   { name = "laneEndCleanup", run = laneEndCleanupCase, needsAdmin = true },
+     needsAdmin = true, needsLeftovers = true },
+   { name = "laneEndCleanup", run = laneEndCleanupCase, needsAdmin = true,
+     needsLeftovers = true },
    { name = "envNotSendable", run = envNotSendableCase },
 }
 
@@ -587,7 +626,7 @@ local function cleanUp(ctx)
       end
       running = runningLanes(ctx)
    end
-   if #running > 0 and ctx.adminConn then
+   if #running > 0 and ctx.adminConn and ctx.backend.killSession then
       for _, sid in ipairs(ctx.sids) do
          kill(ctx, sid)
       end
@@ -610,6 +649,13 @@ end
 local function skipReason(ctx, case)
    if case.needsAdmin and not ctx.adminConn then
       return "needs the admin connection"
+   end
+   if case.needsLeftovers and not ctx.sessionQuery
+      and not ctx.backend.leftoverCounter then
+      return "backend has no liveSessionCountQuery or leftoverCounter"
+   end
+   if case.needsTable and not ctx.hasTable then
+      return "backend has no threads table"
    end
    for _, key in ipairs(case.needs or {}) do
       if ctx.backend[key] == nil then
@@ -742,12 +788,8 @@ function threads.run(ctx)
       report.print("  ", "skipped: driver has no prepare()", "skip")
       return true
    end
-   for _, key in ipairs({ "threadsTableCreate", "threadsTableDrop",
-                          "threadsFill", "threadsReset", "threadsUpdate",
-                          "threadsLockWait", "threadsValue",
-                          "deadlockError", "sleepBlock", "offsetQuery",
-                          "offsetBindQuery", "clobRowsQuery",
-                          "multiRowQuery", "liveSessionCountQuery" }) do
+   for _, key in ipairs({ "offsetQuery", "offsetBindQuery", "clobRowsQuery",
+                          "multiRowQuery" }) do
       if backend[key] == nil then
          report.print("  ", "skipped: backend has no " .. key, "skip")
          return true
@@ -768,13 +810,24 @@ function threads.run(ctx)
       return nil, "unknown tier: " .. tostring(ctx.tier)
    end
 
-   local sessionQuery = string.format(backend.liveSessionCountQuery,
-                                      (ctx.testUser:gsub("'", "''")))
+   -- The sessions of the test user as extra counter, if the DBMS has
+   -- sessions.
+   local sessionQuery
+   if backend.liveSessionCountQuery then
+      sessionQuery = string.format(backend.liveSessionCountQuery,
+                                   (ctx.testUser:gsub("'", "''")))
+   end
    local counters = {}
    for _, counter in ipairs(backend.serverCounters or {}) do
       counters[#counters + 1] = counter
    end
-   counters[#counters + 1] = { label = "sessions", query = sessionQuery }
+   if sessionQuery then
+      counters[#counters + 1] = { label = "sessions", query = sessionQuery }
+   end
+   local hasTable = true
+   for _, key in ipairs(tableKeys) do
+      hasTable = hasTable and backend[key] ~= nil
+   end
 
    local threadsCtx = {
       backend = backend,
@@ -786,20 +839,24 @@ function threads.run(ctx)
       laneSpec = ctx.laneSpec,
       serverCounters = ctx.adminConn and counters or nil,
       sessionQuery = sessionQuery,
+      hasTable = hasTable,
       laneCount = laneCounts[ctx.tier],
       queryRounds = queryRounds[ctx.tier],
       connectRounds = connectRounds[ctx.tier],
    }
 
    -- A table left behind by an aborted run is dropped first.
-   dbutil.exec(conn, backend.threadsTableDrop)
-   local ok, err = dbutil.exec(conn, backend.threadsTableCreate)
-   if ok then
-      ok, err = dbutil.exec(conn, backend.threadsFill)
-   end
-   if not ok then
+   local ok, err
+   if hasTable then
       dbutil.exec(conn, backend.threadsTableDrop)
-      return nil, "creating threads table: " .. err
+      ok, err = dbutil.exec(conn, backend.threadsTableCreate)
+      if ok then
+         ok, err = dbutil.exec(conn, backend.threadsFill)
+      end
+      if not ok then
+         dbutil.exec(conn, backend.threadsTableDrop)
+         return nil, "creating threads table: " .. err
+      end
    end
 
    local casesOk, failed, limits = pcall(runCases, threadsCtx)
@@ -809,10 +866,12 @@ function threads.run(ctx)
                                                 phaseList, count)
    end
 
-   ok, err = dbutil.exec(conn, backend.threadsTableDrop)
-   if not ok then
-      report.print("  warning: ", "cannot drop threads table: " .. err,
-                   "note")
+   if hasTable then
+      ok, err = dbutil.exec(conn, backend.threadsTableDrop)
+      if not ok then
+         report.print("  warning: ", "cannot drop threads table: " .. err,
+                      "note")
+      end
    end
 
    if not casesOk then

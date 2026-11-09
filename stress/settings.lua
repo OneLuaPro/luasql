@@ -27,15 +27,19 @@ function settings.envName(prefix, role, field)
    return string.format("%s_%s_%s", prefix, role, field:upper())
 end
 
--- Reads the given fields from environment variables. Returns a table
--- with the values found and a list with the names of the missing
+-- Reads the given fields from environment variables; a field that is
+-- not set takes its value from defaults, if there is one. Returns a
+-- table with the values found and a list with the names of the missing
 -- variables.
-local function readFields(prefix, role, fields)
+local function readFields(prefix, role, fields, defaults)
    local values, missing = {}, {}
    for _, field in ipairs(fields) do
       local name = settings.envName(prefix, role, field)
       local value = os.getenv(name)
       if value == nil or value == "" then
+         value = (defaults or {})[field]
+      end
+      if value == nil then
          missing[#missing + 1] = name
       else
          values[field] = value
@@ -45,12 +49,15 @@ local function readFields(prefix, role, fields)
 end
 
 -- Reads all connection settings for the configured DBMS. Test settings
--- are mandatory. Admin settings are optional, but must be complete if
--- any of them is set. Returns { test = {...}, admin = {...} or nil }, or
--- nil and an error message.
+-- are mandatory, unless config.testDefaults has a value for them. Admin
+-- settings are optional, but must be complete if any of them is set.
+-- With config.adminFromTest (a DBMS without users, e.g. SQLite) the
+-- admin connection is a second connection with the test settings.
+-- Returns { test = {...}, admin = {...} or nil }, or nil and an error
+-- message.
 function settings.read(config)
    local test, missing = readFields(config.envPrefix, "TEST",
-                                    config.testFields)
+                                    config.testFields, config.testDefaults)
 
    local adminFields = config.adminFields or {}
    local admin, adminMissing = readFields(config.envPrefix, "ADMIN",
@@ -79,22 +86,46 @@ function settings.read(config)
 
    -- The admin connection goes to the same database as the test
    -- connection.
-   if admin then
+   if config.adminFromTest then
+      admin = {}
+      for key, value in pairs(test) do
+         admin[key] = value
+      end
+   elseif admin then
       admin.host, admin.port, admin.name = test.host, test.port, test.name
    end
 
    return { test = test, admin = admin }
 end
 
+-- The arguments of env:connect for the given settings: what
+-- backend.connectArgs(values) returns, by default the source name,
+-- user and password.
+function settings.connectArgs(backend, values)
+   if backend.connectArgs then
+      return backend.connectArgs(values)
+   end
+   return backend.sourceName(values), values.user, values.password
+end
+
+-- How a connection is named in messages, e.g. "test connection as
+-- luatest to host:1521/FREEPDB1"; without user for a DBMS without
+-- users.
+function settings.describe(backend, values, role)
+   local user = values.user and (" as " .. values.user) or ""
+   return string.format("%s connection%s to %s", role, user,
+                        backend.sourceName(values))
+end
+
 -- Opens a connection with the given settings (an entry of what
 -- settings.read returns) on env; role names it in the error message.
 -- Returns the connection, or nil and an error message.
 function settings.connect(env, backend, values, role)
-   local source = backend.sourceName(values)
-   local conn, err = env:connect(source, values.user, values.password)
+   local conn, err = env:connect(settings.connectArgs(backend, values))
    if not conn then
-      return nil, string.format("cannot open %s connection as %s to %s: %s",
-                                role, values.user, source, tostring(err))
+      return nil, string.format("cannot open %s: %s",
+                                settings.describe(backend, values, role),
+                                tostring(err))
    end
    return conn
 end

@@ -137,15 +137,17 @@ return {
    -- BFILE is not supported by luasql.oci8 on purpose.
    unsupportedTypeQuery = "SELECT BFILENAME('X', 'y') FROM dual",
    -- Used by the connection scenario: sessions of the test user (%s, in
-   -- the case the user gave it; Oracle keeps names in upper case), a
-   -- user that does not exist and a port without listener for failing
-   -- connects, with their errors.
+   -- the case the user gave it; Oracle keeps names in upper case), and
+   -- the connects that must fail: a user that does not exist and a port
+   -- without listener. change replaces test settings, error is the
+   -- pattern of the error. Never a wrong password of the test user.
    sessionCountQuery = "SELECT COUNT(*) FROM v$session"
       .. " WHERE username = UPPER('%s')",
-   unknownUser = "LUASTRESS_NO_SUCH_USER",
-   unknownUserError = "ORA%-01017",
-   closedPort = 1,
-   closedPortError = "ORA%-12541",
+   failingConnects = {
+      { name = "unknownUser", error = "ORA%-01017",
+        change = { user = "LUASTRESS_NO_SUCH_USER", password = "wrong" } },
+      { name = "closedPort", error = "ORA%-12541", change = { port = 1 } },
+   },
    -- Used by the connection loss scenario: kill a session (sid, serial#)
    -- on the admin connection; the errors a killed session gives (seen:
    -- ORA-03113 first, then ORA-03114); a query with many rows; a table
@@ -316,6 +318,7 @@ return {
       .. " LOB (c) STORE AS (TABLESPACE %s)",
    fullTableDrop = "DROP TABLE IF EXISTS luastress_full PURGE",
    fullTruncate = "TRUNCATE TABLE luastress_full",
+   fullCount = "SELECT COUNT(*) FROM luastress_full WHERE id = %d",
    fullFill = "INSERT INTO luastress_full (id, s)"
       .. " SELECT level, RPAD('x', 4000, 'x') FROM dual CONNECT BY level <= %d",
    fullFillRows = 500,

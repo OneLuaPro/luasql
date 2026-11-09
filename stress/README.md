@@ -2,12 +2,12 @@
 
 The LuaSQL stress test suite exercises a LuaSQL driver under load: it opens and closes connections, cursors and prepared statements hundreds of thousands of times, provokes errors, kills sessions, uses the driver from several threads at once and runs for hours. It checks that the driver never crashes, never leaks memory, cursors, temporary LOBs (Large Objects) or sessions, never loses or changes data and never leaves a session blocked. Behavior of the client library or the DBMS (Database Management System) that a user might not expect is reported as a known limitation with its reason, without failing the run.
 
-The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. At the moment only the Oracle driver `luasql.oci8` is implemented:
+The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8` and the SQLite driver `luasql.sqlite3` are implemented:
 
 | Driver            | DBMS                    | Status    |
 | ----------------- | ----------------------- | --------- |
 | `luasql.oci8`     | Oracle                  | available |
-| `luasql.sqlite3`  | SQLite                  | planned   |
+| `luasql.sqlite3`  | SQLite                  | available |
 | `luasql.postgres` | PostgreSQL              | planned   |
 | `luasql.mysql`    | MariaDB/MySQL           | planned   |
 | `luasql.duckdb`   | DuckDB                  | planned   |
@@ -32,7 +32,7 @@ The suite needs only plain Lua and two common modules; further modules are optio
 
 ## Preparing a Run
 
-Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far only Oracle is available; instructions for the other DBMS will follow when their backends are implemented.
+Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle and SQLite are available; instructions for the other DBMS will follow when their backends are implemented.
 
 ### Oracle
 
@@ -110,6 +110,32 @@ ALTER USER luatest PROFILE luatest_profile;
 
 To remove the test user again: `DROP USER luatest CASCADE;` (and `DROP PROFILE luatest_profile;`).
 
+### SQLite
+
+**Driver:** `luasql.sqlite3` brings SQLite with it; in OneLuaPro it is built against sqlean, SQLite with a set of extensions. The suite uses only plain SQLite, no function of sqlean.
+
+**Connection data:** SQLite has no server, no users and no passwords. The test database is a file; one environment variable names it, and it is optional:
+
+| Variable            | Meaning                                                                                       | Required |
+| ------------------- | --------------------------------------------------------------------------------------------- | -------- |
+| `SQLITE3_TEST_NAME` | the database file, e.g. `C:\temp\luastress.db`; the folder must exist and be writable         | no       |
+
+Without it the file is `luastress_sqlite3.db` in the folder for temporary files (`TEMP` or `TMP`, elsewhere `TMPDIR` or `/tmp`). The file is created if it does not exist. The run drops the tables it creates, so the file may be deleted after the run. The name goes to SQLite as it is; it must be UTF-8, so on Windows a folder with non-ASCII characters in its name may not work.
+
+In Windows command prompt (CMD):
+
+```CMD
+set SQLITE3_TEST_NAME=C:\temp\luastress.db
+```
+
+In bash (Linux, macOS):
+
+```bash
+export SQLITE3_TEST_NAME=/tmp/luastress.db
+```
+
+There are no admin variables: the admin connection is always a second connection to the same file. The suite uses it as a probe for the locks of the test connection (see [SQLite](#dbms-specific-notes) under DBMS-Specific Notes), for the preparation step and as "another session" in scenario `transactions`.
+
 
 ## Running
 
@@ -160,6 +186,7 @@ Scenarios with slow steps use fewer iterations, e.g. one logon per iteration; ea
 | Keep the test environment, e.g. to look at it in SQL*Plus  | `lua stress.lua oracle smoke --keep`                        |
 | Soak run of 4 hours with the samples in a CSV file         | `lua stress.lua oracle soak --csv soak240.csv`              |
 | Short soak run, to check that it works                     | `lua stress.lua oracle soak --duration 10 --csv soak.csv`   |
+| Quick check of the SQLite driver                           | `lua stress.lua sqlite3 smoke`                              |
 | Output without colors                                      | `set NO_COLOR=1` before the run                             |
 
 
@@ -196,10 +223,17 @@ Exit codes: 0 all scenarios passed (limits do not count), 1 a scenario or the cl
 - **Logons take seconds instead of about 60 ms.** The listener does not listen on every address the host name resolves to, typically IPv6 next to IPv4. Add both addresses to `listener.ora` and restart the listener.
 - **A run was aborted.** Tablespace `LUASTRESS` and `open_cursors = 50` stay in place until the next run; `open_cursors` also returns to its original value when the database restarts.
 
+### SQLite
+
+- **`unable to open database file`** before the first scenario: the folder of `SQLITE3_TEST_NAME` (or of `TEMP`) does not exist or is not writable.
+- **`database is locked`** in a scenario that should not see a lock: another program has the test file open, e.g. a `sqlite3` shell. Close it, or use another file.
+- **`journal mode is wal, not delete`** in the preparation step: another program keeps the file in WAL mode. The probe of the locks needs the rollback journal; use another file.
+- **A run was aborted.** Its tables stay in the file; the next run drops them first. The file can also simply be deleted.
+
 
 ## Scenarios
 
-The steps and scenarios run in this order. *Admin connection* tells whether a scenario needs the admin variables; *Without admin connection* tells what is lost when they are not set. Each name links to the detailed description. The descriptions under `doc/` show the scenarios with Oracle, the only DBMS implemented so far. The ideas of the cases and phases hold for every DBMS; SQL, error codes, server counters and limits differ and come from the backend module of the DBMS.
+The steps and scenarios run in this order. *Admin connection* tells whether a scenario needs the admin variables; *Without admin connection* tells what is lost when they are not set (with SQLite the admin connection is always there). Each name links to the detailed description. The descriptions under `doc/` show the scenarios with Oracle, the first DBMS implemented; where SQLite differs, they say so ("With SQLite ..."). The ideas of the cases and phases hold for every DBMS; SQL, error codes, server counters and limits differ and come from the backend module of the DBMS.
 
 | Scenario / Step                                         | Purpose                                                                                                                                                       | Admin connection | Without admin connection                                                                                  |
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------- |
@@ -290,7 +324,32 @@ The OneLuaPro driver always uses AL32UTF8 (UTF-8) as client character set and as
 
 ### SQLite
 
-No information yet; not implemented.
+Tested with SQLite 3.53.4 and the `luasql.sqlite3` of OneLuaPro, on Linux. Tier smoke takes about 20 seconds on a local disk.
+
+**What a connection holds:** SQLite has no server that could count the cursors or transactions of a session. What a connection holds is a lock on the database file: a cursor that has not been reset keeps a read lock, a transaction that has changed data the write lock. The admin connection, a second connection to the same file, serves as a probe: it tries `BEGIN EXCLUSIVE` (counter `locks`: 1 if the test connection holds any lock) and `BEGIN IMMEDIATE` (counter `open tx`: 1 if it holds the write lock) and ends them again at once. Both can only say 0 or 1, so they must be 0 before every phase; scenario `stmtLifecycle` also checks them with a statement still open (phase `closeRelease`), where the next execute or the close of the statement would hide a lock. The probe needs the rollback journal, the default of SQLite; in WAL mode readers take no lock it could see, so the preparation step sets `journal_mode = DELETE`. A query that reads no table, e.g. `SELECT 1`, holds no lock at all; the queries of the backend therefore read a table of numbers.
+
+**Preparation step:** sets the rollback journal, drops the tables of an aborted run (names starting with `luastress`) and creates helper tables: `luastress_rows` (the numbers 1 to 10 000), `luastress_err` (a `CHECK` constraint for a statement that fails) and `luastress_dml` (`STRICT`, for a string that is not a number). The teardown drops them; the file stays.
+
+**Known limitations**, reported as "limit":
+
+| Scenario       | Test                                         | Limitation                                                                                                                             |
+| -------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `params`       | `neverBound`, `resetClears`, `resetOpenCursor` | a placeholder that never got a value is NULL in SQLite, also after `stmt:reset()`; Oracle reports `ORA-01008`                          |
+| `concurrency`  | `readConsistency`                            | in the rollback journal a commit waits until the readers of other connections are done: an open cursor makes a writer fail with `database is locked`; WAL mode does not |
+| `concurrency`  | `lockNowait`                                 | SQLite locks the whole database for a write transaction, not single rows                                                               |
+| `transactions` | `enableAutocommit`                           | `setautocommit(true)` rolls back an open transaction                                                                                   |
+| `transactions` | `rowCountType`                               | row counts are floats in `luasql.sqlite3`, as in LuaSQL, e.g. `1.0`                                                                     |
+
+**Behavior worth knowing**, checked but not reported as limit:
+
+- A failing insert of a single row into a full database (`database or disk is full`) makes SQLite roll back the whole transaction; a failing statement over several rows rolls back only itself. `luasql.sqlite3` then adds `(LuaSQL: SQLite rolled back the transaction)` to the message. With autocommit off it begins a new transaction before the next execute, also without `conn:commit()` in between (case `fullKeepsTx` of scenario `volume`). A `conn:commit()` directly after the error gives `false` and `no transaction is active`, and the driver begins a new transaction all the same (case `fullCommit`).
+- `conn:commit()` and `conn:rollback()` in autocommit mode give `false` and `no transaction is active`.
+- DDL is part of the transaction: `ddlCommits` passes.
+- A text without a statement (`""`) is a statement without effect with the row count 0, through `conn:execute` and through a prepared statement.
+- The longest string or blob is 1 000 000 000 bytes (`SQLITE_MAX_LENGTH` of the build); one byte more gives `string or blob too big`. Case `maxLength` of scenario `volume` needs about 2 GB of memory for it.
+- A second connection that wants to write while another one holds the write lock waits for its busy timeout (`PRAGMA busy_timeout`, or the second argument of `env:connect`), unless waiting could end in a deadlock: then SQLite gives `database is locked` at once. Case `deadlock` of scenario `threads` is skipped for this reason.
+
+**Not covered with SQLite yet:** scenarios `dataTypes` and `soak` (the backend has no tables for them yet), `prefetch` (`luasql.sqlite3` has no options), `warnings` (SQLite has no warnings of this kind) and `connectionLoss` and case `killDuringCall` (there is no session to kill).
 
 ### PostgreSQL
 
@@ -325,7 +384,7 @@ Two facts about measuring memory on Windows shape how it does this. First, the `
 
 #### Phases
 
-A phase repeats one step many times. Before and after the phase it reads the server counters of the test session on the admin connection: open cursors and temporary LOBs, plus counters of the scenario such as sessions or open transactions. A counter that grows fails the phase.
+A phase repeats one step many times. Before and after the phase it reads the server counters of the test session on the admin connection: open cursors and temporary LOBs, plus counters of the scenario such as sessions or open transactions. A counter that grows fails the phase. A counter that can only say whether something is held (with SQLite: a lock on the file) must also be at its idle value before the phase, since it cannot grow beyond 1.
 
 It also measures, after a full garbage collection, the memory of the process (on Windows the private bytes, elsewhere the rss) and the Lua heap; the output names the measure, e.g. `private bytes +12 KB`. The first 50 iterations are a warm-up and are not measured, so one-time allocations do not count as growth; phases with threads use a longer warm-up.
 

@@ -14,3 +14,7 @@ The teardown runs in the parent process, on its admin connection, after all chil
 2. **Drops the tablespace** `LUASTRESS` with its contents and data file.
 
 A session of a killed child process may still exist on the server for a moment; Oracle removes it shortly after.
+
+## SQLite
+
+`prep/sqlite3.lua` drops the helper tables. The file itself stays; it may be deleted after the run.

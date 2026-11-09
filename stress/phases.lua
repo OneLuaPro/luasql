@@ -20,7 +20,10 @@
 -- ctx needs testConn and backend; adminConn is optional. Without it the
 -- phases still run, but the server side check is skipped. The optional
 -- ctx.serverCounters replaces backend.serverCounters, e.g. to add a
--- counter for one scenario.
+-- counter for one scenario. A counter is { label, query } (query on the
+-- admin connection, %d the session id) or { label, read } (read(ctx,
+-- sid) gives the value); with idle, the counter must have that value
+-- before each phase.
 --
 -- Each phase also reports how the memory of this process changed and
 -- how the Lua heap changed (lua), both measured after a full GC. The
@@ -97,6 +100,29 @@ local function serverCounters(ctx)
    return ctx.serverCounters or ctx.backend.serverCounters
 end
 
+-- Reads one server counter of the test session sid: counter.query on
+-- the admin connection (%d is sid), or counter.read(ctx, sid) for a
+-- DBMS that has no such query (e.g. a probe of the locks of a file).
+-- Returns the value as an integer. Raises an error on failure.
+function phases.readCounter(ctx, counter, sid)
+   local value, err
+   if counter.read then
+      value, err = counter.read(ctx, sid)
+   else
+      value, err = dbutil.queryValue(ctx.adminConn,
+                                     string.format(counter.query, sid))
+   end
+   if value == nil then
+      error("reading " .. counter.label .. ": " .. tostring(err), 0)
+   end
+   local number = math.tointeger(tonumber(value))
+   if number == nil then
+      error("reading " .. counter.label .. ": not an integer: "
+            .. tostring(value), 0)
+   end
+   return number
+end
+
 -- Reads the server counters of the test session in the order of
 -- serverCounters(ctx). Returns the list of values, or nil without
 -- admin connection. Raises an error on failure.
@@ -113,13 +139,7 @@ local function readServerCounters(ctx, sid)
    end
    local values = {}
    for i, counter in ipairs(serverCounters(ctx)) do
-      local value
-      value, err = dbutil.queryValue(ctx.adminConn,
-         string.format(counter.query, sid))
-      if not value then
-         error("reading " .. counter.label .. ": " .. err, 0)
-      end
-      values[i] = math.tointeger(tonumber(value))
+      values[i] = phases.readCounter(ctx, counter, sid)
    end
    return values
 end
@@ -316,6 +336,16 @@ local function runPhase(ctx, phase, count, sid)
       end
    end
    local before = readServerCounters(ctx, sid)
+   -- A counter that only says whether something is held (e.g. a lock,
+   -- counter.idle = 0) cannot grow beyond 1: it must be at its idle
+   -- value before the phase, else an earlier step left something.
+   for i, counter in ipairs(before and serverCounters(ctx) or {}) do
+      if counter.idle and before[i] ~= counter.idle then
+         error(string.format("%s is %d before the phase, expected %d: left"
+                             .. " by an earlier step", counter.label,
+                             before[i], counter.idle), 0)
+      end
+   end
    local first = measureRound(ctx, phase, count, "")
    -- A heap that settles grows in the first round only, a leak in both:
    -- a phase over the limit runs a second round of the same length.

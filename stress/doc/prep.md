@@ -21,3 +21,19 @@ The state file lives in a per-user directory, because the suite may be installed
 The settings come from `config/oracle.lua`: `tablespaceName` (`LUASTRESS`), `tablespaceSize` (`50M`) and `openCursors` (50). Names are accepted only as plain identifiers, because they end up in SQL text.
 
 With `--keep` the step registers no teardown: the tablespace, the lowered `open_cursors` and the state file stay in place, e.g. to look at them in SQL*Plus. The next run without `--keep` cleans up.
+
+## SQLite
+
+The admin connection of SQLite is a second connection to the test file, so the step always runs. `prep/sqlite3.lua` does three things, in this order:
+
+1. **Sets the rollback journal.** `PRAGMA journal_mode = DELETE`, the default of SQLite. The probe of the locks (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)) needs it; the step fails if the file stays in another mode.
+2. **Removes leftovers.** Tables of an aborted run, whose names start with `luastress`, are dropped first; `VACUUM` then frees the space of earlier runs, so the file starts small. Scenario [`volume`](volume.md) needs this: it limits the size of the file, and SQLite fills free pages first.
+3. **Creates helper tables.** `luastress_rows` holds the numbers 1 to 10 000, the rows of the queries of the backend: a query that reads no table holds no lock, and the probe could not see a cursor that keeps one. `luastress_err` has one row and a `CHECK` constraint, for a statement that fails (scenario [`errorPaths`](errorPaths.md)); `luastress_dml` is `STRICT`, for a string that is not a number (scenario [`params`](params.md)).
+
+The output names the file:
+
+```
+prep:   file /tmp/luastress_sqlite3.db, journal mode delete, helper tables created
+```
+
+There is no state file: nothing on a server has to be restored. With `--keep` the helper tables stay in the file.

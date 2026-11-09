@@ -21,6 +21,7 @@
 
 local dbutil = require("dbutil")
 local memory = require("memory")
+local phases = require("phases")
 local report = require("report")
 local soakRound = require("scenarios.soakRound")
 local trend = require("trend")
@@ -110,7 +111,7 @@ local function adminValue(ctx, sql, what)
 end
 
 -- The server counters of the test session (backend.serverCounters and
--- the open transactions), each { label, query }.
+-- the open transactions), each { label, query } or { label, read }.
 local function counterList(backend)
    local list = {}
    for _, counter in ipairs(backend.serverCounters or {}) do
@@ -164,9 +165,7 @@ local function takeSample(state)
                                        ctx.backend.singleRowQuery)
       check("sync query", err == nil, err)
       for k, counter in ipairs(state.counters) do
-         sample.counters[k] = adminValue(ctx, string.format(counter.query,
-                                                            state.sid),
-                                         counter.label)
+         sample.counters[k] = phases.readCounter(ctx, counter, state.sid)
       end
       if ctx.backend.pgaQuery then
          sample.pga = adminValue(ctx, string.format(ctx.backend.pgaQuery,

@@ -20,3 +20,5 @@ Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 | `blobRows`      | the same with a temporary BLOB (Binary Large Object), 200 more bytes per row                                                     | the same                                                                                           |
 
 A LOB phase first checks that its query really gives temporary LOBs (`backend.tempLobChecks`); if not, it fails as invalid, because it would test nothing. A LOB phase is skipped if the backend has no query for it.
+
+With SQLite there are no temporary LOBs and no prefetch: the LOB phases read long text and blobs made by SQL, and the server counter is the lock of the test connection on the file (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)). It must be 0 before each phase; a cursor that was closed or collected but still holds its statement shows there.
