@@ -4,7 +4,7 @@ Checks how prepared statements keep their parameters between executions: what ru
 
 A parameter is a plain Lua value, bound by its Lua type, or a pair `{value, type}` with a constant of `luasql.type`. `stmt:execute()` runs with the values bound, `stmt:execute{…}` (one table) takes a parameter table, every other call takes variable arguments by position, where `nil` is NULL. `conn:execute(sql, …)` takes parameters in the same forms.
 
-Errors are checked against the [error convention](../README.md#error-convention): an error of the DBMS gives `nil` and a message, a misuse of the API raises an error of LuaSQL. Too many parameters in a table, a placeholder without a value and a wrong number of variable arguments give `nil` and a message: whether they are right depends on the SQL. With Oracle the first two come from OCI, the last from `luasql.oci8`, which compares the number of arguments with the parameters OCI reports (`backend.argCountError`).
+Errors are checked against the [error convention](../README.md#error-convention): an error of the DBMS gives `nil` and a message, a misuse of the API raises an error of LuaSQL. Too many parameters in a table, a placeholder without a value and a wrong number of variable arguments give `nil` and a message: whether they are right depends on the SQL (`backend.argCountError`).
 
 The scenario is skipped if the driver has no `conn:prepare`; the reset cases are skipped if it has no `stmt:reset()`; `nameThenPosition` and `spellings` are skipped without `backend.paramsNamedQuery`, `argCount` without `backend.argCountError`, `connDml` without `backend.paramsDmlBlock`.
 
@@ -48,4 +48,10 @@ Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 | `connDml` | `conn:execute` of a PL/SQL block (not a query) with a timestamp and a number, in a table or as variable arguments; every 5th iteration a string that is not a number fails at the execute | the call does not return a number of rows (an integer; a float with an integral value where the backend says so, `backend.rowCountFloat`), the failing one does not give `nil` and the error, or a counter or the memory grows |
 | `spellings` | binds one named placeholder as `a`, `:a`, `A` and by position, in turn | the value does not come back, or a counter or the memory grows. `luasql.oci8` keeps one binding per spelling until `stmt:reset()` or `stmt:close()`; there are only four, so the memory must stay flat. Where names are case sensitive (`backend.namesCaseSensitive`, SQLite), `A` is an unknown name and must give `nil` and a message |
 
-With SQLite, `connDml` runs an `UPDATE` of a helper table that is `STRICT`, so a string that is not a number fails; `argCount` expects a row with NULL for `conn:execute(sql)` without a value (see `neverBound`); `failedBindKeeps` passes, because `luasql.sqlite3` resolves all names and positions before it binds.
+## Oracle
+
+Too many parameters in a table and a placeholder without a value give the errors of OCI (`ORA-01036`, `ORA-01008`); a wrong number of variable arguments gives the error of `luasql.oci8`, which compares the number of arguments with the parameters OCI reports. `connDml` runs a PL/SQL block.
+
+## SQLite
+
+`connDml` runs an `UPDATE` of a helper table that is `STRICT`, so a string that is not a number fails; `argCount` expects a row with NULL for `conn:execute(sql)` without a value (see `neverBound`); `failedBindKeeps` passes, because `luasql.sqlite3` resolves all names and positions before it binds.

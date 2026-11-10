@@ -134,6 +134,47 @@ end
 -- connection (SQLITE_BUSY), at once or after the busy timeout.
 local lockedError = "database is locked"
 
+-- Reasons and overrides of the data type scenario (typeCaseOverrides).
+local dateText = "SQLite has no date type: luasql.sqlite3 binds dates"
+   .. " and times as text, read back as bound"
+local function dateAsText(text)
+   return { limitValue = text, limitReason = dateText }
+end
+local function yearRange(kind)
+   return {
+      limitError = "invalid T%." .. kind .. " value",
+      limitReason = "luasql.sqlite3 takes years 0000 to 9999, the range"
+         .. " of the date functions of SQLite (decision B5)",
+   }
+end
+local function booleanAsNumber(number)
+   return {
+      limitValue = number,
+      limitReason = "SQLite has no boolean type: luasql.sqlite3 binds"
+         .. " true and false as 1 and 0",
+   }
+end
+local function notPadded(text)
+   return {
+      limitValue = text,
+      limitReason = "SQLite does not pad CHAR(n) with spaces",
+   }
+end
+local noLength = {
+   limitValue = true,
+   limitReason = "SQLite does not enforce the declared length of a"
+      .. " column",
+}
+local noRangeLimit = {
+   limitValue = true,
+   limitReason = "SQLite stores the number as REAL; NUMERIC has no"
+      .. " range limit",
+}
+local nanAsNull = {
+   limitNull = true,
+   limitReason = "SQLite stores NaN as NULL",
+}
+
 return {
    sourceName = function(values)
       return values.name
@@ -142,6 +183,12 @@ return {
    connectArgs = function(values)
       return values.name, values.timeout, values.readonly
    end,
+   -- Run on every connection of the suite. The page cache of a
+   -- connection (2 MB by default) fills while a phase writes new pages
+   -- and looks like a leak of up to its size; 256 KB stay far below the
+   -- limit of the leak check (measured with --only volume: bulkInsert
+   -- trend +426 KB with 2 MB, +0 KB with 256 KB).
+   connectSetup = { "PRAGMA cache_size = -256" },
    versionQuery = "SELECT 'SQLite ' || sqlite_version()",
    -- Reads a table, so a cursor of it holds a lock (see above).
    singleRowQuery = "SELECT n FROM luastress_rows WHERE n = 1",
@@ -352,5 +399,121 @@ return {
    transactionLimits = {
       enableAutocommit = "setautocommit(true) rolls back an open"
          .. " transaction (luasql.sqlite3)",
+   },
+   -- Used by the data type scenario: test table, its columns (a case
+   -- for a missing column is skipped) and statements; %s is a column
+   -- name or an expression. SQLite has no date, boolean, JSON or fixed
+   -- length type: the declared types give the affinity (NUMERIC for n,
+   -- d, ts and b) and are what cur:getcoltypes() reports. Missing:
+   -- BINARY_FLOAT, time zones, intervals, stored row ids, LONG.
+   typesTableCreate = "CREATE TABLE luastress_types ("
+      .. "id INTEGER PRIMARY KEY, n NUMERIC, s VARCHAR(4000), d DATE,"
+      .. " ts TIMESTAMP, b BOOLEAN, c CLOB, ns NVARCHAR(2000), nc NCLOB,"
+      .. " bd DOUBLE, ch CHAR(10), nch NCHAR(10), rw BLOB(2000), bl BLOB,"
+      .. " js TEXT CHECK (js IS NULL OR json_valid(js)))",
+   typesTableDrop = "DROP TABLE IF EXISTS luastress_types",
+   typesColumns = {
+      "n", "s", "d", "ts", "b", "c", "ns", "nc", "bd", "ch", "nch", "rw",
+      "bl", "js",
+   },
+   -- The declared types as luasql.sqlite3 reports them; rowid is the
+   -- column id (INTEGER PRIMARY KEY).
+   columnTypes = {
+      n = "NUMERIC", s = "VARCHAR(4000)", d = "DATE", ts = "TIMESTAMP",
+      b = "BOOLEAN", c = "CLOB", ns = "NVARCHAR(2000)", nc = "NCLOB",
+      bd = "DOUBLE", ch = "CHAR(10)", nch = "NCHAR(10)",
+      rw = "BLOB(2000)", bl = "BLOB", js = "TEXT", rowid = "INTEGER",
+   },
+   typesInsert = "INSERT INTO luastress_types (id, %s) VALUES (?1, ?2)",
+   -- Several columns at once: first %s the column list, second one the
+   -- placeholders :2, :3, ...
+   typesInsertColumns = "INSERT INTO luastress_types (id, %s)"
+      .. " VALUES (?1, %s)",
+   -- Rows ?1 to ?2 in order; %s is the column list.
+   typesRangeSelect = "SELECT %s FROM luastress_types"
+      .. " WHERE id BETWEEN ?1 AND ?2 ORDER BY id",
+   typesSelect = "SELECT %s FROM luastress_types WHERE id = ?1",
+   -- First %s is the column, second one an SQL literal.
+   typesInsertLiteral = "INSERT INTO luastress_types (id, %s)"
+      .. " VALUES (?1, %s)",
+   typeLiterals = {
+      litPi = "3.141592653589793",
+      litSum = "0.30000000000000004",
+      litE = "-2.718281828459045",
+      -- 1/3 is an integer division in SQLite.
+      litThird = "1.0 / 3",
+      litMax = "9.999999999999999999999999999999999999999E125",
+      litTiny = "1E-130",
+      bdouble = "0.1 + 0.2",
+      bdoubleHuge = "1e300",
+      -- Too large for a double: SQLite makes it infinity.
+      bdoubleInf = "-9e999",
+      timestampFraction = "'2026-10-19 13:45:30.123456'",
+      rawLiteral = "X'00FF4100'",
+      rawLarge = "unhex(replace(printf('%.500c', 'x'), 'x', 'DEADBEEF'))",
+      rawGuid = "randomblob(16)",
+      blobLiteral = "X'00FF4100'",
+      blobEmpty = "X''",
+      jsonLiteral = "json('{\"x\" : [true, false]}')",
+      jsonLarge = "json_object('t', 'ab'"
+         .. " || replace(printf('%.9999c', 'x'), 'x', 'cd'))",
+   },
+   -- Writes row ?1 with a BLOB of ?3 copies of the bytes of hex text ?2;
+   -- %s is the column.
+   blobLargeInsert = "INSERT INTO luastress_types (id, %s)"
+      .. " VALUES (?1, unhex(replace(printf('%%.*c', ?3, 'x'), 'x', ?2)))",
+   -- %s is a number column; its exact value as text (SQLite gives a
+   -- REAL with as many digits as it needs to read back the same).
+   numberAsText = "CAST(%s AS TEXT)",
+   -- %s is a binary column; its bytes as hex digits, NULL for NULL
+   -- (hex(NULL) is an empty string).
+   rawAsHex = "(SELECT hex(v) FROM (SELECT %s AS v) WHERE v IS NOT NULL)",
+   -- %s is a JSON column; SQLite keeps the text as written.
+   jsonAsText = "CAST(%s AS TEXT)",
+   typesTable = "luastress_types",
+   rowidSelect = "SELECT rowid FROM %s WHERE id = ?1",
+   rowidLookup = "SELECT id FROM %s WHERE rowid = ?1",
+   -- Cases whose result differs from the case list, because SQLite has
+   -- no such type or does not check; each a limit with its reason.
+   typeCaseOverrides = {
+      floatOverflow = noRangeLimit,
+      nanNumber = nanAsNull,
+      bdoubleNanBind = nanAsNull,
+      date = dateAsText("2026-10-19"),
+      leapDay = dateAsText("2024-02-29"),
+      timestamp = dateAsText("2026-10-19 13:45:30"),
+      dateMin = dateAsText("0001-01-01"),
+      dateOld = dateAsText("1900-03-01"),
+      timeInDate = dateAsText("13:45:30"),
+      dateBc = yearRange("date"),
+      tsBc = yearRange("timestamp"),
+      rowsTimestamp = {
+         limitCells = {
+            { ts = "2026-10-19 13:45:30.5" },
+            nil,
+            { ts = "2000-01-01 00:00:00" },
+         },
+         limitReason = dateText,
+      },
+      rowsColumnsNa = {
+         limitCells = { { d = "2026-10-19" } },
+         limitReason = dateText,
+      },
+      booleanColumn = booleanAsNumber(1),
+      booleanFalse = booleanAsNumber(0),
+      plainTrue = booleanAsNumber(1),
+      plainFalse = booleanAsNumber(0),
+      booleanFetchNa = booleanAsNumber(1),
+      tooLong = noLength,
+      charTooLong = noLength,
+      rawBinaryTooLong = noLength,
+      charPadded = notPadded("abc"),
+      charEmpty = notPadded(""),
+      ncharPadded = notPadded("\u{E4}"),
+      jsonDuplicate = {
+         limitValue = true,
+         limitReason = "SQLite accepts duplicate keys in JSON"
+            .. " (json_valid)",
+      },
    },
 }

@@ -2,9 +2,9 @@
 
 Checks the connection option `prefetch` of the driver: the number of rows the client library fetches ahead in one round trip, set with `conn:setoption("prefetch", n)`. A wrong prefetch shows as rows that are lost or come twice at the border of a block, as buffers or temporary LOBs (Large Objects) that stay when a cursor is closed in the middle of a block, or as a value that reaches the wrong query.
 
-Which value a query uses is seen in the round trips of the test session, read on the admin connection (with Oracle the statistic `SQL*Net roundtrips to/from client` in `v$sesstat`). With prefetch 1 a row or two need one round trip, with 1000 a whole block needs one. Without the admin connection the cases check the data only.
+Which value a query uses is seen in the round trips of the test session, read on the admin connection. With prefetch 1 a row or two need one round trip, with 1000 a whole block needs one. Without the admin connection the cases check the data only.
 
-The scenario uses the values 0 (no prefetch), 1 (the OCI default), 100 (the default of `luasql.oci8`), 1000 and 1 000 000 (more rows than any result has). It sets the value of the test connection back after each case and phase. It is skipped if the driver has no option `prefetch`; cases and phases with a prepared statement are skipped without `conn:prepare`.
+The scenario uses the values 0 (no prefetch), 1, 100, 1000 and 1 000 000 (more rows than any result has). It sets the value of the test connection back after each case and phase. It is skipped if the driver has no option `prefetch`; cases and phases with a prepared statement are skipped without `conn:prepare`.
 
 ## Cases
 
@@ -22,8 +22,6 @@ Each case runs once. Results are queries over the numbers 1, 2, 3, …; every ro
 | `stmtTakesValue`  | A prepared statement over 200 rows, executed with prefetch 1 and then with prefetch 1000.                                                                                    | Pass: all rows are right; at least 50 round trips with 1, at most 5 with 1000: the statement uses the value at the time of each execute. Fail: otherwise.        |
 | `lobRows`         | With each value: 250 rows with a temporary CLOB (Character Large Object), 8 more characters per row, read to the end; then the same query closed after 150 rows. The same with a temporary BLOB (Binary Large Object). | Pass: every value is right, and afterwards no temporary LOB and no cursor more than before. Fail: a wrong value, or temporary LOBs of prefetched rows stay. |
 
-The round trip checks leave a wide margin: in SQL*Plus, 200 rows with one row per fetch took 103 round trips, with 100 rows per fetch about 5 including the queries of the statistic itself.
-
 ## Phases
 
 Iterations per phase: smoke 200, standard 2000, nightly 20 000. Fewer than in other scenarios, because small prefetch values need a round trip per row or two.
@@ -37,3 +35,11 @@ Iterations per phase: smoke 200, standard 2000, nightly 20 000. Fewer than in ot
 Like the LOB phases of [`cursorLifecycle`](cursorLifecycle.md), `lobMidLoop` first checks that its query really gives temporary LOBs; if not, it fails as invalid.
 
 A kill of the session in the middle of a prefetched result is part of scenario [`connectionLoss`](connectionLoss.md).
+
+## Oracle
+
+The round trips are the statistic `SQL*Net roundtrips to/from client` in `v$sesstat`. Prefetch 1 is the default of OCI (Oracle Call Interface), 100 the default of `luasql.oci8`, 2 147 483 647 the largest value OCI accepts. The round trip checks leave a wide margin: in SQL*Plus, 200 rows with one row per fetch took 103 round trips, with 100 rows per fetch about 5 including the queries of the statistic itself.
+
+## SQLite
+
+Skipped: `luasql.sqlite3` has no option `prefetch`.

@@ -2,11 +2,9 @@
 
 Uses several connections of one process side by side, in one thread: cursors, statements and temporary LOBs (Large Objects) of different connections interleaved, read consistency while another session changes the data, and row locks that must give a clean error instead of blocking and must be released when a connection is closed or collected.
 
-Everything runs in one thread, so no call may block: a plain `UPDATE` of a locked row would wait forever, because Oracle has no lock timeout for DML (Data Manipulation Language). Locks are therefore taken with `SELECT ... FOR UPDATE NOWAIT` and tested with `NOWAIT` and `WAIT n`; a lock left behind by an earlier case gives an error instead of a hang. Real lock waits and deadlocks need a second thread; they are part of scenario [`threads`](threads.md).
+Everything runs in one thread, so no call may block: locks are taken and tested so that a lock held by another connection gives an error at once or after a short wait (`backend.concLockWaitSetup`); a lock left behind by an earlier case gives an error instead of a hang. Real lock waits and deadlocks need a second thread; they are part of scenario [`threads`](threads.md).
 
 The scenario uses a table `luastress_conc` with 100 rows; it is skipped if the backend has none or the driver has no `conn:prepare`.
-
-With SQLite a lock on a row is the write lock of the whole database file, taken by an `UPDATE ... RETURNING` of the row; a connection that does not get it gives `database is locked`, at once or after its busy timeout.
 
 ## Cases
 
@@ -30,3 +28,11 @@ Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 | Phase            | Each iteration                                                                                                                                | Fails when                                                                                                                       |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `interleaveLoop` | executes a prepared statement on each of four connections (the test connection and three more) and fetches their three rows in turn         | a value is wrong, or a counter or the memory grows (see [Phases](../README.md#phases)); the server counters see the test connection |
+
+## Oracle
+
+A plain `UPDATE` of a locked row would wait forever, because Oracle has no lock timeout for DML (Data Manipulation Language). Locks are therefore taken with `SELECT ... FOR UPDATE NOWAIT` and tested with `NOWAIT` and `WAIT n`.
+
+## SQLite
+
+A lock on a row is the write lock of the whole database file, taken by an `UPDATE ... RETURNING` of the row; a connection that does not get it gives `database is locked`, at once or after its busy timeout (`PRAGMA busy_timeout`).

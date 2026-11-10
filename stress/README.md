@@ -233,7 +233,7 @@ Exit codes: 0 all scenarios passed (limits do not count), 1 a scenario or the cl
 
 ## Scenarios
 
-The steps and scenarios run in this order. *Admin connection* tells whether a scenario needs the admin variables; *Without admin connection* tells what is lost when they are not set (with SQLite the admin connection is always there). Each name links to the detailed description. The descriptions under `doc/` show the scenarios with Oracle, the first DBMS implemented; where SQLite differs, they say so ("With SQLite ..."). The ideas of the cases and phases hold for every DBMS; SQL, error codes, server counters and limits differ and come from the backend module of the DBMS.
+The steps and scenarios run in this order. *Admin connection* tells whether a scenario needs the admin variables; *Without admin connection* tells what is lost when they are not set (with SQLite the admin connection is always there). Each name links to the detailed description. Each description under `doc/` first describes the scenario for every DBMS and ends with a section per DBMS on what is specific there; `dataTypes` lists its cases in a file per DBMS (`doc/dataTypes-<dbms>.md`). The tables of cases give the results with Oracle, the first DBMS implemented, as examples; the sections of the other DBMS say where they differ. The ideas of the cases and phases hold for every DBMS; SQL, error codes, server counters and limits differ and come from the backend module of the DBMS.
 
 | Scenario / Step                                         | Purpose                                                                                                                                                       | Admin connection | Without admin connection                                                                                  |
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------- |
@@ -330,6 +330,8 @@ Tested with SQLite 3.53.4 and the `luasql.sqlite3` of OneLuaPro, on Linux. Tier 
 
 **Preparation step:** sets the rollback journal, drops the tables of an aborted run (names starting with `luastress`) and creates helper tables: `luastress_rows` (the numbers 1 to 10 000), `luastress_err` (a `CHECK` constraint for a statement that fails) and `luastress_dml` (`STRICT`, for a string that is not a number). The teardown drops them; the file stays.
 
+**Page cache:** every connection of the suite sets `PRAGMA cache_size = -256` (256 KB instead of the default of 2 MB; `backend.connectSetup`). The page cache fills while a phase writes new pages, and its growth of up to its size would look like a leak in the phases that insert rows; with 256 KB it stays far below the limit of the leak check, so a leak of the driver shows sooner.
+
 **Known limitations**, reported as "limit":
 
 | Scenario       | Test                                         | Limitation                                                                                                                             |
@@ -339,6 +341,14 @@ Tested with SQLite 3.53.4 and the `luasql.sqlite3` of OneLuaPro, on Linux. Tier 
 | `concurrency`  | `lockNowait`                                 | SQLite locks the whole database for a write transaction, not single rows                                                               |
 | `transactions` | `enableAutocommit`                           | `setautocommit(true)` rolls back an open transaction                                                                                   |
 | `transactions` | `rowCountType`                               | row counts are floats in `luasql.sqlite3`, as in LuaSQL, e.g. `1.0`                                                                     |
+| `dataTypes`    | `date`, `leapDay`, `dateMin`, `dateOld`, `timestamp`, `timeInDate`, `rowsTimestamp`, `rowsColumnsNa` | SQLite has no date type: `luasql.sqlite3` binds dates and times as text, which comes back as bound, e.g. `2026-10-19` instead of `2026-10-19 00:00:00` |
+| `dataTypes`    | `dateBc`, `tsBc`                             | `luasql.sqlite3` takes years 0000 to 9999, the range of the date functions of SQLite                                                   |
+| `dataTypes`    | `booleanColumn`, `booleanFalse`, `plainTrue`, `plainFalse`, `booleanFetchNa` | SQLite has no boolean type: `true` and `false` are bound as 1 and 0                                    |
+| `dataTypes`    | `tooLong`, `charTooLong`, `rawBinaryTooLong` | SQLite does not enforce the declared length of a column                                                                                |
+| `dataTypes`    | `charPadded`, `charEmpty`, `ncharPadded`     | SQLite does not pad `CHAR(n)` with spaces                                                                                              |
+| `dataTypes`    | `floatOverflow`                              | a `NUMERIC` column stores 1e200 as `REAL`, without the range limit of a decimal type                                                   |
+| `dataTypes`    | `nanNumber`, `bdoubleNanBind`                | SQLite stores NaN as NULL                                                                                                              |
+| `dataTypes`    | `jsonDuplicate`                              | SQLite accepts duplicate keys in JSON (`json_valid`)                                                                                   |
 
 **Behavior worth knowing**, checked but not reported as limit:
 
@@ -349,7 +359,7 @@ Tested with SQLite 3.53.4 and the `luasql.sqlite3` of OneLuaPro, on Linux. Tier 
 - The longest string or blob is 1 000 000 000 bytes (`SQLITE_MAX_LENGTH` of the build); one byte more gives `string or blob too big`. Case `maxLength` of scenario `volume` needs about 2 GB of memory for it.
 - A second connection that wants to write while another one holds the write lock waits for its busy timeout (`PRAGMA busy_timeout`, or the second argument of `env:connect`), unless waiting could end in a deadlock: then SQLite gives `database is locked` at once. Case `deadlock` of scenario `threads` is skipped for this reason.
 
-**Not covered with SQLite yet:** scenarios `dataTypes` and `soak` (the backend has no tables for them yet), `prefetch` (`luasql.sqlite3` has no options), `warnings` (SQLite has no warnings of this kind) and `connectionLoss` and case `killDuringCall` (there is no session to kill).
+**Not covered with SQLite yet:** scenario `soak` (the backend has no table for it yet), the cases of `dataTypes` for types SQLite does not have and for hex text in binary columns (see [`doc/dataTypes-sqlite3.md`](doc/dataTypes-sqlite3.md)), `prefetch` (`luasql.sqlite3` has no options), `warnings` (SQLite has no warnings of this kind) and `connectionLoss` and case `killDuringCall` (there is no session to kill).
 
 ### PostgreSQL
 

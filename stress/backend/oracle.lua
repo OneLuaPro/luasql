@@ -475,6 +475,49 @@ return {
    -- First %s is the column, second one an SQL literal.
    typesInsertLiteral = "INSERT INTO luastress_types (id, %s)"
       .. " VALUES (:1, %s)",
+   -- SQL literals of the cases marked literal; a table also gives other
+   -- fields of the case. The expected values are in the case list.
+   typeLiterals = {
+      litPi = "3.141592653589793",
+      litSum = "0.30000000000000004",
+      litE = "-2.718281828459045",
+      litThird = "1/3",
+      -- Largest and smallest NUMBER.
+      litMax = "9.999999999999999999999999999999999999999E125",
+      litTiny = "1E-130",
+      bfloat = "0.1f",
+      bfloatInf = "BINARY_FLOAT_INFINITY",
+      bdouble = "0.1d + 0.2d",
+      bdoubleHuge = "1e300d",
+      bdoubleInf = "-BINARY_DOUBLE_INFINITY",
+      bdoubleNan = "BINARY_DOUBLE_NAN",
+      timestampFraction = "TIMESTAMP '2026-10-19 13:45:30.123456'",
+      timestampTzOffset = "TIMESTAMP '2026-10-19 13:45:30.5 +05:30'",
+      ltzOtherZone = "TIMESTAMP '2026-10-19 13:45:30 +02:00'",
+      ltzSummer = "TIMESTAMP '2026-07-15 12:00:00 UTC'",
+      ltzWinter = "TIMESTAMP '2026-01-15 12:00:00 UTC'",
+      dateBcLiteral = "DATE '-0044-03-15'",
+      tstzBcLiteral = "TIMESTAMP '-0044-03-15 12:00:00 +01:00'",
+      ymLiteral = "INTERVAL '1-2' YEAR TO MONTH",
+      dsLiteral = "INTERVAL '1 2:3:4.5' DAY TO SECOND",
+      dsFetchNa = "INTERVAL '1 2:3:4.5' DAY TO SECOND",
+      -- A difference of timestamps is an interval.
+      dsDifference = {
+         literal = "TIMESTAMP '2026-10-20 13:45:44.75'",
+         readExpression = "ts - TIMESTAMP '2026-10-19 12:16:00'",
+      },
+      rawLiteral = "HEXTORAW('00FF4100')",
+      rawLarge = "UTL_RAW.COPIES(HEXTORAW('DEADBEEF'), 500)",
+      rawGuid = "SYS_GUID()",
+      blobLiteral = "HEXTORAW('00FF4100')",
+      blobEmpty = "EMPTY_BLOB()",
+      jsonLiteral = "JSON('{\"x\" : [true, false]}')",
+      jsonLarge = "JSON_OBJECT('t' VALUE RPAD(TO_CLOB('ab'), 20000,"
+         .. " 'cd') RETURNING JSON)",
+   },
+   -- Oracle converts a string bound for a RAW or BLOB column from hex
+   -- text (implicit HEXTORAW); the cases with hex text check that.
+   hexTextBinary = true,
    -- %s is a number column; its exact value as text with a decimal
    -- point, independent of the session locale.
    numberAsText = "TO_CHAR(%s, 'TM9', 'NLS_NUMERIC_CHARACTERS = ''.,''')",

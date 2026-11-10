@@ -119,6 +119,8 @@ end
 
 -- Opens a connection with the given settings (an entry of what
 -- settings.read returns) on env; role names it in the error message.
+-- Then runs the statements of backend.connectSetup on it, settings of
+-- the suite for its measurements (e.g. a smaller page cache).
 -- Returns the connection, or nil and an error message.
 function settings.connect(env, backend, values, role)
    local conn, err = env:connect(settings.connectArgs(backend, values))
@@ -126,6 +128,18 @@ function settings.connect(env, backend, values, role)
       return nil, string.format("cannot open %s: %s",
                                 settings.describe(backend, values, role),
                                 tostring(err))
+   end
+   for _, sql in ipairs(backend.connectSetup or {}) do
+      local result, setupErr = conn:execute(sql)
+      if not result then
+         conn:close()
+         return nil, string.format("cannot set up %s: %s: %s",
+                                   settings.describe(backend, values, role),
+                                   sql, tostring(setupErr))
+      end
+      if type(result) == "userdata" then
+         result:close()
+      end
    end
    return conn
 end

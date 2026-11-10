@@ -4,9 +4,7 @@ Checks autocommit, commit and rollback: what another session sees, what a failed
 
 "Another session" is the admin connection: it sees only committed rows. Cases that need it are skipped without one. Behavior of the DBMS or the driver that a user might not expect is reported as a limit with its reason.
 
-The scenario uses a table `luastress_tx` (`id NUMBER PRIMARY KEY, v VARCHAR2(100)`); it is skipped if the backend has none or the driver has no `conn:prepare`.
-
-With SQLite, "another session" is the second connection to the test file; it sees only committed rows, as long as the test connection holds no more than its write lock. `commit()` and `rollback()` in autocommit mode give `false` and `no transaction is active` in `luasql.sqlite3`; where the scenario only makes sure that no transaction is open, this counts as done (`backend.noTransactionError`). `plsqlAutocommit` is skipped.
+The scenario uses a table `luastress_tx` with a key `id` and a text `v`; it is skipped if the backend has none or the driver has no `conn:prepare`.
 
 ## Cases
 
@@ -32,13 +30,11 @@ Each case runs once. Every case starts with autocommit on, no open transaction a
 | `gcOpen`              | The same, but the connection is left to the garbage collector (GC).                                                                                                          | As `closeOpen`.                                                                                                                                               |
 | `closeVariable`       | The same, with the connection in a to-be-closed variable (`<close>`) that goes out of scope.                                                                                 | As `closeOpen`.                                                                                                                                               |
 
-The last three cases matter because Oracle commits an open transaction when a session ends: the OCI documentation says so for `OCISessionEnd()`, and `OCILogoff()` ends the session in the same way. `luasql.oci8` therefore rolls back before it logs off, in `close`, `__gc` and `__close` alike, so only changes the program committed are kept. Before this rollback was added to the driver, these three cases showed the committed changes on Oracle 23.26.
-
 ## Phases
 
 Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 
-The phases run with autocommit off and one prepared insert. Besides the usual server counters they count the open transactions of the test session (`open tx`, with Oracle from `v$transaction`, with SQLite the write lock of the test connection as the probe sees it: like `v$transaction` it counts a transaction only once it has changed data). Before each phase a precheck opens a transaction and checks that this counter sees it; otherwise the phase fails as invalid, because "open tx 0 → 0" would test nothing. Without the admin connection the precheck and the server counters are left out.
+The phases run with autocommit off and one prepared insert. Besides the usual server counters they count the open transactions of the test session (`open tx`, `backend.transactionCounter`; it counts a transaction only once it has changed data). Before each phase a precheck opens a transaction and checks that this counter sees it; otherwise the phase fails as invalid, because "open tx 0 → 0" would test nothing. Without the admin connection the precheck and the server counters are left out.
 
 | Phase            | Each iteration                                                                                                                          | Fails when                                                                                                                                         |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -46,3 +42,13 @@ The phases run with autocommit off and one prepared insert. Besides the usual se
 | `insertRollback` | inserts a row, rolls back                                                                                                               | as above; the table must be empty at the end                                                                                                       |
 | `toggleAuto`     | turns autocommit on in even, off in odd iterations and inserts a row; of the odd iterations every second one commits, the other rolls back | as above; the table must hold exactly the rows inserted with autocommit or committed                                                           |
 | `errorRollback`  | inserts a row whose key exists (committed before the phase), rolls back                                                                 | the duplicate is accepted, the table does not hold exactly that one row at the end, or a counter or the memory grows                              |
+
+## Oracle
+
+The table is `luastress_tx (id NUMBER PRIMARY KEY, v VARCHAR2(100))`; `open tx` comes from `v$transaction`.
+
+The cases `closeOpen`, `gcOpen` and `closeVariable` matter because Oracle commits an open transaction when a session ends: the OCI documentation says so for `OCISessionEnd()`, and `OCILogoff()` ends the session in the same way. `luasql.oci8` therefore rolls back before it logs off, in `close`, `__gc` and `__close` alike, so only changes the program committed are kept. Before this rollback was added to the driver, these three cases showed the committed changes on Oracle 23.26.
+
+## SQLite
+
+"Another session" is the second connection to the test file; it sees only committed rows, as long as the test connection holds no more than its write lock. `open tx` is the write lock of the test connection as the probe sees it. `commit()` and `rollback()` in autocommit mode give `false` and `no transaction is active` in `luasql.sqlite3`; where the scenario only makes sure that no transaction is open, this counts as done (`backend.noTransactionError`). `plsqlAutocommit` is skipped.

@@ -2,11 +2,9 @@
 
 Uses the driver from several threads at the same time, with Lua Lanes. Each lane is a Lua state of its own, in a thread of its own, with its own environment and connection; LuaSQL objects cannot be passed between lanes. The scenario checks what only real threads can show: calls of the driver and its client library from several threads at once, one thread blocked in a call while others go on, and the release of everything a lane left open when its Lua state ends.
 
-With Oracle, the driver must create its OCI (Oracle Call Interface) environment with `OCI_THREADED`; otherwise the first case crashes the child process. A lane opens its connection itself from the environment variables (`laneconn.lua`); the scenario passes only the DBMS name and the module paths to it. The tasks of the lanes are in `scenarios/threadsLane.lua`.
+A lane opens its connection itself from the environment variables (`laneconn.lua`); the scenario passes only the DBMS name and the module paths to it. The tasks of the lanes are in `scenarios/threadsLane.lua`.
 
 The scenario is skipped without Lua Lanes, without `conn:prepare` or without the queries of the backend; `lockWait` and `deadlock` are skipped without the threads table, each case without the backend keys it needs. Cases that count or kill sessions need the admin connection and are skipped without it. A lane that hangs inside a call after a failed case is freed by killing its session; Lanes itself cannot cancel a lane inside a driver call.
-
-With SQLite there are no sessions: what a lane leaves behind is counted as the lock of other connections on the database file (`backend.leftoverCounter`, read by the probe of the admin connection, see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)); it must be back at 0. In `lockWait` both lanes set a busy timeout first (`backend.threadsLockSetup`), and B waits for the write lock of the database instead of a row. `deadlock` is skipped: a second writer gets `database is locked` at once, SQLite does not wait in a deadlock. `killDuringCall` is skipped: there is no session to kill.
 
 ## Cases
 
@@ -33,3 +31,11 @@ Iterations per phase: smoke 20, standard 200, nightly 1000; the first 300 iterat
 | `laneLoop` | each of N lanes, which live for the whole phase, connects, runs 5 queries and closes                                    | a sum is wrong, a lane fails or misses an iteration, or sessions, a counter or the memory grow (see [Phases](../README.md#phases)) |
 
 The lanes of `laneLoop` live for the whole phase on purpose: threads that are started and ended in every iteration raise the memory of the process in steps that hide any leak. Starting and ending threads is checked by the cases, through the sessions.
+
+## Oracle
+
+The driver must create its OCI (Oracle Call Interface) environment with `OCI_THREADED`; otherwise the first case crashes the child process.
+
+## SQLite
+
+There are no sessions: what a lane leaves behind is counted as the lock of other connections on the database file (`backend.leftoverCounter`, read by the probe of the admin connection, see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)); it must be back at 0. In `lockWait` both lanes set a busy timeout first (`backend.threadsLockSetup`), and B waits for the write lock of the database instead of a row. `deadlock` is skipped: a second writer gets `database is locked` at once, SQLite does not wait in a deadlock. `killDuringCall` is skipped: there is no session to kill.

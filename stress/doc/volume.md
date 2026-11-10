@@ -2,7 +2,7 @@
 
 Moves large amounts of data through the driver. It checks that the memory stays constant however many rows pass, that every value arrives unchanged, that a large transaction can be rolled back, that an exhausted tablespace gives a clean error after which the session works on, also inside a transaction, and that the longest value the DBMS takes goes through and one byte more gives a clean error.
 
-The scenario uses the tables `luastress_vol` (`id NUMBER PRIMARY KEY, n NUMBER, s VARCHAR2(100)`) and `luastress_vollob` (`id NUMBER PRIMARY KEY, c CLOB`), and for `binaryInsert` the temporary table `luastress_volbin` (`id NUMBER, b BLOB`, `ON COMMIT DELETE ROWS`); it is skipped if the backend has none or the driver has no `conn:prepare`. `binaryInsert` is skipped if the backend has no temporary table (`volBinaryTableCreate`) or the driver no `luasql.type.binary`. Tables left by an aborted run are dropped first.
+The scenario uses the tables `luastress_vol` (`id`, a number `n`, a text `s`) and `luastress_vollob` (`id`, a CLOB `c`), and for `binaryInsert` the table `luastress_volbin` (`id`, a BLOB `b`) that keeps no rows after a commit; it is skipped if the backend has none or the driver has no `conn:prepare`. `binaryInsert` is skipped if the backend has no temporary table (`volBinaryTableCreate`) or the driver no `luasql.type.binary`. Tables left by an aborted run are dropped first.
 
 ## Phases
 
@@ -23,11 +23,7 @@ Besides the usual server counters the phases count the open transactions of the 
 | `lobFetch`      | fetches the next row with its CLOB and checks it                                                                 | a row or its CLOB is missing or wrong, or a counter or the memory grows                                                                                  |
 | `binaryInsert`  | inserts a row with `luasql.type.binary` of 32 767, 32 768, 100 000 and 1 048 576 bytes in turn (all byte values) into the BLOB (Binary Large Object) of the temporary table, autocommit off; every 10th row is read back and compared, then committed, which empties the table | an insert fails, a value read back differs, or a counter or the memory grows |
 
-Before `lobFetch` the scenario reads one CLOB. On the first LOB read from a table Oracle opens an internal cursor (`table_304_11_<object id>`) that stays open in the session; read inside the phase, it would count as a cursor leak. For the same reason one row of `luastress_volbin` is written and read before `binaryInsert`.
-
-With SQLite the tables have the types `INTEGER`, `REAL`, `TEXT` and `BLOB`, and `luastress_volbin` keeps at most 16 rows: an insert replaces the row of its slot (id modulo 16), so the file does not grow.
-
-`binaryInsert` writes real BLOBs, up to 1 MB per row, without filling a tablespace: the rows of the temporary table go at each commit. With Oracle (checked in SQL*Plus) such a BLOB is no temporary LOB (`temp lobs` stays 0), and the commit frees its temporary segments. 32 767 and 32 768 bytes lie on both sides of the size where `luasql.oci8` changes its bind from `SQLT_BIN` to `SQLT_LBI`.
+Before `lobFetch` the scenario reads one CLOB, and before `binaryInsert` it writes and reads one row of `luastress_volbin`, so that what the DBMS opens on the first LOB read of a table does not count as a leak of the phase. `binaryInsert` writes real BLOBs, up to 1 MB per row, without filling the database.
 
 After the phases a line shows the throughput of each phase in rows per second. It is information, not a check. From a nightly run (Oracle, local VM, prefetch 100, network encryption):
 
@@ -39,7 +35,7 @@ After the phases a line shows the throughput of each phase in rows per second. I
 
 ## Cases
 
-The cases run once each, in this order, and build on each other. They use a table in the small tablespace `LUASTRESS` (50 MB, no autoextend) that the [`prep`](prep.md) step creates; without it, i.e. without the admin connection, they are skipped. The error of a full tablespace is any `ORA-016..` error: `ORA-01653` (table), `ORA-01654` (index), `ORA-01691` (LOB segment) and relatives.
+The cases run once each, in this order, and build on each other. They fill a table in a space of limited size until the DBMS reports it full (`backend.fullErrorPattern`); the names and texts speak of a tablespace, as with Oracle; the sections of the DBMS below say what the space is. Without such a space the cases are skipped.
 
 | Test             | Checks                                                                                                                                          | Results                                                                                                                                  |
 | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -54,10 +50,22 @@ In `fullCommit` and `fullKeepsTx`, if the DBMS ends the transaction itself at th
 
 After each case an open transaction is rolled back; at the end the table is dropped, so the tablespace is empty again for the next run.
 
-With SQLite there are no tablespaces: before the cases `VACUUM` frees the space of dropped tables, then the test connection may add only 300 pages to the file (`PRAGMA max_page_count`, which holds for this connection only; `backend.fullSetup`), afterwards the limit is lifted again (`backend.fullReset`). The error of a full database is `database or disk is full`.
-
 A value case runs after them, independent of the tablespace:
 
 | Test        | Checks                                                                                                                                  | Results                                                                                                                       |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `maxLength` | A value of the longest length the DBMS takes (`backend.maxValueLength`, SQLite 1 000 000 000 bytes), as text and as `luasql.type.binary`, through a query that returns its length (`backend.valueLengthQuery`); then one byte more, as text, as binary and through `conn:execute`; then a short value. | Pass: the length comes back for both, one byte more gives `nil` and a message (SQLite: `string or blob too big`) in all three calls, and the statement works on. Fail: a wrong length, an error at the limit, success or a crash above it. Needs about twice the length in memory (2 GB with SQLite). Skipped without these backend keys (Oracle). |
+
+## Oracle
+
+The tables are `luastress_vol (id NUMBER PRIMARY KEY, n NUMBER, s VARCHAR2(100))`, `luastress_vollob (id NUMBER PRIMARY KEY, c CLOB)` and the temporary table `luastress_volbin (id NUMBER, b BLOB)` with `ON COMMIT DELETE ROWS`.
+
+On the first LOB read from a table Oracle opens an internal cursor (`table_304_11_<object id>`) that stays open in the session; read inside the phase, it would count as a cursor leak. A BLOB of `binaryInsert` is no temporary LOB (`temp lobs` stays 0, checked in SQL*Plus), and the commit frees its temporary segments. 32 767 and 32 768 bytes lie on both sides of the size where `luasql.oci8` changes its bind from `SQLT_BIN` to `SQLT_LBI`.
+
+The cases use a table in the small tablespace `LUASTRESS` (50 MB, no autoextend) that the [`prep`](prep.md) step creates; without it, i.e. without the admin connection, they are skipped. The error of a full tablespace is any `ORA-016..` error: `ORA-01653` (table), `ORA-01654` (index), `ORA-01691` (LOB segment) and relatives. `maxLength` is skipped.
+
+## SQLite
+
+The tables have the types `INTEGER`, `REAL`, `TEXT` and `BLOB`, and `luastress_volbin` keeps at most 16 rows: an insert replaces the row of its slot (id modulo 16), so the file does not grow. The page cache of the test connection is limited to 256 KB (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)); with the default of 2 MB, `bulkInsert` and `bigRollback` grew by up to 1.1 MB while the cache filled.
+
+There are no tablespaces: before the cases `VACUUM` frees the space of dropped tables, then the test connection may add only 300 pages to the file (`PRAGMA max_page_count`, which holds for this connection only; `backend.fullSetup`), afterwards the limit is lifted again (`backend.fullReset`). The error of a full database is `database or disk is full`.

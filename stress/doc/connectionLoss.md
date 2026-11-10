@@ -1,8 +1,8 @@
 # Scenario `connectionLoss`
 
-Kills the server session of a connection of its own, never the test connection, and checks that every later call on that connection fails cleanly: a message about the lost connection (with Oracle `ORA-03113`, `ORA-03114`, `ORA-03135` or `ORA-00028`), with `nil` from `execute` and `fetch` and `false` from `commit`, `rollback` and `setautocommit`, as the [error convention](../README.md#error-convention) says; no crash, no hang. Closing must work afterwards and nothing may stay behind. This is what a program sees when the database restarts, an administrator ends a session or the network drops.
+Kills the server session of a connection of its own, never the test connection, and checks that every later call on that connection fails cleanly: a message about the lost connection (`backend.lostConnectionErrors`), with `nil` from `execute` and `fetch` and `false` from `commit`, `rollback` and `setautocommit`, as the [error convention](../README.md#error-convention) says; no crash, no hang. Closing must work afterwards and nothing may stay behind. This is what a program sees when the database restarts, an administrator ends a session or the network drops.
 
-The kill runs on the admin connection (`ALTER SYSTEM KILL SESSION ... IMMEDIATE`); without it the scenario is skipped. Sessions are counted without those in status `KILLED`: Oracle removes a killed session from `v$session` only after a few seconds, independent of the client.
+The kill runs on the admin connection (`backend.killSession`); without it, or for a DBMS without sessions, the scenario is skipped.
 
 A kill while a statement runs on the server needs a second thread; it is part of scenario [`threads`](threads.md).
 
@@ -30,3 +30,11 @@ Iterations per phase: smoke 20, standard 200, nightly 1000 (one logon and one ki
 | Phase      | Each iteration                                                                   | Fails when                                                                                                                          |
 | ---------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `killLoop` | connects, queries, kills the session, executes (must fail), closes               | the call after the kill does not fail with a lost connection error, or sessions, a counter or the memory grow (see [Phases](../README.md#phases)) |
+
+## Oracle
+
+The kill is `ALTER SYSTEM KILL SESSION ... IMMEDIATE`. A lost connection shows as `ORA-03113`, `ORA-03114`, `ORA-03135` or `ORA-00028`. Sessions are counted without those in status `KILLED`: Oracle removes a killed session from `v$session` only after a few seconds, independent of the client.
+
+## SQLite
+
+Skipped: SQLite has no sessions that could be killed.

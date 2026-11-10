@@ -24,8 +24,14 @@ Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 | `blobRows`     | as `clobRows`, with temporary BLOBs                                                                                                                      | the same                                                                                      |
 | `jsonRead`     | as `clobRead`, with a JSON object that holds the CLOB                                                                                                    | the JSON text is wrong, or a counter or the memory grows                                      |
 
-A LOB phase first checks that its query really gives temporary LOBs (`backend.tempLobChecks`); if not, it fails as invalid, because it would test nothing. The driver reads JSON through a CLOB define that leaves no temporary LOB on the server, so `jsonRead` has no such check; it guards against JSON fetches that pile up memory. A phase is skipped if the backend has no query for it.
+A LOB phase first checks that its query really gives temporary LOBs (`backend.tempLobChecks`); if not, it fails as invalid, because it would test nothing. `jsonRead` has no such check; it guards against JSON fetches that pile up memory. A phase is skipped if the backend has no query for it.
 
 The counters before and after a phase cannot show a cursor that keeps something after its close, as long as the next execute of the same statement or its close at the end of the phase releases it; `closeRelease` checks this while the statement is open.
 
-With SQLite there are no temporary LOBs: the LOB phases read long text and blobs made by SQL, and the server counter is the lock of the test connection on the database file (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)).
+## Oracle
+
+The server counters are the open cursors and the temporary LOBs of the test session. `luasql.oci8` reads JSON through a CLOB define that leaves no temporary LOB on the server.
+
+## SQLite
+
+There are no temporary LOBs: the LOB phases read long text and blobs made by SQL, and the server counter is the lock of the test connection on the database file (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)).

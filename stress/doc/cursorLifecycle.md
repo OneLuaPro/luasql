@@ -2,7 +2,7 @@
 
 Opens and closes many cursors through `conn:execute` on the test connection, in every way a program might end a cursor: closed before the end, fetched to the end, closed after one row, or simply dropped and left to the garbage collector (GC). Two phases do the same with a temporary LOB (Large Object) in every row. Every phase checks that open cursors and temporary LOBs on the server and the memory of the client do not grow.
 
-`conn:execute` uses the default prefetch of the driver (100 rows with `luasql.oci8`), so rows after the current one may already be on the client when a cursor is closed; the LOB phases check that their temporary LOBs are freed all the same. Other prefetch values are the subject of scenario [`prefetch`](prefetch.md).
+`conn:execute` uses the default prefetch of the driver, if it has one, so rows after the current one may already be on the client when a cursor is closed; the LOB phases check that their temporary LOBs are freed all the same. Other prefetch values are the subject of scenario [`prefetch`](prefetch.md).
 
 There are no single cases in this scenario.
 
@@ -21,4 +21,10 @@ Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 
 A LOB phase first checks that its query really gives temporary LOBs (`backend.tempLobChecks`); if not, it fails as invalid, because it would test nothing. A LOB phase is skipped if the backend has no query for it.
 
-With SQLite there are no temporary LOBs and no prefetch: the LOB phases read long text and blobs made by SQL, and the server counter is the lock of the test connection on the file (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)). It must be 0 before each phase; a cursor that was closed or collected but still holds its statement shows there.
+## Oracle
+
+`conn:execute` fetches 100 rows ahead (the default prefetch of `luasql.oci8`). The server counters are the open cursors and the temporary LOBs of the test session.
+
+## SQLite
+
+There are no temporary LOBs and no prefetch: the LOB phases read long text and blobs made by SQL, and the server counter is the lock of the test connection on the file (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)). It must be 0 before each phase; a cursor that was closed or collected but still holds its statement shows there.

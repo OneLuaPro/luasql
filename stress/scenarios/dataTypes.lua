@@ -128,11 +128,36 @@ local function binaryOf(n)
    return string.rep(allBytes, n // 256 + 1):sub(1, n)
 end
 
+-- The columns of the test table (backend.typesTableCreate) and what a
+-- backend must give for them; a backend leaves out what its DBMS does
+-- not have (backend.typesColumns), the cases of such a column are
+-- skipped:
+--   n      exact decimal number (Oracle NUMBER)
+--   s      text of up to 4000 bytes; ns text in the national
+--          character set
+--   d      a date with time of day in seconds: it must hold every valid
+--          luasql.type.date value without loss (decision B5), e.g.
+--          Oracle DATE, PostgreSQL timestamp(0), MySQL DATETIME; read
+--          as "YYYY-MM-DD HH:MM:SS"
+--   ts     timestamp with 6 digits of fractional seconds, read with all
+--          6 digits; tstz, tsltz with time zone, local time zone
+--   b      boolean
+--   c, nc  character LOB, national character set
+--   bf, bd binary floating point, single and double precision
+--   ch,nch fixed length text of 10 characters, padded with spaces
+--   r      a stored row id; rw binary of up to 2000 bytes; bl binary
+--          LOB; js JSON; iym, ids (and iym4, ids3) intervals
+-- Where luasql promises nothing (e.g. the text form of a date read
+-- back), the expected value is the form most DBMS give; a DBMS that
+-- differs gets a limit in its backend. With no clear majority the
+-- expectation stays as it was (luasql-devel-api, 9 November 2026).
+--
 -- Builds the case list. A case has: name, block, column, param (as for
 -- stmt:execute) and expected; optional: nullResult (expect NULL),
 -- expectError, errorAllowed (an error is fine, a wrong value is not),
 -- needsTimeZone, checkServer (also check the value stored on the
--- server), literal (SQL literal written instead of param), fetchMode
+-- server), literal (true: an SQL literal from backend.typeLiterals is
+-- written instead of param; without one the case is skipped), fetchMode
 -- ("a", "na" or "multi"), exactRead (exact in float mode, too),
 -- needs (backend keys the case needs), rowid (ROWID case, see
 -- runRowidCase; with iot and store), checkHex (also check the bytes
@@ -140,13 +165,18 @@ end
 -- made on the server: expect the stored bytes of this length), write
 -- (backend key of a statement that writes row :1, with writeParams; %s
 -- is the column), checkText (backend key of an expression that gives
--- the text of the value on the server; %s is the column), readExpression
+-- the text of the value on the server; %s is the column), serverText
+-- (expect the text of checkText instead of expected), readExpression
 -- (read instead of the column), columnType (expected column type, for a
 -- readExpression), unsupported (key in backend.unsupportedTypes),
 -- columns and rows (rows case, see runRowsCase), sessionTimeZone (the
 -- case runs with this session time zone instead of testTimeZone).
--- Backend overrides may add limitReason with limitNull (NULL read back)
--- or limitError (Lua pattern of an expected write error).
+-- Backend overrides (backend.typeCaseOverrides) may change any field
+-- and add limitReason with limitNull (NULL read back), limitError (Lua
+-- pattern of an expected write error), limitValue (this value read
+-- back; true: the value as bound) or, for a rows case, limitCells
+-- ({ [row] = { [column] = value } }); limitNull and limitValue also
+-- apply to a case that expects an error when the value was stored.
 local function makeCases(t)
    local list = {}
    local function add(name, block, column, param, expected, extra)
@@ -223,35 +253,35 @@ local function makeCases(t)
    -- not hidden by the bind limit; the expected values are hex float
    -- literals, which Lua parses exactly.
    add("litPi", "numbers", "n", nil, 0x1.921fb54442d18p+1,
-       { literal = "3.141592653589793" })
+       { literal = true })
    add("litSum", "numbers", "n", nil, 0x1.3333333333334p-2,
-       { literal = "0.30000000000000004" })
+       { literal = true })
    add("litE", "numbers", "n", nil, -0x1.5bf0a8b145769p+1,
-       { literal = "-2.718281828459045" })
+       { literal = true })
    -- 40 digits on the server.
    add("litThird", "numbers", "n", nil, 0x1.5555555555555p-2,
-       { literal = "1/3" })
+       { literal = true })
    -- Largest and smallest NUMBER, read in scientific notation.
    add("litMax", "numbers", "n", nil, 0x1.7a2ecc414a03fp+418,
-       { literal = "9.999999999999999999999999999999999999999E125" })
+       { literal = true })
    add("litTiny", "numbers", "n", nil, 0x1.1bebdf578b2f4p-432,
-       { literal = "1E-130" })
+       { literal = true })
    add("nanNumber", "numbers", "n", { 0 / 0, t.number }, 0 / 0,
        { checkServer = false })
    -- 0.1 rounded to single precision, as BINARY_FLOAT stores it.
    local float32 = string.unpack("f", string.pack("f", 0.1))
-   add("bfloat", "numbers", "bf", nil, float32, native({ literal = "0.1f" }))
+   add("bfloat", "numbers", "bf", nil, float32, native({ literal = true }))
    add("bfloatBind", "numbers", "bf", { 0.1, t.number }, float32, native())
    add("bfloatInf", "numbers", "bf", nil, math.huge,
-       native({ literal = "BINARY_FLOAT_INFINITY" }))
+       native({ literal = true }))
    add("bdouble", "numbers", "bd", nil, 0.1 + 0.2,
-       native({ literal = "0.1d + 0.2d" }))
+       native({ literal = true }))
    add("bdoubleHuge", "numbers", "bd", nil, 1e300,
-       native({ literal = "1e300d" }))
+       native({ literal = true }))
    add("bdoubleInf", "numbers", "bd", nil, -math.huge,
-       native({ literal = "-BINARY_DOUBLE_INFINITY" }))
+       native({ literal = true }))
    add("bdoubleNan", "numbers", "bd", nil, 0 / 0,
-       native({ literal = "BINARY_DOUBLE_NAN" }))
+       native({ literal = true }))
    add("bdoubleBind", "numbers", "bd", { 0.1 + 0.2, t.number }, 0.1 + 0.2,
        native())
    add("bdoubleInfBind", "numbers", "bd", { math.huge, t.number },
@@ -276,14 +306,14 @@ local function makeCases(t)
    -- Binds have no fractional seconds, so a literal is written instead.
    add("timestampFraction", "dates", "ts", nil,
        "2026-10-19 13:45:30.123456",
-       { literal = "TIMESTAMP '2026-10-19 13:45:30.123456'" })
+       { literal = true })
    add("timestampTz", "dates", "tstz",
        { "2026-10-19 13:45:30", t.timestamp },
        "2026-10-19 13:45:30.000000 " .. testTimeZone,
        { needsTimeZone = true })
    add("timestampTzOffset", "dates", "tstz", nil,
        "2026-10-19 13:45:30.500000 +05:30",
-       { literal = "TIMESTAMP '2026-10-19 13:45:30.5 +05:30'" })
+       { literal = true })
    -- LTZ values come in the session time zone; checked against TO_CHAR
    -- in the same session.
    local function ltz(extra)
@@ -296,13 +326,13 @@ local function makeCases(t)
        "2026-10-19 13:45:30.000000", ltz({}))
    local foreign = foreignTimeZone()
    add("ltzOtherZone", "dates", "tsltz", nil, timeInZone(foreign),
-       ltz({ literal = "TIMESTAMP '2026-10-19 13:45:30 +02:00'",
+       ltz({ literal = true,
              sessionTimeZone = foreign }))
    add("ltzSummer", "dates", "tsltz", nil, "2026-07-15 14:00:00.000000",
-       ltz({ literal = "TIMESTAMP '2026-07-15 12:00:00 UTC'",
+       ltz({ literal = true,
              sessionTimeZone = regionTimeZone }))
    add("ltzWinter", "dates", "tsltz", nil, "2026-01-15 13:00:00.000000",
-       ltz({ literal = "TIMESTAMP '2026-01-15 12:00:00 UTC'",
+       ltz({ literal = true,
              sessionTimeZone = regionTimeZone }))
    add("dateNull", "dates", "d", t.null, nil, null)
    -- Bind formats: DATE with optional time, TIMESTAMP with optional
@@ -326,7 +356,7 @@ local function makeCases(t)
    add("dateBc", "dates", "d", { "-4712-01-01", t.date },
        "-4712-01-01 00:00:00")
    add("dateBcLiteral", "dates", "d", nil, "-0044-03-15 00:00:00",
-       { literal = "DATE '-0044-03-15'" })
+       { literal = true })
    add("tsBc", "dates", "ts", { "-0044-03-15 12:00:00.25", t.timestamp },
        "-0044-03-15 12:00:00.250000")
    add("tsMax", "dates", "ts",
@@ -334,7 +364,7 @@ local function makeCases(t)
        "9999-12-31 23:59:59.999999")
    add("tstzBcLiteral", "dates", "tstz", nil,
        "-0044-03-15 12:00:00.000000 +01:00",
-       { literal = "TIMESTAMP '-0044-03-15 12:00:00 +01:00'" })
+       { literal = true })
    -- luasql.type.time is bound as a plain string.
    add("timeAsString", "dates", "s", { "13:45:30", t.time }, "13:45:30")
    add("timeInDate", "dates", "d", { "13:45:30", t.time }, nil)
@@ -356,7 +386,7 @@ local function makeCases(t)
                         writeParams = { { text, t.string } } })
    end
    add("ymLiteral", "dates", "iym", nil, "+01-02",
-       interval({ literal = "INTERVAL '1-2' YEAR TO MONTH" }))
+       interval({ literal = true }))
    add("ymBind", "dates", "iym", nil, "+01-02", ymBind("1-2"))
    add("ymNegative", "dates", "iym", nil, "-01-02", ymBind("-1-2"))
    -- The text the driver reads must be accepted as input again.
@@ -364,7 +394,7 @@ local function makeCases(t)
    add("ymYear4", "dates", "iym4", nil, "+0001-02", ymBind("1-2"))
    add("ymNull", "dates", "iym", t.null, nil, interval({ nullResult = true }))
    add("dsLiteral", "dates", "ids", nil, "+01 02:03:04.500000",
-       interval({ literal = "INTERVAL '1 2:3:4.5' DAY TO SECOND" }))
+       interval({ literal = true }))
    add("dsBind", "dates", "ids", nil, "+01 02:03:04.500000",
        dsBind("1 02:03:04.5"))
    add("dsNegative", "dates", "ids", nil, "-01 02:03:04.500000",
@@ -377,12 +407,11 @@ local function makeCases(t)
    tooLarge.expectError = true
    add("dsTooLarge", "dates", "ids", nil, nil, tooLarge)
    -- A computed interval has the largest precisions (9 and 9).
+   -- The backend gives the literal and the expression it is read with.
    add("dsDifference", "dates", "ts", nil, "+000000001 01:29:44.750000000",
-       interval({ literal = "TIMESTAMP '2026-10-20 13:45:44.75'",
-                  readExpression = "ts - TIMESTAMP '2026-10-19 12:16:00'" }))
+       interval({ literal = true }))
    add("dsFetchNa", "dates", "ids", nil, "+01 02:03:04.500000",
-       interval({ literal = "INTERVAL '1 2:3:4.5' DAY TO SECOND",
-                  fetchMode = "na" }))
+       interval({ literal = true, fetchMode = "na" }))
    add("dsNull", "dates", "ids", t.null, nil, interval({ nullResult = true }))
 
    add("trueAsNumber", "booleans", "n", { true, t.boolean }, 1)
@@ -452,22 +481,31 @@ local function makeCases(t)
        { rowid = true, iot = true, store = true, needs = iotNeeds })
    add("urowidNull", "rowids", "r", t.null, nil, null)
 
-   -- RAW: string binds and literals are hex text, reads give the bytes.
+   -- RAW, a binary column of at most 2000 bytes; reads give the bytes.
+   -- A plain string stays text (luasql decision B5); the cases with hex
+   -- text check a conversion of the DBMS (Oracle) and need
+   -- backend.hexTextBinary.
    local bytes = "\0\255A\0"
-   add("rawLiteral", "raw", "rw", nil, bytes,
-       { literal = "HEXTORAW('00FF4100')" })
-   add("rawHexBind", "raw", "rw", { "00FF4100", t.string }, bytes)
+   local function hexText(extra)
+      extra = extra or {}
+      extra.needs = { "hexTextBinary" }
+      return extra
+   end
+   add("rawLiteral", "raw", "rw", nil, bytes, { literal = true })
+   add("rawHexBind", "raw", "rw", { "00FF4100", t.string }, bytes,
+       hexText())
    add("rawHexLower", "raw", "rw", { "deadbeef", t.string },
-       "\xDE\xAD\xBE\xEF")
+       "\xDE\xAD\xBE\xEF", hexText())
    add("rawLarge", "raw", "rw", nil, string.rep("\xDE\xAD\xBE\xEF", 500),
-       { literal = "UTL_RAW.COPIES(HEXTORAW('DEADBEEF'), 500)" })
+       { literal = true })
    add("rawGuid", "raw", "rw", nil, nil,
-       { literal = "SYS_GUID()", expectedLength = 16,
+       { literal = true, expectedLength = 16,
          needs = { "rawAsHex" } })
    add("rawTooLong", "raw", "rw", { string.rep("AB", 2001), t.string },
-       nil, fails)
-   add("rawInvalidHex", "raw", "rw", { "XYZ", t.string }, nil, fails)
-   add("rawEmpty", "raw", "rw", { "", t.string }, "")
+       nil, hexText({ expectError = true }))
+   add("rawInvalidHex", "raw", "rw", { "XYZ", t.string }, nil,
+       hexText({ expectError = true }))
+   add("rawEmpty", "raw", "rw", { "", t.string }, "", hexText())
    add("rawNull", "raw", "rw", t.null, nil, null)
    -- luasql.type.binary: the bytes as they are, no hex text.
    add("rawBinary", "raw", "rw", { bytes, t.binary }, bytes)
@@ -480,15 +518,16 @@ local function makeCases(t)
    add("rawBinaryEmpty", "raw", "rw", { "", t.binary }, "")
    add("rawBinaryNull", "raw", "rw", { t.null, t.binary }, nil, null)
    -- A plain string is text: the server reads it as hex.
-   add("rawPlainHex", "raw", "rw", "00FF4100", bytes)
+   add("rawPlainHex", "raw", "rw", "00FF4100", bytes, hexText())
    add("rawFetchNa", "raw", "rw", { "00FF4100", t.string }, bytes,
-       { fetchMode = "na" })
+       hexText({ fetchMode = "na" }))
 
-   -- BLOB: written as hex text or RAW, read as bytes.
-   add("blobLiteral", "blob", "bl", nil, bytes,
-       { literal = "HEXTORAW('00FF4100')" })
-   add("blobHexBind", "blob", "bl", { "00FF4100", t.string }, bytes)
-   add("blobEmpty", "blob", "bl", nil, "", { literal = "EMPTY_BLOB()" })
+   -- BLOB: written as a literal, as luasql.type.binary or (with
+   -- backend.hexTextBinary) as hex text, read as bytes.
+   add("blobLiteral", "blob", "bl", nil, bytes, { literal = true })
+   add("blobHexBind", "blob", "bl", { "00FF4100", t.string }, bytes,
+       hexText())
+   add("blobEmpty", "blob", "bl", nil, "", { literal = true })
    add("blobNull", "blob", "bl", t.null, nil, null)
    -- luasql.type.binary into a BLOB, below and above 32767 bytes, where
    -- the bind of the driver may change (luasql.oci8: SQLT_BIN, SQLT_LBI).
@@ -502,44 +541,45 @@ local function makeCases(t)
    add("blobBinaryEmpty", "blob", "bl", { "", t.binary }, "")
    add("blobBinaryNull", "blob", "bl", { t.null, t.binary }, nil, null)
    add("blobFetchNa", "blob", "bl", { "00FF4100", t.string }, bytes,
-       { fetchMode = "na" })
+       hexText({ fetchMode = "na" }))
    -- 100000 bytes, more than one read piece in the driver.
    add("blobLarge", "blob", "bl", nil,
        string.rep("\xDE\xAD\xBE\xEF", 25000),
        { write = "blobLargeInsert", needs = { "blobLargeInsert" },
          writeParams = { { "DEADBEEF", t.string }, { 25000, t.int } } })
 
-   -- JSON: written as text, read as compact text (key order kept,
-   -- numbers normalized, \u escapes as UTF-8) and compared with the
-   -- text of the server.
+   -- JSON: written as text and read as text. How the DBMS stores it
+   -- (key order, numbers, \u escapes, spaces) is its own matter; the
+   -- read value must be the text the server gives for the stored value
+   -- (backend.jsonAsText), unchanged by the driver.
    local function json(extra)
       extra = extra or {}
       extra.checkText = "jsonAsText"
+      extra.serverText = true
+      extra.needs = { "jsonAsText" }
       return extra
    end
    local jsonLong = '{"t":"' .. string.rep("x", 20000) .. '"}'
    add("jsonCompact", "json", "js",
        { '{"b" : 1.0, "a" : [1, 2e2, -0.5, true, null],'
-            .. ' "s" : "\\u00e4\\u20ac"}', t.string },
-       '{"b":1,"a":[1,200,-0.5,true,null],"s":"\u{E4}\u{20AC}"}', json())
+            .. ' "s" : "\\u00e4\\u20ac"}', t.string }, nil, json())
    add("jsonUtf8", "json", "js", { '{"s" : "' .. utf8Text .. '"}', t.string },
-       '{"s":"' .. utf8Text .. '"}', json())
-   add("jsonLiteral", "json", "js", nil, '{"x":[true,false]}',
-       json({ literal = "JSON('{\"x\" : [true, false]}')" }))
-   -- More than one read piece of 16384 characters.
-   add("jsonLarge", "json", "js", nil,
-       '{"t":"ab' .. string.rep("cd", 9999) .. '"}',
-       json({ literal = "JSON_OBJECT('t' VALUE RPAD(TO_CLOB('ab'), 20000,"
-                 .. " 'cd') RETURNING JSON)" }))
-   add("jsonLargeBind", "json", "js", { jsonLong, t.string }, jsonLong,
+       nil, json())
+   add("jsonLiteral", "json", "js", nil, nil, json({ literal = true }))
+   -- About 20000 characters, more than one read piece of 16384.
+   add("jsonLarge", "json", "js", nil, nil, json({ literal = true }))
+   add("jsonLargeBind", "json", "js", { jsonLong, t.string }, nil,
        json())
    add("jsonDuplicate", "json", "js", { '{"a":1,"a":2}', t.string }, nil,
        json({ expectError = true }))
    add("jsonInvalid", "json", "js", { '{"a":', t.string }, nil,
        json({ expectError = true }))
-   add("jsonEmpty", "json", "js", { "", t.string }, "", json())
+   -- An empty string is no JSON (PostgreSQL, MySQL, SQLite with
+   -- json_valid reject it).
+   add("jsonEmpty", "json", "js", { "", t.string }, nil,
+       json({ expectError = true }))
    add("jsonNull", "json", "js", t.null, nil, json({ nullResult = true }))
-   add("jsonFetchNa", "json", "js", { '{"a" : 1}', t.string }, '{"a":1}',
+   add("jsonFetchNa", "json", "js", { '{"a" : 1}', t.string }, nil,
        json({ fetchMode = "na" }))
 
    add("clobAscii", "clob", "c", { asciiClob, t.string }, asciiClob)
@@ -575,9 +615,9 @@ local function makeCases(t)
       extra.needs = { "typesInsertColumns", "typesRangeSelect" }
       return extra
    end
-   local deadBeef = { { string.rep("DEADBEEF", 500), t.string },
+   local deadBeef = { { string.rep("\xDE\xAD\xBE\xEF", 500), t.binary },
                       string.rep("\xDE\xAD\xBE\xEF", 500) }
-   local zeroByte = { { "00", t.string }, "\0" }
+   local zeroByte = { { "\0", t.binary }, "\0" }
    add("rowsString", "rows", "s", nil, nil, rows({ "s" }, {
       { text(string.rep("x", 3000)) }, { text("ab") }, { nullCell },
       { text(string.rep("\u{E4}", 1000)) }, { nullCell }, { text("z") },
@@ -818,7 +858,7 @@ end
 -- Returns "pass", or "fail" and a message.
 local function runRowidCase(ctx, id, case)
    local backend = ctx.backend
-   local int, str = ctx.types.int, ctx.types.string
+   local int = ctx.types.int
    local tableName = case.iot and backend.iotTable or backend.typesTable
    local ok, err
    if case.iot then
@@ -837,7 +877,9 @@ local function runRowidCase(ctx, id, case)
    if not ok then
       return "fail", "read ROWID: " .. rowid
    end
-   if type(rowid) ~= "string" or rowid == "" then
+   -- A string (Oracle) or an integer (SQLite); bound back as read.
+   if rowid == "" or (type(rowid) ~= "string"
+                      and math.type(rowid) ~= "integer") then
       return "fail", "ROWID read as " .. describe(rowid)
    end
    local problem = columnTypeProblem(columnTypes.rowid, rowidType)
@@ -849,7 +891,7 @@ local function runRowidCase(ctx, id, case)
       ctx.nextId = ctx.nextId + 1
       local storeId = ctx.nextId
       ok, err = executeStatement(ctx, string.format(backend.typesInsert,
-         case.column), { { storeId, int }, { rowid, str } })
+         case.column), { { storeId, int }, rowid })
       if not ok then
          return "fail", "write: " .. err
       end
@@ -870,7 +912,7 @@ local function runRowidCase(ctx, id, case)
 
    local found
    ok, found = queryValue(ctx, string.format(backend.rowidLookup,
-      tableName), { { rowid, str } })
+      tableName), { rowid })
    if not ok then
       return "fail", "find by ROWID " .. rowid .. ": " .. found
    end
@@ -961,7 +1003,7 @@ local function runRowsCase(ctx, id, case)
       return "fail", "select: " .. tostring(err)
    end
    local mode = case.fetchMode or "n"
-   local count, problem = 0, nil
+   local count, problem, limited = 0, nil, false
    local row
    row, err = cur:fetch({}, mode)
    while row ~= nil and problem == nil do
@@ -979,8 +1021,14 @@ local function runRowsCase(ctx, id, case)
                .. " named key %s", count, name, describe(row[c]),
                describe(row[name]))
          elseif not compare(ctx.numberMode, value, expected) then
-            problem = string.format("row %d, %s: expected %s, got %s",
-               count, name, describe(expected), describe(value))
+            local limit = (case.limitCells or {})[count]
+            limit = limit and limit[name]
+            if limit ~= nil and compare(ctx.numberMode, value, limit) then
+               limited = true
+            else
+               problem = string.format("row %d, %s: expected %s, got %s",
+                  count, name, describe(expected), describe(value))
+            end
          end
          if problem then
             break
@@ -1003,7 +1051,41 @@ local function runRowsCase(ctx, id, case)
       return "fail", string.format("expected %d rows, got %d", #case.rows,
                                    count)
    end
+   if limited then
+      return "limit", case.limitReason
+   end
    return "pass"
+end
+
+-- The value of case.limitValue; true stands for the bound value.
+local function limitValue(case)
+   if case.limitValue ~= true then
+      return case.limitValue
+   end
+   if type(case.param) == "table" then
+      return case.param[1]
+   end
+   return case.param
+end
+
+-- A case that expects an error stored its value: reads it back.
+-- Returns the reason if the backend expects this value as a limit
+-- (limitNull, limitValue), else nil.
+local function storedLimit(ctx, id, case)
+   if not case.limitNull and case.limitValue == nil then
+      return nil
+   end
+   local ok, value = readValue(ctx, id, case.readExpression or case.column,
+                               case.fetchMode)
+   if not ok then
+      return nil
+   end
+   if case.limitNull and value == nil
+      or case.limitValue ~= nil
+         and compare(ctx.numberMode, value, limitValue(case)) then
+      return case.limitReason
+   end
+   return nil
 end
 
 -- Runs one case. Returns "pass", or "limit" or "fail" and a message.
@@ -1028,6 +1110,10 @@ local function runCase(ctx, id, case)
       return "fail", "write: " .. err
    end
    if case.expectError then
+      local reason = storedLimit(ctx, id, case)
+      if reason then
+         return "limit", reason
+      end
       return "fail", "expected an error, the value was stored"
    end
 
@@ -1082,6 +1168,14 @@ local function runCase(ctx, id, case)
    if case.nullResult then
       expected = nil
    end
+   -- The text of the server is the expected value; it must exist.
+   if case.serverText and not case.nullResult then
+      if stored == nil or stored.value == nil then
+         return "fail", "no text of the stored value on the server: "
+            .. (stored and stored.text or "NULL")
+      end
+      expected = stored.value
+   end
    -- A value made on the server is known only from there.
    if case.expectedLength and stored then
       expected = stored.value
@@ -1132,6 +1226,10 @@ local function runCase(ctx, id, case)
       and (stored == nil or stored.value == nil) then
       return "limit", case.limitReason
    end
+   if case.limitValue ~= nil
+      and compare(ctx.numberMode, value, limitValue(case)) then
+      return "limit", case.limitReason
+   end
 
    if match then
       return "fail", "read back correctly, but server has " .. stored.text
@@ -1150,11 +1248,11 @@ end
 
 -- Returns why a case is skipped, or nil.
 local function skipReason(ctx, case)
-   if case.skip then
-      return case.skip
-   end
    if case.column and not ctx.columns[case.column] then
       return "backend has no column " .. case.column
+   end
+   if case.skip then
+      return case.skip
    end
    for _, column in ipairs(case.columns or {}) do
       if not ctx.columns[column] then
@@ -1382,7 +1480,23 @@ function dataTypes.run(ctx)
    end
    local cases = makeCases(typesCtx.types)
    local overrides = backend.typeCaseOverrides or {}
+   local literals = backend.typeLiterals or {}
    for _, case in ipairs(cases) do
+      -- The SQL of a literal case: a string, or a table of case fields
+      -- with the literal (e.g. also readExpression).
+      if case.literal == true then
+         local entry = literals[case.name]
+         if type(entry) == "table" then
+            for key, value in pairs(entry) do
+               case[key] = value
+            end
+         elseif entry then
+            case.literal = entry
+         else
+            case.literal = nil
+            case.skip = "backend has no literal for this case"
+         end
+      end
       for key, value in pairs(overrides[case.name] or {}) do
          case[key] = value
       end

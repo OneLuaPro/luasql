@@ -19,16 +19,7 @@ Each case runs once. A failing connect may take seconds (a delay of the server f
 | `manyOpen`         | Opens 20 connections at the same time, queries on each, closes them in reverse order.                                                                 | Pass: 20 more sessions while open, back to the start after closing. Fail: an error or a wrong session count.                                                            |
 | `envReleased`      | Opens and closes a connection and its environment, then drops the environment.                                                                        | Pass: the environment is collected. Fail: it is not; then the failing connects below cannot tell anything either, because they use the same method.                    |
 
-Then one case per connect that must fail, as the backend lists them (`backend.failingConnects`):
-
-| Test               | Checks                                                                                                                                                | Results                                                                                                                                                                 |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `unknownUser`      | With Oracle: connects as a user that does not exist (never a wrong password of the test user, which may lock it).                                     | Pass: `nil` and `ORA-01017`, no session left, and the environment is collected after it is closed: the failed connect kept no reference to it. Fail: anything else.      |
-| `closedPort`       | With Oracle: connects to the test host on a port without a listener.                                                                                  | Pass: `nil` and `ORA-12541`, otherwise as `unknownUser`. Fail: as `unknownUser`.                                                                                          |
-| `missingFolder`    | With SQLite: opens a file in a folder that does not exist.                                                                                            | Pass: `nil` and `unable to open database file`, otherwise as `unknownUser`. Fail: as `unknownUser`.                                                                       |
-| `readonlyMissing`  | With SQLite: opens a file that does not exist read-only (`env:connect(name, nil, true)`).                                                             | As `missingFolder`.                                                                                                                                                     |
-
-With SQLite a connect does not log on to a server, so the phases are fast; the sessions are not counted (SQLite has none), the lock of each connection on the file is (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)).
+Then one case per connect that must fail, as the backend lists them (`backend.failingConnects`; the sections of the DBMS below name them). Each must give `nil` and the error of the backend, leave no session, and the environment must be collected after it is closed: the failed connect kept no reference to it.
 
 ## Phases
 
@@ -40,3 +31,23 @@ Iterations per phase: smoke 100, standard 1000, nightly 10 000 (fewer than in ot
 | `connectGc`     | connects, queries, drops the connection; only the GC closes it                    | the same: the finalizer of the connection does not log off                                                  |
 | `connectScoped` | connects in a to-be-closed variable, queries, leaves the block                    | the same                                                                                                    |
 | `envCycle`      | creates a new environment, connects, queries, closes both                         | the same: the environment leaks                                                                             |
+
+## Oracle
+
+Connects that must fail:
+
+| Test          | Checks                                                                                                     | Results                                                              |
+| ------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `unknownUser` | Connects as a user that does not exist (never a wrong password of the test user, which may lock it).      | Pass: `nil` and `ORA-01017`, as described above. Fail: anything else. |
+| `closedPort`  | Connects to the test host on a port without a listener.                                                    | Pass: `nil` and `ORA-12541`. Fail: anything else.                      |
+
+## SQLite
+
+A connect does not log on to a server, so the phases are fast; the sessions are not counted (SQLite has none), the lock of each connection on the file is (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)).
+
+Connects that must fail:
+
+| Test              | Checks                                                                                  | Results                                                                     |
+| ----------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `missingFolder`   | Opens a file in a folder that does not exist.                                           | Pass: `nil` and `unable to open database file`. Fail: anything else.       |
+| `readonlyMissing` | Opens a file that does not exist read-only (`env:connect(name, nil, true)`).            | As `missingFolder`.                                                         |

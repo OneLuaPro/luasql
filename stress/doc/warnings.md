@@ -1,6 +1,6 @@
 # Scenario `warnings`
 
-Checks statements that succeed with a warning. With Oracle, OCI (Oracle Call Interface) reports them as `OCI_SUCCESS_WITH_INFO`. Such a statement must count as success, as in the ODBC driver: a driver that returns `nil` and an error instead ("Success with info!") makes the program believe the statement failed, and at a fetch it even loses the row. Each case also checks that the server state fits and that the session works on afterwards. Passing the warning text on to Lua is an open topic for all LuaSQL drivers and not checked here.
+Checks statements that succeed with a warning. Such a statement must count as success, as in the ODBC driver: a driver that returns `nil` and an error instead ("Success with info!") makes the program believe the statement failed, and at a fetch it even loses the row. Each case also checks that the server state fits and that the session works on afterwards. Passing the warning text on to Lua is an open topic for all LuaSQL drivers and not checked here.
 
 The scenario is skipped if the backend has no warning statements.
 
@@ -25,3 +25,11 @@ Iterations per phase: smoke 100, standard 1000, nightly 5000. Fewer than in othe
 | Phase      | Each iteration                                                                     | Fails when                                                                                                             |
 | ---------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `warnLoop` | runs the statement with the compile error again through `conn:execute`             | the statement returns an error, or a counter or the memory grows on the path of the warning (see [Phases](../README.md#phases)) |
+
+## Oracle
+
+OCI (Oracle Call Interface) reports a warning as `OCI_SUCCESS_WITH_INFO`. The cases above are those of Oracle.
+
+## SQLite
+
+Skipped: the backend has no warning statements; the C interface of SQLite has no result for a success with a warning.
