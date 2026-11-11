@@ -43,6 +43,17 @@
 -- lies in one third, a leak shows in all of them. The Lua heap does not
 -- jump; its difference is judged.
 --
+-- Every sample starts with two full GC cycles (memoryUsage). Between
+-- them, garbage collects until the automatic GC of Lua frees it, and
+-- the heap keeps a varying part of that peak afterwards. In phases that
+-- read large values (LOBs of up to 90 KB, as in stmtLifecycle) the
+-- samples then scatter in a band of up to 5 MB with 20 samples per
+-- round, and the trend reached 3.5 MB without any leak; with 60 samples
+-- the band of the samples was a few hundred KB to 1.3 MB and the trend
+-- stayed below 750 KB (Oracle and SQLite, 2026-11-11). Hence 60 samples:
+-- the samples themselves keep the band narrow, and every third has 20
+-- of them.
+--
 -- The heap may also settle slowly, e.g. when blocks of very different
 -- sizes alternate: then the memory grows for 100 000 iterations and
 -- more, and stops. A phase whose trend is over the limit therefore runs
@@ -59,16 +70,22 @@ local trend = require("trend")
 local warmupIterations = 50
 
 -- Growth limits per phase: the trend of the process, the difference of
--- the Lua heap. A leak of 100 bytes per iteration crosses the process
--- limit in tier standard, a leak of 10 bytes per iteration in tier
--- nightly.
+-- the Lua heap. A leak crosses the process limit at about 1 MB over the
+-- measured iterations: about 105 bytes per iteration in a phase of
+-- 10 000 iterations, about 11 bytes in one of 100 000.
 local processLimitKb = 1024
 local luaLimitKb = 64
 
 -- Samples of the process memory after the warm-up, evenly spread over
--- the measured iterations; with fewer than minTrendSamples (a phase
--- with few iterations after its warm-up) the difference is judged.
-local trendSamples = 20
+-- the measured iterations (see above for why 60). A phase with fewer
+-- measured iterations than samples takes a sample after every
+-- iteration, at most trendSamples of them (e.g. 49 in a phase of 100
+-- iterations with a warm-up of 50). With fewer than minTrendSamples, the
+-- difference is judged instead of the trend: a phase whose warm-up
+-- covers all its iterations, such as laneLoop (warm-up 300) or killLoop
+-- in tier smoke (20 iterations, the warm-up is cut to the count), has
+-- only the samples before and after and reports no trend.
+local trendSamples = 60
 local minTrendSamples = 5
 
 -- Parts of the samples whose median slope is the trend (trend.lua): a
@@ -263,7 +280,9 @@ local function measureRound(ctx, phase, count, round)
       shared = phase.setup(ctx)
    end
    local warmup = math.min(phase.warmup or warmupIterations, count)
-   local interval = math.max(1, (count - warmup) // trendSamples)
+   -- Rounded up, so the samples spread over all measured iterations.
+   local interval = math.max(1, (count - warmup + trendSamples - 1)
+                                // trendSamples)
    -- Filled in place, so taking a sample does not grow the Lua heap.
    local xs, ys, samples = {}, {}, 0
    for k = 1, trendSamples + 2 do

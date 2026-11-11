@@ -24,6 +24,8 @@ Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 | `blobRows`     | as `clobRows`, with temporary BLOBs                                                                                                                      | the same                                                                                      |
 | `jsonRead`     | as `clobRead`, with a JSON object that holds the CLOB                                                                                                    | the JSON text is wrong, or a counter or the memory grows                                      |
 
+The LOB phases are where the heap scatters most: values of up to 90 KB leave a varying amount of memory with the heap after each garbage collection. The measurement takes 60 samples per round for this reason (see [Phases](../README.md#phases)).
+
 A LOB phase first checks that its query really gives temporary LOBs (`backend.tempLobChecks`); if not, it fails as invalid, because it would test nothing. `jsonRead` has no such check; it guards against JSON fetches that pile up memory. A phase is skipped if the backend has no query for it.
 
 The counters before and after a phase cannot show a cursor that keeps something after its close, as long as the next execute of the same statement or its close at the end of the phase releases it; `closeRelease` checks this while the statement is open.
