@@ -230,6 +230,23 @@ These come from SQLite, not from the driver, and are kept as they are:
   reports success, while `conn:commit()` directly after the error returns
   `false` and a message. With autocommit off, use `conn:commit()` and
   `conn:rollback()`, not `COMMIT` and `ROLLBACK` by SQL.
+- **A transaction that reads first and writes later can get `database is
+  locked` at once**, without waiting for its busy timeout, when another
+  connection is already writing. SQLite does not wait here, because
+  waiting could not help: with the rollback journal the other connection
+  needs the read lock of this one before it can commit, so both would wait
+  for each other; in WAL mode the data this transaction has read would be
+  out of date once the other one commits (see `sqlite3_busy_handler` and
+  `SQLITE_BUSY_SNAPSHOT` in the documentation of SQLite). The driver
+  begins transactions with a plain `BEGIN`, the default of SQLite,
+  so a transaction takes its write lock only at its first change. After
+  such an error, roll the transaction back with `conn:rollback()` and run it
+  again. To wait for the lock instead, send `BEGIN IMMEDIATE` with
+  `conn:execute` in autocommit mode and end the transaction with `COMMIT`
+  or `ROLLBACK` by SQL: it takes the write lock at once, waiting for it up
+  to the busy timeout. With autocommit off this is not possible, because the
+  driver always has a transaction open (`BEGIN IMMEDIATE` fails with
+  `cannot start a transaction within a transaction`).
 - **The names of the columns** of a query without `AS` are chosen by SQLite
   and may change between versions; give an alias where the name matters.
 - **The asynchronous functions** `conn:send_query`, `conn:poll`,
