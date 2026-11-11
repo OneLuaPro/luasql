@@ -32,6 +32,16 @@
 --                        busy timeout)
 --   lockReleasedOnClose  closing A releases its lock
 --   lockReleasedOnGc     so does collecting A
+--   walReader            on a database of its own in WAL mode
+--                        (backend.walChange, e.g. SQLite): a cursor of
+--                        B keeps its rows while A updates all of them
+--                        and commits, which must succeed (unlike
+--                        readConsistency in the rollback journal); a
+--                        new query of B sees the new values
+--   walOneWriter         the same database: while A writes, B can read
+--                        the old value, but its write fails at once
+--                        with backend.lockBusyError (one writer at a
+--                        time); after A's rollback B can write
 --
 -- Phase:
 --   interleaveLoop  the test connection and 3 more, one prepared
@@ -39,7 +49,10 @@
 --                   their rows fetched in turn. The server counters see
 --                   the test connection.
 --
--- Uses the table backend.concTableCreate; skipped without it.
+-- Uses the table backend.concTableCreate; skipped without it. The WAL
+-- cases use the database of backend.walChange (test settings to
+-- replace) with the statements backend.walSetup, and delete the files
+-- backend.walFiles before and after; skipped without walChange.
 
 local dbutil = require("dbutil")
 local phases = require("phases")
@@ -118,8 +131,10 @@ local function expectNil(what, value, err, pattern)
    end
 end
 
-local function open(ctx)
-   local conn, err = ctx.openTestConnection()
+-- A test connection; with change, on other test settings (e.g. the
+-- database of the WAL cases).
+local function open(ctx, change)
+   local conn, err = ctx.openTestConnection(nil, change)
    return check(conn, err, "connect")
 end
 
@@ -129,8 +144,8 @@ local function closeObject(object, what)
 end
 
 -- Connections opened by a case, closed after it (also after a failure).
-local function openTracked(ctx)
-   local conn = open(ctx)
+local function openTracked(ctx, change)
+   local conn = open(ctx, change)
    ctx.conns[#ctx.conns + 1] = conn
    return conn
 end
@@ -389,6 +404,68 @@ local function lockReleasedOnGcCase(ctx)
    check(b:rollback())
 end
 
+-- A connection to the database of the WAL cases, tracked.
+local function openWal(ctx)
+   return openTracked(ctx, ctx.backend.walChange)
+end
+
+-- Creates the table of the WAL cases again: walRows rows, v = id. The
+-- first connection also switches the file to WAL mode (it stays so).
+local function setupWal(ctx)
+   local conn = openWal(ctx)
+   for _, sql in ipairs(ctx.backend.walSetup) do
+      check(dbutil.exec(conn, sql))
+   end
+   local mode, err = dbutil.queryValue(conn, "PRAGMA journal_mode")
+   expect(mode == "wal", "journal mode is " .. tostring(mode or err)
+          .. ", expected wal")
+   return conn
+end
+
+-- B reads part of the table, A raises every value by 100 and commits; B
+-- must still get the old values, and a new query the new ones.
+local function walReaderCase(ctx)
+   local backend = ctx.backend
+   local writer = setupWal(ctx)
+   local reader = openWal(ctx)
+   local cur = check(reader:execute(backend.walSelectAll))
+   local first = 5
+   for r = 1, first do
+      expectRow(cur, r, "row " .. r)
+   end
+   check(dbutil.exec(writer, backend.walUpdateAll))
+   for r = first + 1, backend.walRows do
+      expectRow(cur, r, "row " .. r .. " after the commit")
+   end
+   expectEnd(cur, "after the commit")
+   cur:close()
+   cur = check(reader:execute(backend.walSelectAll))
+   expectRow(cur, 101, "row 1 in a new query")
+   cur:close()
+end
+
+-- While A has written (autocommit off), B reads the old value and fails
+-- to write at once; after A's rollback B can write.
+local function walOneWriterCase(ctx)
+   local backend = ctx.backend
+   local a = setupWal(ctx)
+   local b = openWal(ctx)
+   check(a:setautocommit(false))
+   check(b:setautocommit(false))
+   check(dbutil.exec(a, string.format(backend.walUpdateRow, 1)))
+   local value, err = dbutil.queryValue(b, backend.walValue)
+   expect(tonumber(check(value, err, "read while A writes")) == 1,
+          "B read " .. tostring(value) .. " while A writes, expected 1")
+   check(b:rollback())
+   local ok
+   ok, err = dbutil.exec(b, string.format(backend.walUpdateRow, 2))
+   expectNil("write while A writes", ok, err, backend.lockBusyError)
+   check(b:rollback())
+   check(a:rollback())
+   check(dbutil.exec(b, string.format(backend.walUpdateRow, 2)))
+   check(b:rollback())
+end
+
 local caseList = {
    { name = "interleavedCursors", run = interleavedCursorsCase },
    { name = "interleavedStmts", run = interleavedStmtsCase,
@@ -400,7 +477,16 @@ local caseList = {
    { name = "lockWaitTimeout", run = lockWaitTimeoutCase },
    { name = "lockReleasedOnClose", run = lockReleasedOnCloseCase },
    { name = "lockReleasedOnGc", run = lockReleasedOnGcCase },
+   { name = "walReader", run = walReaderCase, needs = "walChange" },
+   { name = "walOneWriter", run = walOneWriterCase, needs = "walChange" },
 }
+
+-- Deletes the files of the WAL cases (database, -wal, -shm), if any.
+local function removeWalFiles(backend)
+   for _, path in ipairs(backend.walFiles or {}) do
+      os.remove(path)
+   end
+end
 
 -- Closes what a case left open; a failed case may leave cursors open,
 -- so a connection that refuses to close is left to the GC.
@@ -549,7 +635,10 @@ function concurrency.run(ctx)
       return nil, "creating concurrency table: " .. err
    end
 
+   removeWalFiles(backend)
    local casesOk, failed, limits = pcall(runCases, concCtx)
+   collectgarbage("collect")
+   removeWalFiles(backend)
    local phasesOk, phasesResult, phasesErr
    if casesOk then
       phasesOk, phasesResult, phasesErr = pcall(phases.run, concCtx,

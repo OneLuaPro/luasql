@@ -15,6 +15,13 @@
 --                     may stay in an open session
 --   parallelConnect   N lanes connect and close in a loop at the same
 --                     time; the sessions must be gone afterwards
+--   parallelWriters   N lanes raise the value of the same row by one at
+--                     the same time, each in transactions that begin
+--                     with the update (every second one is rolled
+--                     back); they wait for the lock of the row (or of
+--                     the file, with backend.threadsLockSetup); no lane
+--                     may fail, and the value must be the number of
+--                     commits
 --   lockWait          lane A locks a row, lane B waits for it (FOR
 --                     UPDATE WAIT), lane C queries meanwhile; C must
 --                     finish while B waits, B gets the row after A's
@@ -68,6 +75,11 @@ local queryRounds = { smoke = 50, standard = 200, nightly = 1000 }
 -- Connects per lane in parallelConnect.
 local connectRounds = { smoke = 5, standard = 20, nightly = 50 }
 
+-- Transactions per lane in parallelWriters; few, because with SQLite
+-- each commit writes the file (with Oracle the waits for the row lock
+-- are short).
+local writerRounds = { smoke = 20, standard = 100, nightly = 250 }
+
 -- Iterations of phase laneLoop, and queries per lane and iteration.
 local iterations = { smoke = 20, standard = 200, nightly = 1000 }
 local loopRounds = 5
@@ -84,6 +96,8 @@ local clobRows, clobSize = 5, 100
 -- interrupts, until the sessions of ended lanes must be gone.
 local laneSeconds = 300
 local messageSeconds = 30
+-- The longest wait of a writer in parallelWriters for a lock.
+local writerWaitSeconds = 60
 local lockWaitSeconds = 30
 local deadlockSeconds = 60
 local stillWaitingSeconds = 1
@@ -413,6 +427,24 @@ local function parallelConnectCase(ctx)
    expectSessionsBack(ctx, base, "after the lanes")
 end
 
+local function parallelWritersCase(ctx)
+   resetTable(ctx)
+   local handles = {}
+   for tag = 1, ctx.laneCount do
+      handles[tag] = start(ctx, "writer", ctx.writerRounds,
+                           writerWaitSeconds)
+   end
+   local commits = 0
+   for tag, handle in ipairs(handles) do
+      commits = commits + join(handle, laneSeconds, "lane " .. tag)
+   end
+   local valueNow, err = dbutil.queryValue(ctx.testConn, string.format(
+      ctx.backend.threadsValue, 1))
+   valueNow = tonumber(check("value of row 1", valueNow, err))
+   expect(valueNow == commits, string.format("v of row 1 is %s after %d"
+          .. " commits", tostring(valueNow), commits))
+end
+
 local function lockWaitCase(ctx)
    resetTable(ctx)
    local holder = start(ctx, "lockHolder", ctx.linda)
@@ -585,6 +617,8 @@ local caseList = {
    { name = "parallelPrepared", run = parallelPreparedCase },
    { name = "parallelConnect", run = parallelConnectCase,
      needsAdmin = true, needsLeftovers = true },
+   { name = "parallelWriters", run = parallelWritersCase, needsTable = true,
+     needs = { "threadsIncrement" } },
    { name = "lockWait", run = lockWaitCase, needsTable = true,
      needs = { "threadsLockWait" } },
    { name = "deadlock", run = deadlockCase, needsTable = true,
@@ -842,6 +876,7 @@ function threads.run(ctx)
       hasTable = hasTable,
       laneCount = laneCounts[ctx.tier],
       queryRounds = queryRounds[ctx.tier],
+      writerRounds = writerRounds[ctx.tier],
       connectRounds = connectRounds[ctx.tier],
    }
 

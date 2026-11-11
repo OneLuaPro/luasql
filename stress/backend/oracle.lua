@@ -205,6 +205,8 @@ return {
       .. " SELECT level, 0 FROM dual CONNECT BY level <= 2",
    threadsReset = "UPDATE luastress_threads SET v = 0",
    threadsUpdate = "UPDATE luastress_threads SET v = %d WHERE id = %d",
+   -- Raise v of row %d by one (parallelWriters; waits for the row lock).
+   threadsIncrement = "UPDATE luastress_threads SET v = v + 1 WHERE id = %d",
    threadsLockWait = "SELECT v FROM luastress_threads WHERE id = %d"
       .. " FOR UPDATE WAIT %d",
    threadsValue = "SELECT v FROM luastress_threads WHERE id = %d",

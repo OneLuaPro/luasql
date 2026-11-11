@@ -180,7 +180,7 @@ Column `rw` is `RAW(2000)`. Oracle converts a string bound into it from hex text
 | `rawInvalidHex` | `XYZ`.                                                  | Pass: the write fails cleanly.                              |
 | `rawEmpty`      | `""`.                                                   | Limit (Oracle): an empty `RAW` is stored as NULL.           |
 | `rawNull`       | NULL.                                                   | Pass: reads back nil.                                       |
-| `rawFetchNa`    | read with fetch mode `"na"`.                            | Pass: the same bytes under both keys.                       |
+| `rawFetchNa`    | bound as `luasql.type.binary`, read with fetch mode `"na"`. | Pass: the same bytes under both keys.                       |
 | `rawBinary`     | the bytes `00 FF 41 00` as `luasql.type.binary`.        | Pass: the same bytes.                                       |
 | `rawBinaryAll`  | all 256 byte values as binary.                          | Pass: reads back unchanged.                                 |
 | `rawBinaryMax`  | 2000 bytes as binary, the largest `RAW`.                | Pass: reads back unchanged.                                 |
@@ -218,7 +218,7 @@ Column `bl` is `BLOB` (Binary Large Object), written as a literal, as hex text o
 | `blobHexBind` | `00FF4100` bound as string.                                 | Pass: the same bytes.                     |
 | `blobEmpty`   | `EMPTY_BLOB()`.                                             | Pass: reads back `""`, not nil.           |
 | `blobNull`    | NULL.                                                       | Pass: reads back nil.                     |
-| `blobFetchNa` | read with fetch mode `"na"`.                                | Pass: the same bytes under both keys.     |
+| `blobFetchNa` | bound as `luasql.type.binary`, read with fetch mode `"na"`.   | Pass: the same bytes under both keys.     |
 | `blobLarge`   | 100 000 bytes built on the server, more than one read piece. | Pass: reads back unchanged.               |
 | `blobBinary`  | the bytes `00 FF 41 00` as `luasql.type.binary`.            | Pass: the same bytes.                     |
 | `blobBinary32767` | 32 767 bytes as binary (all byte values in turn).       | Pass: reads back unchanged.               |

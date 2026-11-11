@@ -135,10 +135,10 @@ end
 --   n      exact decimal number (Oracle NUMBER)
 --   s      text of up to 4000 bytes; ns text in the national
 --          character set
---   d      a date with time of day in seconds: it must hold every valid
---          luasql.type.date value without loss (decision B5), e.g.
---          Oracle DATE, PostgreSQL timestamp(0), MySQL DATETIME; read
---          as "YYYY-MM-DD HH:MM:SS"
+--   d      a date with time of day in seconds: a luasql.type.date
+--          value may have a time (YYYY-MM-DD HH:MM:SS), so the column
+--          must hold that without loss, e.g. Oracle DATE, PostgreSQL
+--          timestamp(0), MySQL DATETIME; read as "YYYY-MM-DD HH:MM:SS"
 --   ts     timestamp with 6 digits of fractional seconds, read with all
 --          6 digits; tstz, tsltz with time zone, local time zone
 --   b      boolean
@@ -150,7 +150,7 @@ end
 -- Where luasql promises nothing (e.g. the text form of a date read
 -- back), the expected value is the form most DBMS give; a DBMS that
 -- differs gets a limit in its backend. With no clear majority the
--- expectation stays as it was (luasql-devel-api, 9 November 2026).
+-- expectation stays as it was.
 --
 -- Builds the case list. A case has: name, block, column, param (as for
 -- stmt:execute) and expected; optional: nullResult (expect NULL),
@@ -482,7 +482,7 @@ local function makeCases(t)
    add("urowidNull", "rowids", "r", t.null, nil, null)
 
    -- RAW, a binary column of at most 2000 bytes; reads give the bytes.
-   -- A plain string stays text (luasql decision B5); the cases with hex
+   -- A plain string is bound as text (by its Lua type); the cases with hex
    -- text check a conversion of the DBMS (Oracle) and need
    -- backend.hexTextBinary.
    local bytes = "\0\255A\0"
@@ -519,8 +519,8 @@ local function makeCases(t)
    add("rawBinaryNull", "raw", "rw", { t.null, t.binary }, nil, null)
    -- A plain string is text: the server reads it as hex.
    add("rawPlainHex", "raw", "rw", "00FF4100", bytes, hexText())
-   add("rawFetchNa", "raw", "rw", { "00FF4100", t.string }, bytes,
-       hexText({ fetchMode = "na" }))
+   add("rawFetchNa", "raw", "rw", { bytes, t.binary }, bytes,
+       { fetchMode = "na" })
 
    -- BLOB: written as a literal, as luasql.type.binary or (with
    -- backend.hexTextBinary) as hex text, read as bytes.
@@ -540,8 +540,8 @@ local function makeCases(t)
        binaryOf(1048576))
    add("blobBinaryEmpty", "blob", "bl", { "", t.binary }, "")
    add("blobBinaryNull", "blob", "bl", { t.null, t.binary }, nil, null)
-   add("blobFetchNa", "blob", "bl", { "00FF4100", t.string }, bytes,
-       hexText({ fetchMode = "na" }))
+   add("blobFetchNa", "blob", "bl", { bytes, t.binary }, bytes,
+       { fetchMode = "na" })
    -- 100000 bytes, more than one read piece in the driver.
    add("blobLarge", "blob", "bl", nil,
        string.rep("\xDE\xAD\xBE\xEF", 25000),

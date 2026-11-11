@@ -134,6 +134,9 @@ end
 -- connection (SQLITE_BUSY), at once or after the busy timeout.
 local lockedError = "database is locked"
 
+-- The database of the WAL cases (scenario concurrency).
+local walFile = config.tempDir .. "luastress_wal.db"
+
 -- Reasons and overrides of the data type scenario (typeCaseOverrides).
 local dateText = "SQLite has no date type: luasql.sqlite3 binds dates"
    .. " and times as text, read back as bound"
@@ -144,7 +147,7 @@ local function yearRange(kind)
    return {
       limitError = "invalid T%." .. kind .. " value",
       limitReason = "luasql.sqlite3 takes years 0000 to 9999, the range"
-         .. " of the date functions of SQLite (decision B5)",
+         .. " of the date functions of SQLite",
    }
 end
 local function booleanAsNumber(number)
@@ -187,8 +190,15 @@ return {
    -- connection (2 MB by default) fills while a phase writes new pages
    -- and looks like a leak of up to its size; 256 KB stay far below the
    -- limit of the leak check (measured with --only volume: bulkInsert
-   -- trend +426 KB with 2 MB, +0 KB with 256 KB).
-   connectSetup = { "PRAGMA cache_size = -256" },
+   -- trend +426 KB with 2 MB, +0 KB with 256 KB). The pragma reads the
+   -- schema and gets "database is locked" while another connection
+   -- commits (parallelWriters), so it waits with a busy timeout; then
+   -- the connection is back without one, as luasql.sqlite3 opens it.
+   connectSetup = {
+      "PRAGMA busy_timeout = 10000",
+      "PRAGMA cache_size = -256",
+      "PRAGMA busy_timeout = 0",
+   },
    versionQuery = "SELECT 'SQLite ' || sqlite_version()",
    -- Reads a table, so a cursor of it holds a lock (see above).
    singleRowQuery = "SELECT n FROM luastress_rows WHERE n = 1",
@@ -270,6 +280,25 @@ return {
    concLockWait = "UPDATE luastress_conc SET v = v WHERE id = %d"
       .. " RETURNING id",
    concLockWaitSetup = "PRAGMA busy_timeout = %d",
+   -- The WAL cases: a database file of their own (test settings to
+   -- replace), switched to WAL mode, with walRows rows (v = id); its
+   -- files are deleted before and after. Not the test file: in WAL
+   -- mode readers take no lock the probe of the counters could see.
+   walChange = { name = walFile },
+   walFiles = { walFile, walFile .. "-wal", walFile .. "-shm" },
+   walSetup = {
+      "PRAGMA journal_mode = WAL",
+      "DROP TABLE IF EXISTS luastress_wal",
+      "CREATE TABLE luastress_wal (id INTEGER PRIMARY KEY, v INTEGER)",
+      "INSERT INTO luastress_wal (id, v) WITH RECURSIVE r(n) AS"
+         .. " (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 20)"
+         .. " SELECT n, n FROM r",
+   },
+   walRows = 20,
+   walSelectAll = "SELECT v FROM luastress_wal ORDER BY id",
+   walUpdateAll = "UPDATE luastress_wal SET v = v + 100",
+   walUpdateRow = "UPDATE luastress_wal SET v = v + 1 WHERE id = %d",
+   walValue = "SELECT v FROM luastress_wal WHERE id = 1",
    lockBusyError = lockedError,
    lockTimeoutError = lockedError,
    concurrencyLimits = {
@@ -286,6 +315,23 @@ return {
             .. " transaction, not single rows",
       },
    },
+   -- Used by the soak scenario: a table of its own; values of the date
+   -- and time functions (SQLite has no date types). No lanes: SQLite
+   -- lets one connection at a time write to the file, so lanes would
+   -- wait for each other or get "database is locked" (a transaction
+   -- that read first does not wait), and the counters see the locks of
+   -- every connection on the file, not only those of the test
+   -- connection. Several writers at once are the case parallelWriters
+   -- of the threads scenario.
+   soakTableCreate = "CREATE TABLE luastress_soak (id INTEGER PRIMARY KEY,"
+      .. " n INTEGER, s TEXT)",
+   soakTableDrop = "DROP TABLE IF EXISTS luastress_soak",
+   soakInsert = "INSERT INTO luastress_soak (id, n, s) VALUES (?1, ?2, ?3)",
+   soakUpdate = "UPDATE luastress_soak SET n = n + 1 WHERE id = ?1",
+   soakDelete = "DELETE FROM luastress_soak WHERE id = ?1",
+   soakTypesQuery = "SELECT date('now'), datetime('now'),"
+      .. " strftime('%Y-%m-%d %H:%M:%f', 'now'), julianday('now')",
+   soakLanes = 0,
    offsetQuery = "SELECT %d + n" .. rowsUpTo("%d"),
    offsetBindQuery = "SELECT ?1 + n" .. rowsUpTo("?2"),
    -- Used by the threads scenario: a table with rows 1 and 2 (v = 0);
@@ -301,6 +347,9 @@ return {
       .. " (2, 0)",
    threadsReset = "UPDATE luastress_threads SET v = 0",
    threadsUpdate = "UPDATE luastress_threads SET v = %d WHERE id = %d",
+   -- Raise v of row %d by one (parallelWriters; waits for the write
+   -- lock of the file with the busy timeout of threadsLockSetup).
+   threadsIncrement = "UPDATE luastress_threads SET v = v + 1 WHERE id = %d",
    threadsLockWait = "UPDATE luastress_threads SET v = v WHERE id = %d"
       .. " RETURNING v",
    threadsLockSetup = "PRAGMA busy_timeout = %d",

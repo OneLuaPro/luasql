@@ -498,9 +498,21 @@ local function openSession(options, handles, cleanups)
       testUser = values.test.user or config.testSchema,
       -- The small tablespace of the prep step, if it ran.
       smallTablespace = values.admin and config.tablespaceName or nil,
-      -- A test connection on otherEnv, or on the environment of the run.
-      openTestConnection = function(otherEnv)
-         return settings.connect(otherEnv or env, backend, values.test,
+      -- A test connection on otherEnv, or on the environment of the run;
+      -- change (optional) replaces some of the test settings, e.g. the
+      -- file of a file DBMS.
+      openTestConnection = function(otherEnv, change)
+         local testValues = values.test
+         if change then
+            testValues = {}
+            for key, value in pairs(values.test) do
+               testValues[key] = value
+            end
+            for key, value in pairs(change) do
+               testValues[key] = value
+            end
+         end
+         return settings.connect(otherEnv or env, backend, testValues,
                                  "extra test")
       end,
       -- A new environment of the driver, or nil and an error message.

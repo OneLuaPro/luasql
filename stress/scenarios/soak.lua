@@ -17,7 +17,9 @@
 --
 -- Runs in tier soak (ctx.soakMinutes, default 240) and for a minute in
 -- tier smoke; skipped in the other tiers. ctx.csvPath (optional) gets
--- one line per sample.
+-- one line per sample. backend.soakLanes sets the number of lanes, 0
+-- for none (e.g. SQLite: one writer at a time for the whole file, and
+-- its counters see the locks of every connection).
 
 local dbutil = require("dbutil")
 local memory = require("memory")
@@ -53,7 +55,8 @@ local processLimitKb = 512
 local luaLimitKb = 64
 local pgaLimitKb = 256
 
--- Lanes in the pool, and seconds to wait for a message of a lane.
+-- Lanes in the pool without backend.soakLanes, and seconds to wait for
+-- a message of a lane.
 local laneCount = 2
 local messageSeconds = 120
 
@@ -222,11 +225,11 @@ end
 local function startLanes(state)
    local ctx = state.ctx
    state.linda = lanes.linda()
-   for tag = 1, laneCount do
+   for tag = 1, state.laneCount do
       state.lanes[tag] = laneGen(ctx.laneSpec, state.linda, tag,
                                  tag * 1000000)
    end
-   for tag = 1, laneCount do
+   for tag = 1, state.laneCount do
       local deadline = now() + messageSeconds
       local key
       repeat
@@ -236,7 +239,7 @@ local function startLanes(state)
       check("lane " .. tag, key ~= nil, "not ready after " .. messageSeconds
             .. " s")
    end
-   for tag = 1, laneCount do
+   for tag = 1, state.laneCount do
       state.linda:send("go" .. tag, true)
    end
    state.lanesGo = true
@@ -412,16 +415,19 @@ function soak.run(ctx)
    state.warmup = math.max(minutes * 60 * warmupShare, minWarmupSeconds)
    allocateSamples(state, math.ceil(minutes * 60 / state.interval) + 5)
 
-   local useLanes = ctx.laneSpec ~= nil
+   state.laneCount = backend.soakLanes or laneCount
+   local useLanes = ctx.laneSpec ~= nil and state.laneCount > 0
    local lanesErr
    if useLanes then
       useLanes, lanesErr = loadLanes()
+   elseif state.laneCount == 0 then
+      lanesErr = "backend sets soakLanes = 0"
    else
       lanesErr = "runner gives no lane settings"
    end
    report.print("  ", string.format("%g min, a sample every %d s, %s, %s",
                 minutes, state.interval,
-                useLanes and (laneCount .. " lanes")
+                useLanes and (state.laneCount .. " lanes")
                    or ("no lanes: " .. lanesErr),
                 memory.label and ("memory as " .. memory.label)
                    or "no process memory"))
@@ -524,7 +530,7 @@ function soak.run(ctx)
    report.print("  rounds          ", string.format("%d on the test"
                 .. " connection (%.1f/s), %d in %d lanes, %g min",
                 state.rounds, state.rounds / last.seconds, laneRounds,
-                useLanes and laneCount or 0,
+                useLanes and state.laneCount or 0,
                 math.floor(last.seconds / 6 + 0.5) / 10))
    local problems = {}
    evaluateSeries(state, memory.label or "process", "process",

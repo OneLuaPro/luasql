@@ -38,7 +38,7 @@ The test table has one column per kind of value. A backend creates those its DBM
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `n`           | an exact decimal number                                                                                                                                                     |
 | `s`, `ns`     | text of up to 4000 bytes; text in the national character set                                                                                                               |
-| `d`           | a date with time of day in seconds: it must hold every valid `luasql.type.date` value without loss (LuaSQL decision B5), e.g. Oracle `DATE`, PostgreSQL `timestamp(0)`, MySQL `DATETIME`; read as `YYYY-MM-DD HH:MM:SS` |
+| `d`           | a date with time of day in seconds: a `luasql.type.date` value may have a time of day (`YYYY-MM-DD HH:MM:SS`), so the column must hold it without loss, e.g. Oracle `DATE`, PostgreSQL `timestamp(0)`, MySQL `DATETIME`; read as `YYYY-MM-DD HH:MM:SS` |
 | `ts`          | a timestamp with 6 digits of fractional seconds, read with all 6 digits                                                                                                     |
 | `tstz`, `tsltz` | a timestamp with time zone, with local time zone                                                                                                                          |
 | `b`           | a boolean                                                                                                                                                                   |
@@ -52,9 +52,9 @@ The test table has one column per kind of value. A backend creates those its DBM
 
 ## Expected values
 
-Where LuaSQL promises nothing, e.g. for the text form of a date read back, the expected value is the form most DBMS give; a DBMS that differs gets a limit in its backend, with the reason. Where the DBMS differ evenly, the expected value stays as it was (decided by `luasql-devel-api` on 9 November 2026).
+Where LuaSQL promises nothing, e.g. for the text form of a date read back, the expected value is the form most DBMS give; a DBMS that differs gets a limit in its backend, with the reason. Where the DBMS differ evenly, the expected value stays as it was.
 
 - **SQL literals.** Some cases write an SQL literal instead of binding a value, e.g. to read back a number with more digits than a bind keeps. The literal comes from the backend (`backend.typeLiterals`), the expected value from the case list; without a literal the case is skipped.
-- **Binary data as hex text.** A plain string stays text (LuaSQL decision B5). The cases that bind hex text such as `"00FF4100"` into a binary column and expect the bytes check a conversion of the DBMS; they run only if the backend says the DBMS does it (`backend.hexTextBinary`). Binary data itself is checked by the cases with `luasql.type.binary`, which run for every DBMS.
+- **Binary data as hex text.** A plain string is bound as text: the driver goes by the Lua type, never by the content. The cases that bind hex text such as `"00FF4100"` into a binary column and expect the bytes check a conversion of the DBMS; they run only if the backend says the DBMS does it (`backend.hexTextBinary`). Binary data itself is checked by the cases with `luasql.type.binary`, which run for every DBMS.
 - **JSON.** How a DBMS stores JSON (order of the keys, numbers, `\u` escapes, spaces) is its own matter. A JSON case expects the text the server gives for the stored value (`backend.jsonAsText`): the driver must deliver it unchanged.
 - **Limits.** The backend marks a case as a limit with a reason (`backend.typeCaseOverrides`): NULL read back (`limitNull`), an expected write error (`limitError`), a value read back (`limitValue`, also for a case that expects an error but the DBMS stored the value), or cells of a rows case (`limitCells`).

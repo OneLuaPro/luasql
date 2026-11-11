@@ -246,8 +246,8 @@ The steps and scenarios run in this order. *Admin connection* tells whether a sc
 | [`params`](doc/params.md)                               | Checks how prepared statements keep their parameters between executions.                                                                                      | optional         | runs; server counters are not checked                                                                     |
 | [`connectionLifecycle`](doc/connectionLifecycle.md)     | Opens and closes many connections and environments, in the right and the wrong order, and lets connects fail.                                                 | optional         | runs; the sessions on the server are not counted                                                          |
 | [`connectionLoss`](doc/connectionLoss.md)               | Kills the server session of a connection and checks that every later call fails cleanly.                                                                      | required         | skipped                                                                                                   |
-| [`concurrency`](doc/concurrency.md)                     | Uses several connections side by side in one thread: interleaved cursors, read consistency, row locks.                                                        | optional         | runs; server counters are not checked                                                                     |
-| [`threads`](doc/threads.md)                             | Uses the driver from several threads at once: parallel work, a real lock wait, a deadlock, a kill during a call, cleanup when a thread ends.                  | optional         | runs; the cases that count or kill sessions are skipped                                                   |
+| [`concurrency`](doc/concurrency.md)                     | Uses several connections side by side in one thread: interleaved cursors, read consistency, row locks, WAL mode (SQLite).                                      | optional         | runs; server counters are not checked                                                                     |
+| [`threads`](doc/threads.md)                             | Uses the driver from several threads at once: parallel work, parallel writers, a real lock wait, a deadlock, a kill during a call, cleanup when a thread ends. | optional         | runs; the cases that count or kill sessions are skipped                                                   |
 | [`dataTypes`](doc/dataTypes.md)                         | Writes values of many types and reads them back: boundaries, locales, time zones, NULL, LOBs, JSON.                                                           | not used         | —                                                                                                         |
 | [`transactions`](doc/transactions.md)                   | Checks autocommit, commit, rollback, errors and DDL inside a transaction, row counts and closing with an open transaction.                                   | optional         | runs; the cases that look at the data from a second session are skipped                                   |
 | [`volume`](doc/volume.md)                               | Moves large amounts of data through the driver and fills a tablespace.                                                                                        | optional         | runs; the full tablespace cases are skipped, server counters are not checked                              |
@@ -324,13 +324,13 @@ The OneLuaPro driver always uses AL32UTF8 (UTF-8) as client character set and as
 
 ### SQLite
 
-Tested with SQLite 3.53.4 and the `luasql.sqlite3` of OneLuaPro, on Linux. Tier smoke takes about 20 seconds on a local disk.
+Tested with SQLite 3.53.4 and the `luasql.sqlite3` of OneLuaPro, on Linux and Windows. Tier smoke takes about 20 seconds on a local disk, tier nightly about 25 minutes.
 
 **What a connection holds:** SQLite has no server that could count the cursors or transactions of a session. What a connection holds is a lock on the database file: a cursor that has not been reset keeps a read lock, a transaction that has changed data the write lock. The admin connection, a second connection to the same file, serves as a probe: it tries `BEGIN EXCLUSIVE` (counter `locks`: 1 if the test connection holds any lock) and `BEGIN IMMEDIATE` (counter `open tx`: 1 if it holds the write lock) and ends them again at once. Both can only say 0 or 1, so they must be 0 before every phase; scenario `stmtLifecycle` also checks them with a statement still open (phase `closeRelease`), where the next execute or the close of the statement would hide a lock. The probe needs the rollback journal, the default of SQLite; in WAL mode readers take no lock it could see, so the preparation step sets `journal_mode = DELETE`. A query that reads no table, e.g. `SELECT 1`, holds no lock at all; the queries of the backend therefore read a table of numbers.
 
 **Preparation step:** sets the rollback journal, drops the tables of an aborted run (names starting with `luastress`) and creates helper tables: `luastress_rows` (the numbers 1 to 10 000), `luastress_err` (a `CHECK` constraint for a statement that fails) and `luastress_dml` (`STRICT`, for a string that is not a number). The teardown drops them; the file stays.
 
-**Page cache:** every connection of the suite sets `PRAGMA cache_size = -256` (256 KB instead of the default of 2 MB; `backend.connectSetup`). The page cache fills while a phase writes new pages, and its growth of up to its size would look like a leak in the phases that insert rows; with 256 KB it stays far below the limit of the leak check, so a leak of the driver shows sooner.
+**Page cache:** every connection of the suite sets `PRAGMA cache_size = -256` (256 KB instead of the default of 2 MB; `backend.connectSetup`). The page cache fills while a phase writes new pages, and its growth of up to its size would look like a leak in the phases that insert rows; with 256 KB it stays far below the limit of the leak check, so a leak of the driver shows sooner. The pragma reads the schema of the file and would fail with `database is locked` while another connection commits; the connection therefore waits for it with a busy timeout, which is set back to none afterwards, as `luasql.sqlite3` opens a connection.
 
 **Known limitations**, reported as "limit":
 
@@ -357,9 +357,11 @@ Tested with SQLite 3.53.4 and the `luasql.sqlite3` of OneLuaPro, on Linux. Tier 
 - DDL is part of the transaction: `ddlCommits` passes.
 - A text without a statement (`""`) is a statement without effect with the row count 0, through `conn:execute` and through a prepared statement.
 - The longest string or blob is 1 000 000 000 bytes (`SQLITE_MAX_LENGTH` of the build); one byte more gives `string or blob too big`. Case `maxLength` of scenario `volume` needs about 2 GB of memory for it.
-- A second connection that wants to write while another one holds the write lock waits for its busy timeout (`PRAGMA busy_timeout`, or the second argument of `env:connect`), unless waiting could end in a deadlock: then SQLite gives `database is locked` at once. Case `deadlock` of scenario `threads` is skipped for this reason.
+- A second connection that wants to write while another one holds the write lock waits for its busy timeout (`PRAGMA busy_timeout`, or the second argument of `env:connect`), unless waiting could end in a deadlock: then SQLite gives `database is locked` at once. This is the case for a transaction that has read before it writes, since `luasql.sqlite3` begins transactions with a plain `BEGIN`. Case `deadlock` of scenario `threads` is skipped for this reason; in case `parallelWriters` every transaction begins with its update, so the writers wait for each other and none fails.
+- In WAL mode a reader does not block a commit and keeps reading the data as of its start; still only one connection at a time can write (cases `walReader` and `walOneWriter` of scenario `concurrency`, on a database file of their own: in WAL mode the probe of the counters would see no readers).
+- Scenario `soak` runs without lanes (`backend.soakLanes = 0`): lanes writing to the same file would wait for each other or fail at once (see above), and the probe would see the locks of every connection, not only those of the test connection. Several writers at once are case `parallelWriters` of scenario `threads`.
 
-**Not covered with SQLite yet:** scenario `soak` (the backend has no table for it yet), the cases of `dataTypes` for types SQLite does not have and for hex text in binary columns (see [`doc/dataTypes-sqlite3.md`](doc/dataTypes-sqlite3.md)), `prefetch` (`luasql.sqlite3` has no options), `warnings` (SQLite has no warnings of this kind) and `connectionLoss` and case `killDuringCall` (there is no session to kill).
+**Not covered with SQLite yet:** lanes in scenario `soak` (see above), the cases of `dataTypes` for types SQLite does not have and for hex text in binary columns (see [`doc/dataTypes-sqlite3.md`](doc/dataTypes-sqlite3.md)), `prefetch` (`luasql.sqlite3` has no options), `warnings` (SQLite has no warnings of this kind) and `connectionLoss` and case `killDuringCall` (there is no session to kill).
 
 ### PostgreSQL
 
@@ -367,7 +369,21 @@ No information yet; not implemented.
 
 ### MariaDB/MySQL
 
-No information yet; not implemented.
+No information yet; not implemented. `luasql.mysql` takes host and port as arguments of their own, `env:connect(database, user, password, host, port)`. A backend gives them with `connectArgs`, which replaces the default arguments (source name, user, password) of every connect of the suite, also in lanes and for the connects that must fail (`failingConnects`, e.g. `change = { port = 1 }` for a port without listener):
+
+```lua
+-- backend/mysql.lua
+sourceName = function(values)   -- for messages only
+   return string.format("%s:%d/%s", values.host, values.port,
+                        values.name)
+end,
+connectArgs = function(values)
+   return values.name, values.user, values.password, values.host,
+      values.port
+end,
+```
+
+with `testFields = { "host", "port", "name", "user", "password" }` in `config/mysql.lua`.
 
 ### DuckDB
 

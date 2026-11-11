@@ -169,6 +169,36 @@ local function setLockWait(link, seconds)
    end
 end
 
+-- Raises v of row 1 by one in 'rounds' transactions; each begins with
+-- the update, so with SQLite it waits for the write lock of the file
+-- instead of failing at once (a transaction that read first would);
+-- every second one is rolled back. Waits for a lock up to 'seconds'.
+-- Returns the number of commits.
+function threadsLane.writer(spec, rounds, seconds)
+   local link = open(spec)
+   local conn, backend = link.conn, link.backend
+   setLockWait(link, seconds)
+   check("autocommit off", conn:setautocommit(false))
+   local sql = string.format(backend.threadsIncrement, 1)
+   local commits = 0
+   for i = 1, rounds do
+      local count = check("update in round " .. i, conn:execute(sql))
+      if tonumber(count) ~= 1 then
+         error(string.format("update in round %d: %s rows", i,
+                             tostring(count)), 0)
+      end
+      if i % 2 == 0 then
+         check("commit in round " .. i, conn:commit())
+         commits = commits + 1
+      else
+         check("rollback in round " .. i, conn:rollback())
+      end
+   end
+   check("autocommit on", conn:setautocommit(true))
+   close(link)
+   return commits
+end
+
 -- Locks row 1 (v = 1), sends "holder" with its session id, waits for
 -- "release" and commits. The holder may have to wait for the lock of
 -- the commit, too (a reader blocks it in SQLite).

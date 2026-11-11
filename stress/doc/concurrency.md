@@ -4,7 +4,7 @@ Uses several connections of one process side by side, in one thread: cursors, st
 
 Everything runs in one thread, so no call may block: locks are taken and tested so that a lock held by another connection gives an error at once or after a short wait (`backend.concLockWaitSetup`); a lock left behind by an earlier case gives an error instead of a hang. Real lock waits and deadlocks need a second thread; they are part of scenario [`threads`](threads.md).
 
-The scenario uses a table `luastress_conc` with 100 rows; it is skipped if the backend has none or the driver has no `conn:prepare`.
+The scenario uses a table `luastress_conc` with 100 rows; it is skipped if the backend has none or the driver has no `conn:prepare`. The WAL cases use a database of their own (`backend.walChange` replaces test settings, `backend.walSetup` creates the table, the files `backend.walFiles` are deleted before and after).
 
 ## Cases
 
@@ -20,6 +20,8 @@ Each case runs once; connections opened by a case are closed after it, also afte
 | `lockWaitTimeout`     | The same with `WAIT 1`; with `backend.concLockWaitSetup` B first sets a wait time of one second (SQLite: `PRAGMA busy_timeout`). | Pass: `nil` and an error after about a second (`ORA-30006`, in Oracle 23ai `ORA-00054`; SQLite `database is locked` after at least 0.8 s). Fail: success, another error, or more than 10 seconds. |
 | `lockReleasedOnClose` | A locks a row and is closed; B locks the same row.                                                             | Pass: B gets the lock: closing A rolled back its transaction. Fail: B gets `ORA-00054`.                                               |
 | `lockReleasedOnGc`    | A locks a row and is dropped; the garbage collector (GC) collects it; B locks the same row.                    | Pass: A is collected and B gets the lock. Fail: A is not collected, or the lock stays.                                                |
+| `walReader`           | On a database of its own in WAL (write-ahead log) mode (`backend.walChange`): B reads 5 rows of a cursor; A raises every value by 100 and commits; B fetches on, then queries again. | Pass: A's commit succeeds, B's cursor still gives the old values, the new query the new ones. Fail: the commit is blocked, or a value is wrong. Skipped without `walChange`. |
+| `walOneWriter`        | The same database: A updates a row with autocommit off; B reads that row, then tries to update another one; A rolls back, B updates again. | Pass: B reads the old value, its first update fails at once with the busy error of the backend (one writer at a time), the second succeeds. Fail: anything else. Skipped without `walChange`. |
 
 ## Phases
 
@@ -36,3 +38,5 @@ A plain `UPDATE` of a locked row would wait forever, because Oracle has no lock 
 ## SQLite
 
 A lock on a row is the write lock of the whole database file, taken by an `UPDATE ... RETURNING` of the row; a connection that does not get it gives `database is locked`, at once or after its busy timeout (`PRAGMA busy_timeout`).
+
+The WAL cases use the file `luastress_wal.db` in the folder for temporary files, switched to WAL mode, with a table of 20 rows. They run there and not on the test file: in WAL mode readers take no lock the probe of the counters could see. `walReader` is the counterpart of the limit `readConsistency`, which holds for the rollback journal of the test file.

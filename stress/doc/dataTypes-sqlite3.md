@@ -2,7 +2,7 @@
 
 The cases of scenario [`dataTypes`](dataTypes.md) with SQLite, from `backend/sqlite3.lua`. What the scenario checks for every case and how the expected values are chosen is described in [`dataTypes.md`](dataTypes.md); what each case checks is listed in [`dataTypes-oracle.md`](dataTypes-oracle.md), the cases are the same. This file lists the columns, the SQL literals and every case whose result with SQLite is not a pass.
 
-SQLite has no date, boolean, JSON or fixed length type, and it does not enforce a declared length. `luasql.sqlite3` binds dates and times as text after checking their form, booleans as 1 and 0 (LuaSQL decision B5). The block of numbers, dates and booleans runs once: SQLite has no locale setting. `luasql.sqlite3` has no option `numbers`, so there is no float mode block; numbers come back as SQLite stores them, integers as Lua integers, `REAL` as floats.
+SQLite has no date, boolean, JSON or fixed length type, and it does not enforce a declared length. `luasql.sqlite3` binds dates and times as text after checking their form (`YYYY-MM-DD`, optional time, years 0000 to 9999). A Lua boolean is bound as the DBMS stores it, in SQLite as 1 and 0. The block of numbers, dates and booleans runs once: SQLite has no locale setting. `luasql.sqlite3` has no option `numbers`, so there is no float mode block; numbers come back as SQLite stores them, integers as Lua integers, `REAL` as floats.
 
 ## Columns
 
@@ -48,7 +48,7 @@ The stored value of a number is read with `CAST(n AS TEXT)`, which gives a `REAL
 
 `blobLarge` writes its 100 000 bytes with `unhex` of hex text repeated by `printf`. The other literal cases have no counterpart in SQLite and are skipped: `bfloat`, `bfloatInf`, `bdoubleNan`, `dateBcLiteral`, `tstzBcLiteral`, the time zone and interval literals, `dsDifference`.
 
-The cases with hex text in a binary column (`rawHexBind`, `rawHexLower`, `rawTooLong`, `rawInvalidHex`, `rawEmpty`, `rawPlainHex`, `rawFetchNa`, `blobHexBind`, `blobFetchNa`) are skipped: SQLite stores the string as text.
+The cases with hex text in a binary column (`rawHexBind`, `rawHexLower`, `rawTooLong`, `rawInvalidHex`, `rawEmpty`, `rawPlainHex`, `blobHexBind`) are skipped: SQLite stores the string as text.
 
 ## Limits
 
@@ -62,7 +62,7 @@ All other cases pass.
 | `timestamp`                                                          | Limit: as `date`, `2026-10-19 13:45:30` without the 6 fractional digits.                                                                   |
 | `timeInDate`                                                         | Limit: as `date`, `13:45:30` comes back as bound.                                                                                          |
 | `rowsTimestamp`, `rowsColumnsNa`                                     | Limit: as `date`, in the cells of the dates and timestamps.                                                                                |
-| `dateBc`, `tsBc`                                                     | Limit: `luasql.sqlite3` takes years 0000 to 9999, the range of the date functions of SQLite (decision B5); the write fails with `invalid T.date value` or `invalid T.timestamp value`. |
+| `dateBc`, `tsBc`                                                     | Limit: `luasql.sqlite3` takes years 0000 to 9999, the range of the date functions of SQLite; the write fails with `invalid T.date value` or `invalid T.timestamp value`. |
 | `booleanColumn`, `booleanFalse`, `plainTrue`, `plainFalse`, `booleanFetchNa` | Limit: SQLite has no boolean type, `true` and `false` come back as 1 and 0.                                                       |
 | `tooLong`, `charTooLong`, `rawBinaryTooLong`                         | Limit: SQLite does not enforce the declared length of a column; the value is stored unchanged.                                             |
 | `charPadded`, `charEmpty`, `ncharPadded`                             | Limit: SQLite does not pad `CHAR(n)` with spaces; the value comes back as bound.                                                           |
@@ -78,11 +78,11 @@ A smoke run on Linux (SQLite 3.53.4) shows per block:
   rowids:
     1 passed, 0 limits, 0 failed, 4 skipped
   raw:
-    9 passed, 1 limit, 0 failed, 7 skipped
+    10 passed, 1 limit, 0 failed, 6 skipped
   clob:
     12 passed, 0 limits, 0 failed, 0 skipped
   blob:
-    10 passed, 0 limits, 0 failed, 2 skipped
+    11 passed, 0 limits, 0 failed, 1 skipped
   json:
     9 passed, 1 limit, 0 failed, 0 skipped
   rows:
