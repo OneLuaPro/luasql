@@ -64,14 +64,14 @@ scenario soak:
 
 ### Reference result
 
-A run of 4 hours (`lua stress.lua oracle soak --csv soak240.csv`) with Oracle in a local VM, 481 samples, made before the driver got its option `prefetch` (one row ahead instead of 100) and before the test database required network encryption; rounds per second are therefore not comparable with newer runs:
+A run of 4 hours (`lua stress.lua oracle soak --csv soak240-oracle.csv`) on Windows with Oracle in a local VM, with option `prefetch` at 100, network encryption and the bind API of the driver, 482 samples:
 
 | Series                     | Result                                                                                                                                                          |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| rounds                     | 2.06 million on the test connection (143 per second), 4.15 million in the 2 threads                                                                             |
-| private bytes              | 22 092 KB at the start, 25 072 KB after the warm-up of 24 minutes, 25 644 KB at the end; slope +83 KB per hour (limit 512). Between 25 000 and 28 560 KB after the warm-up. The growth falls into the first 2 hours (+240 KB per hour); the last 2 hours are flat (−4 KB per hour). |
-| Lua heap                   | 613 KB from the first minute to the end; slope 0                                                                                                                |
-| PGA                        | 2703 KB at the start, between 3663 and 4111 KB after the warm-up, 3855 KB at the end; slope 0                                                                    |
+| rounds                     | 1.96 million on the test connection (136 per second), 3.97 million in the 2 threads                                                                             |
+| private bytes              | 22 832 KB at the start, 26 672 KB after the warm-up of 24 minutes, 27 216 KB at the end; slope +94 KB per hour (limit 512). Between 26 512 and 29 176 KB after the warm-up. From the end of the warm-up to hour 2 the slope is +197 KB per hour, in the last 2 hours +130 KB per hour. |
+| Lua heap                   | 634 KB at the start, 636 KB from the first sample after 30 seconds to the end; slope 0                                                                          |
+| PGA                        | 3407 KB at the start, between 3983 and 4303 KB after the warm-up, 4175 KB at the end; slope 0                                                                    |
 | counters                   | open cursors 10, temporary LOBs 0, open transactions 0, the same from the first sample after the start to the end                                              |
 
 The memory of the process jumps by megabytes up and down while the slope stays small: this is why the verdict uses the robust slope over all samples and not the difference between start and end.
@@ -91,3 +91,14 @@ scenario soak:
   counters        locks 1 -> 1, open tx 0 -> 0
   passed
 ```
+
+### Reference result
+
+A run of 4 hours (`lua stress.lua sqlite3 soak --csv soak240-sqlite3.csv`) on Windows, with the database file on a local disk, 482 samples:
+
+| Series                     | Result                                                                                                                                                          |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| rounds                     | 7.76 million on the test connection (539 per second), no threads                                                                                                |
+| private bytes              | 3888 KB at the start, 4352 KB after the warm-up of 24 minutes, 4344 KB at the end; slope +16 KB per hour (limit 512). Between 4000 and 4440 KB after the warm-up, in two levels: the samples move between about 4000 and 4352 KB up to minute 109 and between about 4000 and 4440 KB from minute 114 on. The slope comes from this single step of 88 KB; from the end of the warm-up to hour 2 and in the last 2 hours it is 0. |
+| Lua heap                   | 547 KB at the start, 548 KB from the first sample after 30 seconds to the end; slope 0                                                                          |
+| counters                   | locks 1, open transactions 0, the same from the start to the end (the read lock between rounds, see above)                                                      |
