@@ -13,7 +13,10 @@
 --   enableAutocommit     setautocommit(true) with an open transaction
 --   preparedFollowsMode  a prepared statement follows the autocommit
 --                        mode at execute time, not at prepare time
---   errorKeepsWork       a failed statement undoes only itself
+--   errorKeepsWork       a failed statement undoes only itself; a limit
+--                        if the DBMS aborts the whole transaction
+--                        (backend.transactionLimits.errorAborts): then
+--                        commit() must give false and a message
 --   errorThenRollback    rollback() after a failed statement undoes all
 --   ddlCommits           DDL with an open transaction
 --   savepoint            rollback to a savepoint
@@ -241,12 +244,28 @@ local function insertDuplicate(ctx, id)
    expect(result == nil, "duplicate key not rejected")
 end
 
+-- A DBMS that aborts the whole transaction at an error
+-- (transactionLimits.errorAborts) rejects the statements after it; then
+-- commit() must give false and a message and keep nothing.
 local function errorKeepsWork(ctx)
-   setAutocommit(ctx.testConn, false)
-   insertRow(ctx, ctx.testConn, 1)
+   local conn = ctx.testConn
+   setAutocommit(conn, false)
+   insertRow(ctx, conn, 1)
    insertDuplicate(ctx, 1)
-   insertRow(ctx, ctx.testConn, 2)
-   commit(ctx.testConn)
+   local aborts = (ctx.backend.transactionLimits or {}).errorAborts
+   local result, err = conn:execute(string.format(
+      ctx.backend.txInsertLiteral, 2))
+   if aborts and result == nil and tostring(err):find(aborts.error) then
+      local ok, commitErr = conn:commit()
+      expect(ok == false and type(commitErr) == "string",
+             "commit of the aborted transaction: expected false and a"
+                .. " message, got " .. tostring(ok))
+      expect(countOwn(ctx, 1) == 0 and countOwn(ctx, 2) == 0,
+             "rows of the aborted transaction were committed")
+      return "limit", aborts.reason
+   end
+   check(result, err, "insert")
+   commit(conn)
    expect(countOwn(ctx, 1) == 1, "row before the failed statement lost")
    expect(countOwn(ctx, 2) == 1, "row after the failed statement lost")
 end

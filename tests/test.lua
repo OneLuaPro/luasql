@@ -971,6 +971,10 @@ tests = {
 if driver == "oci8" or driver == "sqlite3" then
 	table.insert(tests, 2, { "type constants", type_constants_test })
 	table.insert(tests, 4, { "prepared statements", prepared_statements_test })
+elseif driver == "duckdb" then
+	-- prepared_statements_test uses placeholders and types of Oracle and
+	-- SQLite; checks/duckdb.lua tests the prepared statements of DuckDB
+	table.insert(tests, 2, { "type constants", type_constants_test })
 end
 
 if string.find(_VERSION, " 5.0") then

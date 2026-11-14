@@ -7,9 +7,9 @@ the results row by row. This is the documentation of LuaSQL for
 [LuaSQL](https://github.com/lunarmodules/luasql) of the Lunar Modules
 project.
 
-So far it covers the Oracle driver `luasql.oci8` and the SQLite driver
-`luasql.sqlite3`, which have been reworked for OneLuaPro and tested in
-depth. The other drivers follow the same API; their documentation will be
+So far it covers the Oracle driver `luasql.oci8`, the SQLite driver
+`luasql.sqlite3` and the DuckDB driver `luasql.duckdb`, which have been
+reworked for OneLuaPro and tested in depth. The other drivers follow the same API; their documentation will be
 added here.
 
 ## Objects
@@ -18,7 +18,7 @@ Every driver works with the same four kinds of objects:
 
 <table>
 <tr><th>Object</th><th>Created by</th><th>Purpose</th></tr>
-<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code></td><td>holds the client library of the driver; opens connections</td></tr>
+<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code></td><td>holds the client library of the driver; opens connections</td></tr>
 <tr><td>connection</td><td><code>env:connect(...)</code></td><td>a session on the database server; runs statements and controls transactions</td></tr>
 <tr><td>cursor</td><td><code>conn:execute(...)</code>, <code>stmt:execute(...)</code></td><td>the rows of a query, read one by one</td></tr>
 <tr><td>statement</td><td><code>conn:prepare(...)</code></td><td>a prepared statement, executed many times with parameters</td></tr>
@@ -151,6 +151,29 @@ code without an error message come first.
   it no longer matches (see the @{04-sqlite3.md|SQLite topic}).
 - **sqlite3: statements other than `INSERT`, `UPDATE` and `DELETE` return
   0**; LuaSQL returns the count of the last `INSERT`, `UPDATE` or `DELETE`.
+- **duckdb: values are read by their type**: `BOOLEAN` as a boolean, the
+  integer types up to `BIGINT` as integers, `FLOAT` and `DOUBLE` as floats,
+  `VARCHAR` and `BLOB` as strings of their full length; LuaSQL returns every
+  value as text (`"42"`, `"true"`), cuts strings at `"\0"` and returns a
+  `BLOB` as escaped text. `DECIMAL` and the other types stay text, so a
+  number like `1.5` in SQL is still the string `"1.5"`.
+- **duckdb: `conn:setautocommit(false)` begins a transaction at once**, and
+  with autocommit off a transaction is always open: `commit` and `rollback`
+  begin the next one, also when they fail, and after a `COMMIT` or
+  `ROLLBACK` by SQL the next execute begins one. LuaSQL only notes the mode:
+  the statements before the first `commit` are committed at once and cannot
+  be rolled back.
+- **duckdb: `conn:setautocommit(true)` rolls back an open transaction**;
+  LuaSQL leaves it open, and the following statements run in it.
+- **duckdb: `conn:commit()` returns `false` and a message** when DuckDB has
+  aborted the transaction after an error in a statement (the driver rolls
+  it back and begins the next transaction), and when the commit fails, e.g.
+  after a conflict with another transaction; LuaSQL returns `true` in both
+  cases, while DuckDB has dropped the changes.
+- **duckdb: `":memory:"` is a new database for each connection**, as in
+  LuaSQL; earlier versions of this fork shared one database in memory (and
+  one file) among the connections of an environment. `":memory:name"`
+  shares a database in memory by name.
 
 **Other changes**
 
@@ -188,11 +211,32 @@ code without an error message come first.
   stays open, as with `close`; LuaSQL closes them all the same.
 - **sqlite3: `cur:getcoltypes()`** gives `""` for a column without a
   declared type; LuaSQL leaves a gap in the list.
+- **duckdb: every connection to a file gets the database of that file**,
+  from one cache for the whole process, also across environments and Lua
+  states. LuaSQL opens a database for each connection and never closes it,
+  so on Windows a second connection to an open file fails, and so does a new
+  connection after the first one is closed; on Linux the second connection
+  works on a copy of its own, and changes can get lost.
+- **duckdb: transactions:**
+    - `commit` and `rollback` in autocommit mode return `false` and the
+      message of DuckDB (`no transaction is active`); LuaSQL: `commit`
+      returns `false` without a message, `rollback` fails without a usable
+      message.
+    - `conn:rollback()` with autocommit off returns `true` if no transaction
+      is open (e.g. after a `COMMIT` by SQL) and begins the next one;
+      LuaSQL fails then.
+- **duckdb: `conn:close()` with open cursors or statements** returns
+  `false` and a message, as the LuaSQL manual says; LuaSQL closes the
+  connection all the same.
+- **duckdb: an SQL text without a statement** (`""`, `";"`, a comment)
+  returns 0; LuaSQL returns a cursor without columns.
+- **duckdb: `cur:getcoltypes()`** names all types of DuckDB, e.g. `"DATE"`
+  or `"DECIMAL(10,2)"`; LuaSQL gives `"UNKNOWN"` for all but eight of them.
 
 **Extensions**
 
-- Prepared statements for oci8 and sqlite3: `conn:prepare` and statement
-  objects (upstream pull request
+- Prepared statements for oci8, sqlite3 and duckdb: `conn:prepare` and
+  statement objects (upstream pull request
   [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
 - `luasql.type` with the pairs `{value, type}`, `T.null` (a special value),
   `T.binary`, fixed forms for dates and times, `{T.null, type}`.
@@ -204,6 +248,9 @@ code without an error message come first.
   functions of sqlean on every connection, names of parameters without a
   prefix (`id` for `:id`) and `?NNN` as a name, dates and times checked
   against the calendar.
+- The additions of duckdb in the @{05-duckdb.md|DuckDB topic}: parameters
+  (also `conn:execute(sql, ...)`), `luasql.type`, names of parameters
+  without `$`, the extensions built into OneLuaPro.
 
 ## Where to Go Next
 
@@ -213,6 +260,8 @@ code without an error message come first.
   threads and the behavior of Oracle worth knowing.
 - @{04-sqlite3.md|SQLite}: connecting, data types, the functions of sqlean,
   transactions and the behavior of SQLite worth knowing.
-- The reference of the modules @{luasql.oci8} and @{luasql.sqlite3} with
-  every function.
+- @{05-duckdb.md|DuckDB}: connecting, data types, the built-in extensions,
+  transactions and the behavior of DuckDB worth knowing.
+- The reference of the modules @{luasql.oci8}, @{luasql.sqlite3} and
+  @{luasql.duckdb} with every function.
 - The examples, ready to run against your own database.

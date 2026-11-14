@@ -138,7 +138,6 @@ detail.
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 
 #include "sqlite3.h"
 
@@ -736,84 +735,6 @@ static int conn_escape(lua_State *L)
 
 
 /*
-** Number of decimal digits at s, up to n; returns 1 if all n are digits.
-*/
-static int is_digits(const char *s, int n)
-{
-  int i;
-  for (i = 0; i < n; i++)
-    if (!isdigit((unsigned char)s[i]))
-      return 0;
-  return 1;
-}
-
-static int digits_value(const char *s, int n)
-{
-  int i, v = 0;
-  for (i = 0; i < n; i++)
-    v = v * 10 + (s[i] - '0');
-  return v;
-}
-
-
-/*
-** Checks "HH:MM:SS" with an optional fraction ".f" of 1 to 9 digits
-** (only if allow_frac). Returns 1 if valid.
-*/
-static int check_time_text(const char *s, size_t len, int allow_frac)
-{
-  if (len < 8 || !is_digits(s, 2) || s[2] != ':' || !is_digits(s + 3, 2)
-      || s[5] != ':' || !is_digits(s + 6, 2))
-    return 0;
-  if (digits_value(s, 2) > 23 || digits_value(s + 3, 2) > 59
-      || digits_value(s + 6, 2) > 59)
-    return 0;
-  if (len == 8)
-    return 1;
-  return allow_frac && s[8] == '.' && len >= 10 && len <= 18
-    && is_digits(s + 9, (int)(len - 9));
-}
-
-
-/*
-** Checks the text of a T.date, T.timestamp or T.time value in the fixed
-** form of LuaSQL, also against the calendar: SQLite has no date type, so
-** it stores any text, and its date functions silently change an invalid
-** day (2026-02-30 becomes 2026-03-02). Returns 1 if valid.
-**   T.date       YYYY-MM-DD, optional " HH:MM:SS"
-**   T.timestamp  YYYY-MM-DD, optional " HH:MM:SS" with optional fraction
-**   T.time       HH:MM:SS with optional fraction
-*/
-static int check_datetime_text(const char *s, size_t len, int type)
-{
-  static const int days[12] = { 31, 28, 31, 30, 31, 30,
-				31, 31, 30, 31, 30, 31 };
-  int y, m, d, dim;
-
-  if (type == LUASQL_TYPE_TIME)
-    return check_time_text(s, len, 1);
-  if (len < 10 || !is_digits(s, 4) || s[4] != '-' || !is_digits(s + 5, 2)
-      || s[7] != '-' || !is_digits(s + 8, 2))
-    return 0;
-  y = digits_value(s, 4);
-  m = digits_value(s + 5, 2);
-  d = digits_value(s + 8, 2);
-  if (m < 1 || m > 12 || d < 1)
-    return 0;
-  dim = days[m - 1];
-  if (m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0))
-    dim = 29;
-  if (d > dim)
-    return 0;
-  if (len == 10)
-    return 1;
-  if (s[10] != ' ')
-    return 0;
-  return check_time_text(s + 11, len - 11, type == LUASQL_TYPE_TIMESTAMP);
-}
-
-
-/*
 ** Checks the value of one parameter at stack index val_idx (checked
 ** before with luasql_check_param) for what the Lua type does not tell:
 ** the form of a date or time. Returns 0, or 2 with nil + message pushed.
@@ -826,28 +747,17 @@ static int check_value(lua_State *L, int val_idx)
   if (!is_null && (type == LUASQL_TYPE_DATE || type == LUASQL_TYPE_TIME
 		   || type == LUASQL_TYPE_TIMESTAMP)) {
     size_t len;
+    luasql_datetime dt;
     const char *s = lua_tolstring(L, -1, &len);
-    ok = check_datetime_text(s, len, type);
+    /* SQLite has no date type, so it stores any text, and its date
+       functions silently change an invalid day (2026-02-30 becomes
+       2026-03-02): check the form and the calendar here */
+    ok = luasql_parse_datetime(s, len, type, &dt);
   }
   lua_pop(L, 1);
   if (ok)
     return 0;
-  lua_pushnil(L);
-  switch (type) {
-  case LUASQL_TYPE_DATE:
-    lua_pushliteral(L, LUASQL_PREFIX"invalid T.date value, expected "
-		    "YYYY-MM-DD or YYYY-MM-DD HH:MM:SS");
-    break;
-  case LUASQL_TYPE_TIMESTAMP:
-    lua_pushliteral(L, LUASQL_PREFIX"invalid T.timestamp value, expected "
-		    "YYYY-MM-DD, optional HH:MM:SS and fraction");
-    break;
-  default:
-    lua_pushliteral(L, LUASQL_PREFIX"invalid T.time value, expected "
-		    "HH:MM:SS, optional fraction");
-    break;
-  }
-  return 2;
+  return luasql_datetime_fail(L, type);
 }
 
 

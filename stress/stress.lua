@@ -20,7 +20,10 @@
 -- crash or a hang then ends only that scenario; the parent reports it,
 -- runs the next one and the teardown at the end. With --inline, or
 -- without luv, all scenarios run in this process, one after the other on
--- the same connections.
+-- the same connections. For a DBMS that lets only one process at a time
+-- open its database (config.exclusiveFile, e.g. DuckDB) the parent closes
+-- its connections while the child processes run and opens the admin
+-- connection again for the teardown.
 --------------------------------------------------------------------------------
 
 -- Make the modules next to this script loadable, independent of the current
@@ -160,8 +163,10 @@ end
 
 -- Runs prep/<dbms>.lua, if there is one, and registers its teardown in
 -- 'cleanups', unless --keep is given; nothing in a child process.
--- Returns true, or nil and an error.
-local function runPrep(options, config, values, adminConn, cleanups)
+-- admin holds the admin connection (conn) and a function that opens it
+-- again (reopen): the teardown reopens it if the run has closed it
+-- meanwhile (see releaseConnections). Returns true, or nil and an error.
+local function runPrep(options, config, values, admin, cleanups)
    if options.child then
       return true   -- the parent process prepared the environment
    end
@@ -171,7 +176,7 @@ local function runPrep(options, config, values, adminConn, cleanups)
       return true
    end
    local prep = require(name)
-   local state, err = prep.setup(adminConn, config, values)
+   local state, err = prep.setup(admin.conn, config, values)
    if not state then
       return nil, "prep failed: " .. tostring(err)
    end
@@ -182,7 +187,14 @@ local function runPrep(options, config, values, adminConn, cleanups)
       return true
    end
    cleanups[#cleanups + 1] = function()
-      local ok, teardownErr = prep.teardown(adminConn, state)
+      if not admin.conn then
+         local conn, reopenErr = admin.reopen()
+         if not conn then
+            return nil, reopenErr
+         end
+         admin.conn = conn
+      end
+      local ok, teardownErr = prep.teardown(admin.conn, state)
       if ok then
          print("teardown: done")
       end
@@ -231,7 +243,10 @@ local function runScenario(name, options, session)
    -- Server counters before and after the scenario: a note shows what a
    -- scenario left open, also one without leak phases.
    local snapOk, before = pcall(phases.snapshot, ctx)
+   -- Key of backend.memoryLimits.
+   phases.scenario = name
    local ok, result, err = pcall(scenario.run, ctx)
+   phases.scenario = nil
    if snapOk and before then
       local after
       snapOk, after = pcall(phases.snapshot, ctx)
@@ -443,6 +458,7 @@ local function openSession(options, handles, cleanups)
    handles[#handles + 1] = env
 
    local adminConn
+   local admin = {}
    if values.admin then
       local adminErr
       adminConn, adminErr = settings.connect(env, backend, values.admin,
@@ -451,12 +467,21 @@ local function openSession(options, handles, cleanups)
          return nil, adminErr
       end
       handles[#handles + 1] = adminConn
+      admin.conn = adminConn
+      admin.reopen = function()
+         local conn, reopenErr = settings.connect(env, backend, values.admin,
+                                                  "admin")
+         if conn then
+            handles[#handles + 1] = conn
+         end
+         return conn, reopenErr
+      end
       if values.admin.user then
          say(string.format("admin:  connected as %s", values.admin.user))
       else
          say("admin:  second connection to the test database")
       end
-      local prepOk, prepErr = runPrep(options, config, values, adminConn,
+      local prepOk, prepErr = runPrep(options, config, values, admin,
                                       cleanups)
       if not prepOk then
          return nil, prepErr
@@ -570,8 +595,27 @@ local function openSession(options, handles, cleanups)
       backend = backend,
       testConn = testConn,
       adminConn = adminConn,
+      admin = admin,
+      exclusiveFile = config.exclusiveFile,
       extra = extra,
    }
+end
+
+-- Closes the test and admin connection of the parent process before the
+-- child processes run, for a DBMS that lets only one process at a time
+-- open its database file (config.exclusiveFile, e.g. DuckDB); otherwise
+-- no child process could open it. The teardown opens the admin
+-- connection again (runPrep). Returns true, or nil and an error message.
+local function releaseConnections(session)
+   for _, conn in ipairs({ session.testConn, session.admin.conn }) do
+      local ok, err = conn:close()
+      if not ok then
+         return nil, "cannot close a connection of this process: "
+            .. tostring(err)
+      end
+   end
+   session.testConn, session.adminConn, session.admin.conn = nil, nil, nil
+   return true
 end
 
 -- Main sequence of the parent process: opens the session, then runs the
@@ -596,6 +640,15 @@ local function run(options, handles, cleanups)
       or (options.duration or defaultSoakMinutes) + soakExtraMinutes
    print(string.format("mode:   one process per scenario, timeout %s",
                        minutesText(minutes)))
+   if session.exclusiveFile then
+      local ok, releaseErr = releaseConnections(session)
+      if not ok then
+         return nil, releaseErr
+      end
+      report.print("note:   ", "connections of this process closed while"
+                   .. " the scenarios run (the database allows one process"
+                   .. " at a time)", "note")
+   end
    return runIsolated(options, uv, minutes)
 end
 

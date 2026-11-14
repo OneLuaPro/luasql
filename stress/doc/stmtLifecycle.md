@@ -37,3 +37,7 @@ The server counters are the open cursors and the temporary LOBs of the test sess
 ## SQLite
 
 There are no temporary LOBs: the LOB phases read long text and blobs made by SQL, and the server counter is the lock of the test connection on the database file (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)).
+
+## DuckDB
+
+There are no temporary LOBs: the LOB phases read long text, blobs and JSON made by SQL (`rpad`, `unhex`, `json_object`), and the only server counter is `connections` (see DuckDB under [DBMS-Specific Notes](../README.md#dbms-specific-notes)). The queries cast the length to `INTEGER`: a Lua integer is bound as `BIGINT`, which DuckDB does not convert to the `INTEGER` argument of `rpad` at the execute (`Binder Error`).

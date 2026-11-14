@@ -16,9 +16,10 @@ The [upstream documentation](https://lunarmodules.github.io/luasql/) describes t
 | Area                    | Addition                                                                                                       |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------- |
 | Build                   | `CMakeLists.txt` for Windows, used by the OneLuaPro build; finds Lua through its CMake package `liblua`         |
-| Prepared statements     | `conn:prepare()` and `stmt:execute()` for Oracle and SQLite from upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), not yet merged upstream, extended by plain values, variable arguments and `luasql.type.binary` |
+| Prepared statements     | `conn:prepare()` and `stmt:execute()` for Oracle, SQLite and DuckDB from upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), not yet merged upstream, extended by plain values, variable arguments and `luasql.type.binary` |
 | Oracle driver           | `luasql.oci8` reworked: data type coverage, typed parameters, prepared statement semantics, transactions, threads and many fixes; see [below](#oracle-driver-luasqloci8) |
 | SQLite driver           | `luasql.sqlite3` reworked: prepared statements, typed parameters, the functions of sqlean, transactions and fixes; see [below](#sqlite-driver-luasqlsqlite3) |
+| DuckDB driver           | `luasql.duckdb` reworked: prepared statements, typed parameters, values read by their type, one database per file in the process, transactions and fixes; DuckDB with its extensions built in; see [below](#duckdb-driver-luasqlduckdb) |
 | Stress test suite       | [`stress/`](stress/README.md): a long-running test of driver robustness, implemented for Oracle so far; see [below](#stress-test-suite) |
 
 The guiding rule for the Oracle driver: *the driver uses OCI (Oracle Call Interface) correctly, it does not try to improve OCI.* It covers the OCI features well, but stays inside the frame of the LuaSQL API; additions are kept where another LuaSQL driver already offers the same, so that the drivers behave alike. Where Oracle or OCI behaves differently from what a user might expect, the driver does not hide it; such behavior is documented as a known limitation.
@@ -37,10 +38,15 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **sqlite3: with autocommit off, statements after an error with which SQLite rolls back the whole transaction** (e.g. `database or disk is full`, `ON CONFLICT ROLLBACK`) **need `conn:commit()`**, and so do statements after a commit that fails for this reason: the driver begins a new transaction. LuaSQL goes on without a transaction, so each following statement is committed at once and cannot be rolled back.
 - **sqlite3: the module `unicode` of sqlean, if the build of sqlean has it, replaces `lower`, `upper`, `LIKE` and the collation `NOCASE`** with versions that know the case of all letters, not only of ASCII. An index with `COLLATE NOCASE` that holds non-ASCII letters and was built without it no longer matches (see [below](#sqlite-driver-luasqlsqlite3)).
 - **sqlite3: statements other than `INSERT`, `UPDATE` and `DELETE` return 0**; LuaSQL returns the count of the last `INSERT`, `UPDATE` or `DELETE`.
+- **duckdb: values are read by their type**: `BOOLEAN` as a boolean, the integer types up to `BIGINT` as integers, `FLOAT` and `DOUBLE` as floats, `VARCHAR` and `BLOB` as strings of their full length; LuaSQL returns every value as text (`"42"`, `"true"`), cuts strings at `"\0"` and returns a `BLOB` as escaped text. `DECIMAL` and the other types stay text, so a number like `1.5` in SQL is still the string `"1.5"`.
+- **duckdb: `conn:setautocommit(false)` begins a transaction at once**, and with autocommit off a transaction is always open: `commit` and `rollback` begin the next one, also when they fail, and after a `COMMIT` or `ROLLBACK` by SQL the next execute begins one. LuaSQL only notes the mode: the statements before the first `commit` are committed at once and cannot be rolled back.
+- **duckdb: `conn:setautocommit(true)` rolls back an open transaction**; LuaSQL leaves it open, and the following statements run in it.
+- **duckdb: `conn:commit()` returns `false` and a message** when DuckDB has aborted the transaction after an error in a statement (the driver rolls it back and begins the next transaction), and when the commit fails, e.g. after a conflict with another transaction; LuaSQL returns `true` in both cases, while DuckDB has dropped the changes.
+- **duckdb: `":memory:"` is a new database for each connection**, as in LuaSQL; earlier versions of this fork shared one database in memory (and one file) among the connections of an environment. `":memory:name"` shares a database in memory by name.
 
 **Other changes**
 
-- **Errors** follow the section "Error handling" of the LuaSQL manual in all drivers documented here (so far oci8 and sqlite3):
+- **Errors** follow the section "Error handling" of the LuaSQL manual in all drivers documented here (so far oci8, sqlite3 and duckdb):
   - A wrong use of the API raises an error: a closed object, an argument of the wrong type, an unknown option or value of `setoption`/`getoption`, an invalid parameter, `execute` or `reset` while the cursor of the statement is open.
   - A failure in the database or the client library returns `nil` and a message.
   - `commit`, `rollback` and `setautocommit` return `false` and a message on failure (LuaSQL: partly `nil`); code that tests for `nil` misses it.
@@ -56,14 +62,22 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **sqlite3: an empty result** closes the cursor at the first `fetch`, which returns `nil`; LuaSQL returns a row of `nil` values and closes the cursor only at the second `fetch`.
 - **sqlite3: `env:close()` with open connections** returns `false` and a message, and a to-be-closed connection or environment with open objects stays open, as with `close`; LuaSQL closes them all the same.
 - **sqlite3: `cur:getcoltypes()`** gives `""` for a column without a declared type; LuaSQL leaves a gap in the list.
+- **duckdb: every connection to a file gets the database of that file**, from one cache for the whole process, also across environments and Lua states. LuaSQL opens a database for each connection and never closes it, so on Windows a second connection to an open file fails, and so does a new connection after the first one is closed; on Linux the second connection works on a copy of its own, and changes can get lost.
+- **duckdb: transactions:**
+  - `commit` and `rollback` in autocommit mode return `false` and the message of DuckDB (`no transaction is active`); LuaSQL: `commit` returns `false` without a message, `rollback` fails without a usable message.
+  - `conn:rollback()` with autocommit off returns `true` if no transaction is open (e.g. after a `COMMIT` by SQL) and begins the next one; LuaSQL fails then.
+- **duckdb: `conn:close()` with open cursors or statements** returns `false` and a message, as the LuaSQL manual says; LuaSQL closes the connection all the same.
+- **duckdb: an SQL text without a statement** (`""`, `";"`, a comment) returns 0; LuaSQL returns a cursor without columns.
+- **duckdb: `cur:getcoltypes()`** names all types of DuckDB, e.g. `"DATE"` or `"DECIMAL(10,2)"`; LuaSQL gives `"UNKNOWN"` for all but eight of them.
 
 **Extensions**
 
-- Prepared statements for oci8 and sqlite3: `conn:prepare`, statement objects with `execute`, `reset` and `close` (upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
+- Prepared statements for oci8, sqlite3 and duckdb: `conn:prepare`, statement objects with `execute`, `reset` and `close` (upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
 - `luasql.type` with the pairs `{value, type}`, `T.null` (a special value), `T.binary`, fixed forms for dates and times, `{T.null, type}`.
 - Plain Lua values and variable arguments as parameters, also for `conn:execute`.
 - The additions of oci8 described [below](#oracle-driver-luasqloci8): options `numbers` and `prefetch`, data types, threads.
 - The additions of sqlite3 described [below](#sqlite-driver-luasqlsqlite3): the functions of sqlean on every connection, names of parameters without a prefix (`id` for `:id`) and `?NNN` as a name, dates and times checked against the calendar.
+- The additions of duckdb described [below](#duckdb-driver-luasqlduckdb): parameters (also `conn:execute(sql, ...)`), `luasql.type`, names of parameters without `$`, `":memory:name"`, the extensions built into OneLuaPro.
 
 ## Oracle Driver `luasql.oci8`
 
@@ -169,11 +183,24 @@ Tested with Lua 5.5 on Windows, built against the sqlean of OneLuaPro, and on Li
 - **Fixes:** among others `true` bound as 0, the error code of SQLite returned as the number of results after a failed bind, a statement leaked per invalid parameter, an empty result that kept its cursor open, a gap in `getcoltypes`, the row count of the last `INSERT` returned by other statements, `setautocommit(false)` twice raising an error.
 
 
+## DuckDB Driver `luasql.duckdb`
+
+Tested with DuckDB 1.5.6 and Lua 5.5 on Windows, built with DuckDB and its extensions linked in statically (OneLuaPro), and on Linux against the release library of DuckDB.
+
+- **Databases:** every connection takes the database of its file from one instance cache of DuckDB for the whole process, so connections of different environments and Lua states (lanes) share it, and a file is opened only once; different spellings of one path give the same database. `":memory:"` (or `""`) is a new database for each connection, `":memory:name"` is shared by name. The database is closed with its last connection. Another process cannot open a file that is open.
+- **Extensions:** `parquet`, `json`, `excel`, `httpfs`, `aws`, `azure`, `postgres_scanner`, `mysql_scanner`, `sqlite_scanner`, `odbc_scanner`, `fts`, `spatial` and `vss` are built in and loaded on every connection; `icu` (time zones) is not. An extension installed before with `INSTALL` in the extension folder of DuckDB is loaded instead of the built-in one.
+- **Prepared statements:** `conn:prepare(sql)` with placeholders `?`, `?N`, `$N` and `$name`. Values stay bound until they are bound again or `stmt:reset()` (`duckdb_clear_bindings`) drops them; a placeholder without a value is an error of DuckDB. A name is given with or without `$`, its case does not matter. Names, positions and dates of all parameters are checked before the first one is bound.
+- **Types:** integers are bound as `BIGINT`, floats as `DOUBLE`, strings as `VARCHAR` of any length (UTF-8 only), booleans as `BOOLEAN`, `T.binary` as a `BLOB`. `T.date`, `T.timestamp` and `T.time` are checked against the calendar by the driver and bound as `DATE`, `TIMESTAMP` and `TIME` (the C API of DuckDB cannot convert text, and an invalid day would end the process there). Values are read by their type: booleans, integers up to `BIGINT`, floats, and strings of full length for `VARCHAR`, `BLOB` and `GEOMETRY` (WKB); all other types as text written by DuckDB. The whole result of a query is read at the execute.
+- **Transactions:** with autocommit off a transaction is always open. DuckDB aborts a transaction after an error in a statement and would then report a `COMMIT` as a success while dropping the changes; the driver notices the abort after the failed statement, and `commit` then rolls back and returns `false` and a message. A commit that fails (e.g. a conflict between two transactions) returns `false` and a message, and the next transaction begins. `commit` and `rollback` in autocommit mode fail with `no transaction is active`. `conn:close()` rolls back an open transaction.
+- **Results:** row counts are floats, as in LuaSQL; a text without a statement returns 0. `conn:execute` without parameters runs all statements of a text and returns the result of the last one; with parameters, and `conn:prepare`, take one statement.
+- **Fixes:** among others the memory of every value read was lost, a database was never closed, a conflict at commit time returned `true`, `setautocommit` did not begin or roll back a transaction, `rollback` read an uninitialized message, `luasql.type` was missing, `conn:close()` did not check for open cursors.
+
+
 ## Testing
 
 - `tests/test.lua` is the test bench of upstream LuaSQL, e.g. `lua test.lua oci8 <source> <user> <password>` in `tests/`.
 - [`stress/`](stress/README.md) holds the stress test suite.
-- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD`, or `lua checks/sqlite3.lua [<database file>]`; so far for `luasql.oci8` and `luasql.sqlite3`. `checks/bench_oci8.lua` measures short queries and large results, e.g. to compare values of the option `prefetch` (`-p`).
+- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD`, `lua checks/sqlite3.lua [<database file>]` or `lua checks/duckdb.lua [<database file>]`; so far for `luasql.oci8`, `luasql.sqlite3` and `luasql.duckdb`. `checks/bench_oci8.lua` measures short queries and large results, e.g. to compare values of the option `prefetch` (`-p`).
 
 ### Stress Test Suite
 
@@ -189,7 +216,7 @@ So far it is implemented for Oracle (`luasql.oci8`); backends for the other driv
 
 ## Documentation
 
-The reference and the manual are written for [LDoc](https://github.com/lunarmodules/LDoc): the doc comments in `src/ls_oci8.c` and `src/ls_sqlite3.c` describe the API, `doc/ldoc/` holds the manual topics, the examples, the configuration and the style. The CMake build generates the HTML into `<build>/doc` and installs it to `share/doc/luasql`; to generate it by hand, run from the root of the repository:
+The reference and the manual are written for [LDoc](https://github.com/lunarmodules/LDoc): the doc comments in `src/ls_oci8.c`, `src/ls_sqlite3.c` and `src/ls_duckdb.c` describe the API, `doc/ldoc/` holds the manual topics, the examples, the configuration and the style. The CMake build generates the HTML into `<build>/doc` and installs it to `share/doc/luasql`; to generate it by hand, run from the root of the repository:
 
 ```CMD
 ldoc -c doc/ldoc/config.ld -d <output directory> .

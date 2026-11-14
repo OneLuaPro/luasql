@@ -71,7 +71,8 @@
 --   spellings       one named placeholder bound as a, :a, A and by
 --                   position, in turn; A is an unknown name (nil and a
 --                   message) where names are case sensitive
---                   (backend.namesCaseSensitive)
+--                   (backend.namesCaseSensitive); the prefix of :a is
+--                   backend.paramPrefix if given (e.g. $ for DuckDB)
 --
 -- Skipped if the driver has no prepare() or the backend lacks a query;
 -- cases and phases that need another backend key are skipped without
@@ -839,7 +840,7 @@ local function spellingsStep(ctx, i, stmt)
    if k == 0 then
       bindings = { a = i }
    elseif k == 1 then
-      bindings = { [":a"] = i }
+      bindings = { [(ctx.backend.paramPrefix or ":") .. "a"] = i }
    elseif k == 2 then
       bindings = { A = i }
       if ctx.backend.namesCaseSensitive then

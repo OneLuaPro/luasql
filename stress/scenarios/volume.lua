@@ -23,6 +23,11 @@
 --                  tablespace does not grow; every 10th row is read
 --                  back and compared, then committed. Skipped if the
 --                  backend has no such table (volBinaryTableCreate).
+--                  Optional: backend.volBinaryDelete runs before each
+--                  insert (DBMS without such a table: the slot of the
+--                  row is emptied first), backend.volBinarySetup (a
+--                  statement or a list of them) and
+--                  backend.volBinaryFinish before and after the phase.
 -- After the phases a line shows the throughput of each phase in rows
 -- per second; it is information, not a check.
 --
@@ -390,6 +395,11 @@ local function primeBinaryRead(ctx)
       setAutocommit(conn, false)
       local insert = prepare(conn, ctx.backend.volBinaryInsert)
       local query = prepare(conn, ctx.backend.volBinarySelect)
+      if ctx.backend.volBinaryDelete then
+         local delete = prepare(conn, ctx.backend.volBinaryDelete)
+         check(delete:execute(0), nil, "delete")
+         closeStatement(delete)
+      end
       check(insert:execute(0, { binaryOf(0), ctx.types.binary }), nil,
             "insert")
       -- Only read here; the phase checks the values.
@@ -406,14 +416,27 @@ local function primeBinaryRead(ctx)
 end
 
 local function setupBinaryInsert(ctx)
+   local backend = ctx.backend
+   local setup = backend.volBinarySetup
+   if type(setup) == "string" then
+      setup = { setup }
+   end
+   for _, sql in ipairs(setup or {}) do
+      exec(ctx.testConn, sql, "binary setup")
+   end
    setAutocommit(ctx.testConn, false)
-   return { insert = prepare(ctx.testConn, ctx.backend.volBinaryInsert),
-            select = prepare(ctx.testConn, ctx.backend.volBinarySelect),
+   return { insert = prepare(ctx.testConn, backend.volBinaryInsert),
+            delete = backend.volBinaryDelete
+               and prepare(ctx.testConn, backend.volBinaryDelete),
+            select = prepare(ctx.testConn, backend.volBinarySelect),
             rows = 0, started = now() }
 end
 
 local function binaryInsertStep(ctx, i, shared)
    local data = binaryOf(i)
+   if shared.delete then
+      check(shared.delete:execute(i), nil, "delete")
+   end
    check(shared.insert:execute(i, { data, ctx.types.binary }), nil,
          "insert")
    shared.rows = i
@@ -430,8 +453,14 @@ end
 local function finishBinaryInsert(ctx, shared)
    commit(ctx.testConn)
    closeStatement(shared.insert)
+   if shared.delete then
+      closeStatement(shared.delete)
+   end
    closeStatement(shared.select)
    setAutocommit(ctx.testConn, true)
+   if ctx.backend.volBinaryFinish then
+      exec(ctx.testConn, ctx.backend.volBinaryFinish, "binary finish")
+   end
    finishTiming(ctx, "binaryInsert", shared, shared.rows)
 end
 

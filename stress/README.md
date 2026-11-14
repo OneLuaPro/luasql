@@ -2,7 +2,7 @@
 
 The LuaSQL stress test suite exercises a LuaSQL driver under load: it opens and closes connections, cursors and prepared statements hundreds of thousands of times, provokes errors, kills sessions, uses the driver from several threads at once and runs for hours. It checks that the driver never crashes, never leaks memory, cursors, temporary LOBs (Large Objects) or sessions, never loses or changes data and never leaves a session blocked. Behavior of the client library or the DBMS (Database Management System) that a user might not expect is reported as a known limitation with its reason, without failing the run.
 
-The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8` and the SQLite driver `luasql.sqlite3` are implemented:
+The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3` and the DuckDB driver `luasql.duckdb` are implemented:
 
 | Driver            | DBMS                    | Status    |
 | ----------------- | ----------------------- | --------- |
@@ -10,7 +10,7 @@ The suite is written for several DBMS. Everything specific to one DBMS lives in 
 | `luasql.sqlite3`  | SQLite                  | available |
 | `luasql.postgres` | PostgreSQL              | planned   |
 | `luasql.mysql`    | MariaDB/MySQL           | planned   |
-| `luasql.duckdb`   | DuckDB                  | planned   |
+| `luasql.duckdb`   | DuckDB                  | available |
 | `luasql.firebird` | Firebird                | planned   |
 | `luasql.odbc`     | any, via an ODBC driver | planned   |
 
@@ -32,7 +32,7 @@ The suite needs only plain Lua and two common modules; further modules are optio
 
 ## Preparing a Run
 
-Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle and SQLite are available; instructions for the other DBMS will follow when their backends are implemented.
+Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite and DuckDB are available; instructions for the other DBMS will follow when their backends are implemented.
 
 ### Oracle
 
@@ -136,6 +136,32 @@ export SQLITE3_TEST_NAME=/tmp/luastress.db
 
 There are no admin variables: the admin connection is always a second connection to the same file. The suite uses it as a probe for the locks of the test connection (see [SQLite](#dbms-specific-notes) under DBMS-Specific Notes), for the preparation step and as "another session" in scenario `transactions`.
 
+### DuckDB
+
+**Driver:** `luasql.duckdb` contains DuckDB; in OneLuaPro it is linked statically. The suite uses plain DuckDB and the JSON functions that come with it (`json_object`, type `JSON`).
+
+**Connection data:** DuckDB has no server, no users and no passwords. The test database is a file; one environment variable names it, and it is optional:
+
+| Variable           | Meaning                                                                                       | Required |
+| ------------------ | --------------------------------------------------------------------------------------------- | -------- |
+| `DUCKDB_TEST_NAME` | the database file, e.g. `C:\temp\luastress.duckdb`; the folder must exist and be writable     | no       |
+
+Without it the file is `luastress_duckdb.duckdb` in the folder for temporary files (`TEMP` or `TMP`, elsewhere `TMPDIR` or `/tmp`). The file is created if it does not exist, and DuckDB writes its write-ahead log next to it (the same name with `.wal` appended). The run drops the tables it creates, so both files may be deleted after the run.
+
+In Windows command prompt (CMD):
+
+```CMD
+set DUCKDB_TEST_NAME=C:\temp\luastress.duckdb
+```
+
+In bash (Linux, macOS):
+
+```bash
+export DUCKDB_TEST_NAME=/tmp/luastress.duckdb
+```
+
+There are no admin variables: the admin connection is always a second connection to the same file, in the same process. It reads the counter of the connections (see [DuckDB](#dbms-specific-notes) under DBMS-Specific Notes), runs the preparation step and is "another session" in scenario `transactions`. DuckDB lets only one process at a time open the file: close other programs that have it open, e.g. a `duckdb` shell, before the run.
+
 
 ## Running
 
@@ -147,7 +173,7 @@ lua stress.lua <dbms> [tier] [--only <scenarios>] [--keep] [--inline]
                [--csv <file>]
 ```
 
-A run first opens the connections and prepares the test environment, then runs each scenario of the tier in a child process of its own, and finally removes the test environment again. A crash or a hang ends only the scenario it happens in; the run reports it and goes on with the next scenario.
+A run first opens the connections and prepares the test environment, then runs each scenario of the tier in a child process of its own, and finally removes the test environment again. A crash or a hang ends only the scenario it happens in; the run reports it and goes on with the next scenario. With DuckDB, which lets only one process at a time open the database file, the run closes its own connections while the child processes run and says so in a note.
 
 ### Tiers
 
@@ -187,6 +213,7 @@ Scenarios with slow steps use fewer iterations, e.g. one logon per iteration; ea
 | Soak run of 4 hours with the samples in a CSV file         | `lua stress.lua oracle soak --csv soak240.csv`              |
 | Short soak run, to check that it works                     | `lua stress.lua oracle soak --duration 10 --csv soak.csv`   |
 | Quick check of the SQLite driver                           | `lua stress.lua sqlite3 smoke`                              |
+| Quick check of the DuckDB driver                           | `lua stress.lua duckdb smoke`                               |
 | Output without colors                                      | `set NO_COLOR=1` before the run                             |
 
 
@@ -230,10 +257,16 @@ Exit codes: 0 all scenarios passed (limits do not count), 1 a scenario or the cl
 - **`journal mode is wal, not delete`** in the preparation step: another program keeps the file in WAL mode. The probe of the locks needs the rollback journal; use another file.
 - **A run was aborted.** Its tables stay in the file; the next run drops them first. The file can also simply be deleted.
 
+### DuckDB
+
+- **`Cannot open file`** before the first scenario: the folder of `DUCKDB_TEST_NAME` (or of `TEMP`) does not exist or is not writable.
+- **`Could not set lock on file`**: another process has the test file open, e.g. a `duckdb` shell or another run. Close it, or use another file.
+- **A run was aborted.** Its tables stay in the file; the next run drops them first. The file and its `.wal` file can also simply be deleted.
+
 
 ## Scenarios
 
-The steps and scenarios run in this order. *Admin connection* tells whether a scenario needs the admin variables; *Without admin connection* tells what is lost when they are not set (with SQLite the admin connection is always there). Each name links to the detailed description. Each description under `doc/` first describes the scenario for every DBMS and ends with a section per DBMS on what is specific there; `dataTypes` lists its cases in a file per DBMS (`doc/dataTypes-<dbms>.md`). The tables of cases give the results with Oracle, the first DBMS implemented, as examples; the sections of the other DBMS say where they differ. The ideas of the cases and phases hold for every DBMS; SQL, error codes, server counters and limits differ and come from the backend module of the DBMS.
+The steps and scenarios run in this order. *Admin connection* tells whether a scenario needs the admin variables; *Without admin connection* tells what is lost when they are not set (with SQLite and DuckDB the admin connection is always there). Each name links to the detailed description. Each description under `doc/` first describes the scenario for every DBMS and ends with a section per DBMS on what is specific there; `dataTypes` lists its cases in a file per DBMS (`doc/dataTypes-<dbms>.md`). The tables of cases give the results with Oracle, the first DBMS implemented, as examples; the sections of the other DBMS say where they differ. The ideas of the cases and phases hold for every DBMS; SQL, error codes, server counters and limits differ and come from the backend module of the DBMS.
 
 | Scenario / Step                                         | Purpose                                                                                                                                                       | Admin connection | Without admin connection                                                                                  |
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------- |
@@ -387,7 +420,48 @@ with `testFields = { "host", "port", "name", "user", "password" }` in `config/my
 
 ### DuckDB
 
-No information yet; not implemented.
+Tested with DuckDB 1.5.6, linked statically into the `luasql.duckdb` of OneLuaPro, on Windows 10. Tier smoke takes about 5½ minutes, tier standard about 11½ minutes and tier nightly about 1¼ hours; about 4½ minutes of each are the warm-up of 23 to 30 seconds in each scenario with phases (`backend.processWarmup`, see below).
+
+**What a connection holds:** DuckDB has no server and shows neither the cursors nor the statements nor the transactions of a connection: `duckdb_prepared_statements()` lists only statements prepared with `PREPARE` on the own connection, and `duckdb_memory()` does not show the results of open cursors, which `luasql.duckdb` keeps outside the buffer pool of DuckDB. The only counter is `connections`: `duckdb_connection_count()` on the admin connection, the connections to the database of the file over all environments and lanes of the process, the admin connection included (2 with the test connection). It also counts the sessions in scenarios `connectionLifecycle`, `threads` and `soak`. A cursor or statement that is not freed shows in the memory of the process only.
+
+**One process at a time:** `luasql.duckdb` opens one database per file and process; all connections to the file share it, also those of other environments and lanes. Another process cannot open the file while it is open (`Could not set lock on file`). The run therefore closes its own connections after the preparation step while the scenarios run in their child processes (`config.exclusiveFile`) and opens the admin connection again for the teardown.
+
+**Preparation step:** drops the tables of an aborted run (names starting with `luastress`), creates the helper tables `luastress_err` (a `CHECK` constraint for a statement that fails) and `luastress_dml` (an `INTEGER` column for a string that is not a number) and writes the write-ahead log into the file (`CHECKPOINT`). The teardown drops the helper tables; the file stays.
+
+**Data in the process:** DuckDB keeps data in the process itself: the rows of a table that grows, also after checkpoints, and the rows of an open transaction until it ends. A phase that fills a table cannot tell this from a leak; the process memory of phases `bulkInsert`, `lobInsert` and `bigRollback` of scenario `volume` is therefore reported as a limit (`backend.memoryLimits`, see [Phases](#phases)). Probes showed that it is not a leak and that no setting of DuckDB keeps it below the limit; see [`doc/volume.md`](doc/volume.md). Phase `binaryInsert` of scenario `volume` replaces its rows by `DELETE` and `INSERT` into a table without primary key, with a small `checkpoint_threshold`: with `INSERT OR REPLACE` into a table with a primary key DuckDB keeps about 2.5 KB per row until the database closes; see [`doc/volume.md`](doc/volume.md).
+
+**Memory up to a cap:** After statements of DuckDB the process keeps memory up to a cap of about 13.5 to 15.7 MB, freed when the database closes. Queries on `range()` and DML fill it at different rates, `SELECT 1` does not, and all kinds of statements share it; it grows the same with SQL text through `conn:execute`, so not in the driver. Without more, phases that run too few statements to fill it grew by up to 3 MB per round in one tier and not in the others: `fetchAll` and `partialFetch` of `cursorLifecycle`, `partialFetch` and `closeRelease` of `stmtLifecycle` and `fetchError` of `errorPaths` in tier `standard`, `interleaveLoop` of `concurrency` in tier `smoke`. The backend therefore fills it once per process before the first phase (`backend.processWarmup`: 30 000 queries like `multiRowQuery` and 10 000 like `offsetBindQuery`, which filled 13.5 MB in a probe, after which DML did not grow); the output shows a note, see [Phases](#phases) and [`doc/concurrency.md`](doc/concurrency.md).
+
+**Known limitations**, reported as "limit":
+
+| Scenario       | Test                                         | Limitation                                                                                                                             |
+| -------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `concurrency`  | `lockNowait`                                 | a conflict with another transaction aborts the transaction of B: every further statement fails until it is rolled back                 |
+| `transactions` | `enableAutocommit`                           | `setautocommit(true)` rolls back an open transaction                                                                                   |
+| `transactions` | `errorKeepsWork`                             | an error in a statement aborts the whole transaction: every further statement fails, `commit()` rolls back and gives `false` and a message |
+| `transactions` | `rowCountType`                               | row counts are floats in `luasql.duckdb`, as in LuaSQL, e.g. `1.0`                                                                      |
+| `volume`       | `bulkInsert`, `lobInsert`, `bigRollback` (process memory) | DuckDB keeps the rows of the growing table, and those of the open transaction until the rollback, in the process          |
+| `dataTypes`    | `int2pow53plus1`, `plainInt53plus1`, `intMax`, `plainIntMax` | column `n` is `DOUBLE` (`DECIMAL`, the exact type of DuckDB, is read as text by `luasql.duckdb`): integers above 2^53 lose digits |
+| `dataTypes`    | `floatOverflow`                              | column `n` is `DOUBLE`, which holds 1e200                                                                                              |
+| `dataTypes`    | `timestamp`, `rowsTimestamp`                 | DuckDB writes a timestamp without the zeros at the end of its fraction, e.g. `2026-10-19 13:45:30`                                     |
+| `dataTypes`    | `dateBc`, `tsBc`                             | `luasql.duckdb` takes years 0000 to 9999, without a sign                                                                               |
+| `dataTypes`    | `dateBcLiteral`                              | DuckDB writes a year before Christ as `0045-03-15 (BC)`, not as `-0044-03-15`                                                          |
+| `dataTypes`    | `timeInDate`                                 | `luasql.type.time` is bound as `TIME`, which DuckDB cannot convert to `TIMESTAMP`                                                      |
+| `dataTypes`    | `tooLong`, `charTooLong`, `rawBinaryTooLong` | DuckDB does not enforce the declared length of a column; a `BLOB` has none                                                             |
+| `dataTypes`    | `charPadded`, `charEmpty`, `ncharPadded`     | `CHAR(n)` is a `VARCHAR` in DuckDB: no padding with spaces                                                                             |
+| `dataTypes`    | `jsonDuplicate`                              | DuckDB accepts duplicate keys in JSON                                                                                                  |
+
+**Behavior worth knowing**, checked but not reported as limit:
+
+- DuckDB has no row locks and never waits. Its transactions use MVCC (Multi-Version Concurrency Control): a transaction that changes a row changed by another open transaction gets `Conflict on update!` (in a table with a primary key `Conflict on tuple deletion!`) at once. Case `lockWaitTimeout` of scenario `concurrency` therefore passes at once; cases `lockWait` and `deadlock` of scenario `threads` are skipped, and in case `parallelWriters` every lane inserts rows instead of changing the same row.
+- Errors during the execution of a statement (a constraint, a conversion, a conflict) abort the transaction; errors of the parser, the catalog and the binder, and a missing parameter, do not. `luasql.duckdb` reads the whole result of a query at the execute, so an error of DuckDB in any row of a result comes at the execute, not at a fetch.
+- Placeholders are `$1`, `$2`, ... and `$name` (a key without prefix gets `$`); DuckDB does not tell `$a` and `$A` apart, and `:name` is a parser error. A placeholder that never got a value gives `nil` and a message, also after `stmt:reset()`.
+- A Lua integer is bound as `BIGINT`. DuckDB does not convert it to an `INTEGER` argument of a function such as `rpad` at the execute (`Binder Error`); the SQL needs a `CAST`.
+- A text without a statement (`""`) gives the row count 0 through `conn:execute`, but `nil` and a message through `conn:prepare`.
+- DDL is part of the transaction: `ddlCommits` passes. `conn:commit()` and `conn:rollback()` in autocommit mode give `false` and `no transaction is active`.
+- Scenario `soak` runs with lanes: each worker changes rows of its own ids, so their transactions do not conflict.
+
+**Not covered with DuckDB yet:** `prefetch` (`luasql.duckdb` has no options), `warnings` (DuckDB has no warnings of this kind), `connectionLoss` and case `killDuringCall` (there is no session to kill), cases `lockWait` and `deadlock` (see above), `savepoint` (DuckDB has no `SAVEPOINT`), the cases of `volume` with a full database and `maxLength` (DuckDB has no size limit for a database), `badColumnType` of `errorPaths` (the error comes at the fetch, as in `fetchError`), the WAL cases of `concurrency` (SQLite only) and the cases of `dataTypes` for time zones, intervals, row ids and hex text in binary columns (see [`doc/dataTypes-duckdb.md`](doc/dataTypes-duckdb.md)).
 
 ### Firebird
 
@@ -422,6 +496,10 @@ The heap may also settle slowly, for example when blocks of very different sizes
 
 The phase fails if the trend of the process is above 1024 KB, in both rounds if there is a second one, or if the Lua heap, which does not jump, grows by more than 64 KB. A leak crosses the limit at about 1 MB over the measured iterations: about 105 bytes per iteration in a phase of 10 000 iterations, about 11 bytes in one of 100 000; over the band of the LOB phases, a leak of 20 bytes per iteration is still found in tier `nightly`. A phase with fewer measured iterations than samples takes a sample after every iteration. Phases with fewer than 5 samples after their warm-up are judged by the difference, e.g. `killLoop` in tier `smoke` (20 iterations) or `laneLoop` below tier `nightly` (warm-up 300).
 
+An embedded DBMS may keep data of a phase in the process itself, e.g. DuckDB the rows of a table that grows during the phase; the phase cannot tell such data from a leak. A backend can name such phases with a reason (`backend.memoryLimits`, keyed `<scenario>.<phase>`): their process memory is then shown and reported as a limit with that reason, while the Lua heap, the counters and the data are judged as usual. So far this holds for phases `bulkInsert`, `lobInsert` and `bigRollback` of scenario `volume` with DuckDB, see [`doc/volume.md`](doc/volume.md).
+
+An embedded DBMS may also keep memory after its statements up to a cap, which different statements fill at different rates; a phase that runs too few statements to fill it grows in one tier and not in another. A backend can name statements that fill it (`backend.processWarmup`, a list of `{ sql = ..., count = ..., args = ... }`): they run once per process before its first phase, also with `--inline`, on the test connection, each `count` times, prepared with `args` if given and with all rows read. The output shows a note with the number of statements and the time; scenarios without phases, such as `dataTypes` and `soak`, do not run them. So far this holds for DuckDB, see DuckDB under [DBMS-Specific Notes](#dbms-specific-notes).
+
 The run also reads the open cursors of the test session before and after each scenario. If they grew, a note lists the new ones, so cursors the DBMS keeps for itself can be told apart from cursors the driver left open.
 
 #### Soak
@@ -432,4 +510,4 @@ A single phase cannot show a leak of one byte per step, and the memory of a proc
 - the Lua heap;
 - the PGA (Program Global Area, the private memory of the session on the Oracle server) and the server counters of the test session.
 
-The first 10 % of the run time, at least 5 minutes, are warm-up. Over the samples after it, each memory series gets a robust slope: the median of the slopes between all pairs of samples (Theil-Sen estimator), so single jumps and dips do not count; with hundreds of samples over hours, a single step does not move it either. The limits per hour are 512 KB for the process, 64 KB for the Lua heap and 256 KB for the PGA. The server counters and the sessions of the test user must be the same at the end. With `--csv <file>` every sample is written as a line, for plotting or a closer look; [`doc/soak.md`](doc/soak.md) has the reference results of 4 hour runs with Oracle and SQLite.
+The first 10 % of the run time, at least 5 minutes, are warm-up. Over the samples after it, each memory series gets a robust slope: the median of the slopes between all pairs of samples (Theil-Sen estimator), so single jumps and dips do not count; with hundreds of samples over hours, a single step does not move it either. The limits per hour are 512 KB for the process, 64 KB for the Lua heap and 256 KB for the PGA. The server counters and the sessions of the test user must be the same at the end. With `--csv <file>` every sample is written as a line, for plotting or a closer look; [`doc/soak.md`](doc/soak.md) has the reference results of 4 hour runs with Oracle, SQLite and DuckDB.

@@ -28,3 +28,7 @@ A LOB phase first checks that its query really gives temporary LOBs (`backend.te
 ## SQLite
 
 There are no temporary LOBs and no prefetch: the LOB phases read long text and blobs made by SQL, and the server counter is the lock of the test connection on the file (see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)). It must be 0 before each phase; a cursor that was closed or collected but still holds its statement shows there.
+
+## DuckDB
+
+There are no temporary LOBs and no prefetch: `luasql.duckdb` reads the whole result at the execute, and the LOB phases read long text and blobs made by SQL (`repeat`, `unhex`). DuckDB shows neither the cursors nor the statements of a connection; the only server counter is `connections`, the connections to the database of the file (see DuckDB under [DBMS-Specific Notes](../README.md#dbms-specific-notes)). A cursor that is not freed shows in the memory of the process only.

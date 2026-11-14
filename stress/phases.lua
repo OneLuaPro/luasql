@@ -60,6 +60,23 @@
 -- a second round of the same length, with its setup and finish again;
 -- only a trend over the limit in both rounds is a leak. A phase that
 -- cannot run twice (e.g. it inserts fixed ids) sets confirm = false.
+--
+-- An embedded DBMS may keep the data of a phase in this process, e.g.
+-- DuckDB the rows of a table that grows during the phase. Such a phase
+-- cannot tell the data from a leak: the backend names it in
+-- memoryLimits, keyed "<scenario>.<phase>" (phases.scenario is set by
+-- the runner), with the reason. Its process memory over the limit is
+-- then a limit, shown with the reason; the Lua heap, the counters and
+-- the data are judged as before.
+--
+-- A DBMS in this process may also keep memory after its statements up
+-- to a cap, e.g. DuckDB about 14 MB. A phase that does not fill it
+-- would show it as growth in some tiers and not in others. The backend
+-- then names statements that fill it in processWarmup, a list of
+-- { sql = ..., count = ..., args = ... }: before the first phase of the
+-- process (also with --inline) each runs count times on the test
+-- connection, prepared with args if given, all rows read; the output
+-- shows a note.
 
 local dbutil = require("dbutil")
 local memory = require("memory")
@@ -93,6 +110,87 @@ local minTrendSamples = 5
 local trendParts = 3
 
 local phases = {}
+
+-- Name of the scenario that runs, set by the runner (stress.lua); with
+-- the name of the phase the key of backend.memoryLimits.
+phases.scenario = nil
+
+-- The reason the backend gives for not judging the process memory of
+-- this phase (backend.memoryLimits), or nil.
+local function memoryLimitReason(ctx, phase)
+   local limits = ctx.backend and ctx.backend.memoryLimits
+   if not limits or not phases.scenario then
+      return nil
+   end
+   return limits[phases.scenario .. "." .. phase.name]
+end
+
+-- Wall clock time in seconds, from luv if there.
+local hasUv, uv = pcall(require, "luv")
+local function now()
+   if hasUv then
+      return uv.hrtime() / 1e9
+   end
+   return os.time()
+end
+
+-- True once backend.processWarmup has run in this process.
+local warmedUp = false
+
+-- Runs one statement of backend.processWarmup count times and reads all
+-- its rows. Raises an error on failure.
+local function runWarmupStatement(conn, entry)
+   local stmt
+   if entry.args then
+      stmt = assert(conn:prepare(entry.sql))
+   end
+   for _ = 1, entry.count do
+      local cur, err
+      if stmt then
+         cur, err = stmt:execute(table.unpack(entry.args))
+      else
+         cur, err = conn:execute(entry.sql)
+      end
+      if not cur then
+         error(tostring(err), 0)
+      end
+      if type(cur) ~= "number" then
+         local row = cur:fetch()
+         while row ~= nil do
+            row = cur:fetch()
+         end
+         cur:close()
+      end
+   end
+   if stmt then
+      stmt:close()
+   end
+end
+
+-- Runs backend.processWarmup once per process, before the first phase
+-- measures, and prints a note. Returns true, or nil and an error.
+local function warmUpProcess(ctx)
+   local list = ctx.backend and ctx.backend.processWarmup
+   if warmedUp or not list then
+      return true
+   end
+   warmedUp = true
+   local started, statements = now(), 0
+   for _, entry in ipairs(list) do
+      local ok, err = pcall(runWarmupStatement, ctx.testConn, entry)
+      if not ok then
+         return nil, "process warmup: " .. tostring(err)
+      end
+      statements = statements + entry.count
+   end
+   report.print("  note: ", string.format("process warmed up for the"
+                                          .. " memory measurement: %d"
+                                          .. " statements in %.0f s"
+                                          .. " (backend.processWarmup)",
+                                          statements, now() - started),
+                "note")
+   return true
+end
 
 -- Returns the session id of the test connection, or nil without admin
 -- connection. Raises an error on failure.
@@ -346,7 +444,9 @@ local function describeProcess(result)
    return text
 end
 
--- Runs one phase and returns a short summary. Raises an error on failure.
+-- Runs one phase and returns a short summary, and the reason of a limit
+-- (backend.memoryLimits) if the process memory grew over the limit.
+-- Raises an error on failure.
 local function runPhase(ctx, phase, count, sid)
    if phase.precheck then
       local problem = phase.precheck(ctx, phase)
@@ -385,16 +485,21 @@ local function runPhase(ctx, phase, count, sid)
       end
    end
 
+   local limitReason
    if growth and growth > processLimitKb then
       local secondGrowth = second and judgedGrowth(second)
       if not secondGrowth or secondGrowth > processLimitKb then
-         local text = string.format("process memory (%s) grows: %s over"
-                                    .. " %d iterations", memory.label,
-                                    describeProcess(first), first.measured)
-         if second then
-            text = text .. ", second round " .. describeProcess(second)
+         limitReason = memoryLimitReason(ctx, phase)
+         if not limitReason then
+            local text = string.format("process memory (%s) grows: %s"
+                                       .. " over %d iterations",
+                                       memory.label, describeProcess(first),
+                                       first.measured)
+            if second then
+               text = text .. ", second round " .. describeProcess(second)
+            end
+            error(text, 0)
          end
-         error(text, 0)
       end
    end
    for _, result in ipairs({ first, second }) do
@@ -425,7 +530,7 @@ local function runPhase(ctx, phase, count, sid)
    end
    local last = second or first
    parts[#parts + 1] = "lua " .. signedKb(last.luaAfter - last.luaBefore)
-   return table.concat(parts, ", ")
+   return table.concat(parts, ", "), limitReason
 end
 
 -- Runs all phases with 'count' iterations each and prints one line per
@@ -435,12 +540,21 @@ function phases.run(ctx, list, count)
    if not ok then
       return nil, tostring(sid)
    end
+   local warmErr
+   ok, warmErr = warmUpProcess(ctx)
+   if not ok then
+      return nil, warmErr
+   end
 
    local failed = {}
    for _, phase in ipairs(list) do
-      local phaseOk, result = pcall(runPhase, ctx, phase, count, sid)
+      local phaseOk, result, limitReason = pcall(runPhase, ctx, phase,
+                                                 count, sid)
       local prefix = string.format("  %-14s ", phase.name)
-      if phaseOk then
+      if phaseOk and limitReason then
+         report.print(prefix, result .. "; limit: process memory not"
+                         .. " judged, " .. limitReason, "limit")
+      elseif phaseOk then
          report.print(prefix, result, "pass")
       else
          report.print(prefix, "FAILED: " .. tostring(result), "fail")

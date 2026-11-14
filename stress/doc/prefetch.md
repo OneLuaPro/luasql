@@ -43,3 +43,7 @@ The round trips are the statistic `SQL*Net roundtrips to/from client` in `v$sess
 ## SQLite
 
 Skipped: `luasql.sqlite3` has no option `prefetch`.
+
+## DuckDB
+
+Skipped: `luasql.duckdb` has no option `prefetch`; it reads the whole result at the execute.

@@ -38,3 +38,7 @@ The kill is `ALTER SYSTEM KILL SESSION ... IMMEDIATE`. A lost connection shows a
 ## SQLite
 
 Skipped: SQLite has no sessions that could be killed.
+
+## DuckDB
+
+Skipped: DuckDB has no sessions that could be killed and no network connection.

@@ -25,7 +25,10 @@
 --   lockNowait           a row locked by A: NOWAIT in B fails cleanly,
 --                        B can lock another row, works after A's
 --                        rollback; a limit if the DBMS locks the whole
---                        database (concurrencyLimits.databaseLock)
+--                        database (concurrencyLimits.databaseLock), or
+--                        if the conflict ends the transaction of B,
+--                        which must roll back first
+--                        (concurrencyLimits.conflictAborts)
 --   lockWaitTimeout      the same with WAIT 1: a clean error after
 --                        about a second, no hang; the wait may be set
 --                        on B first (backend.concLockWaitSetup, e.g. a
@@ -317,7 +320,9 @@ local function readConsistencyCase(ctx)
 end
 
 -- A DBMS that locks the whole database instead of rows
--- (concurrencyLimits.databaseLock) does not let B lock another row.
+-- (concurrencyLimits.databaseLock) does not let B lock another row. A
+-- DBMS that ends the transaction of B at the conflict
+-- (concurrencyLimits.conflictAborts) needs a rollback of B first.
 local function lockNowaitCase(ctx)
    local a, b = openTracked(ctx), openTracked(ctx)
    check(a:setautocommit(false))
@@ -326,8 +331,11 @@ local function lockNowaitCase(ctx)
    local ok, err = tryLock(ctx, b, 1)
    expectNil("lock held by another session", ok, err,
              ctx.backend.lockBusyError)
+   local limit = knownLimit(ctx, "conflictAborts", err)
+   if limit then
+      check(b:rollback())
+   end
    -- B works on: another row can be locked.
-   local limit
    ok, err = tryLock(ctx, b, 2)
    if not ok then
       limit = knownLimit(ctx, "databaseLock", err)

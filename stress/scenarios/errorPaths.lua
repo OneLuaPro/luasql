@@ -19,7 +19,9 @@
 --                    prepared (backend.emptyStatement), via conn:execute
 --                    and, every second time, conn:prepare; or, with
 --                    backend.emptyStatementCount, a statement without
---                    effect that gives this row count
+--                    effect that gives this row count; with
+--                    backend.emptyPrepareFails as well, conn:prepare
+--                    rejects it all the same (DuckDB)
 --
 -- A phase is skipped if the driver has no prepare() but the phase needs
 -- it, or if the backend lacks a query the phase needs.
@@ -222,7 +224,8 @@ end
 -- takes an empty statement as a statement without effect
 -- (backend.emptyStatementCount, e.g. 0) gives that row count instead,
 -- through conn:execute and through a prepared statement, which must be
--- closable afterwards.
+-- closable afterwards; with backend.emptyPrepareFails, conn:prepare
+-- rejects it (nil and a message).
 local function emptyStatementStep(ctx, i)
    local conn = ctx.testConn
    local sql = ctx.backend.emptyStatement
@@ -240,7 +243,7 @@ local function emptyStatementStep(ctx, i)
    if i % 2 == 0 and conn.prepare ~= nil then
       local stmt
       stmt, err = conn:prepare(sql)
-      if not count then
+      if not count or ctx.backend.emptyPrepareFails then
          expectNil("prepare of an empty statement", stmt, err)
          return
       end

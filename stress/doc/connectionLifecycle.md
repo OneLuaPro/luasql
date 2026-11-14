@@ -51,3 +51,13 @@ Connects that must fail:
 | ----------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | `missingFolder`   | Opens a file in a folder that does not exist.                                           | Pass: `nil` and `unable to open database file`. Fail: anything else.       |
 | `readonlyMissing` | Opens a file that does not exist read-only (`env:connect(name, nil, true)`).            | As `missingFolder`.                                                         |
+
+## DuckDB
+
+A connect opens no session on a server: all connections of a process to the file share one database, also those of other environments. `sessions` and the server counter `connections` both count the connections to this database (`duckdb_connection_count()` on the admin connection, its own included); with the test connection that is 2. A connection left to the GC (Garbage Collector) shows there until it is collected.
+
+Connects that must fail:
+
+| Test              | Checks                                          | Results                                                               |
+| ----------------- | ----------------------------------------------- | --------------------------------------------------------------------- |
+| `missingFolder`   | Opens a file in a folder that does not exist.   | Pass: `nil` and `Cannot open file`. Fail: anything else.              |

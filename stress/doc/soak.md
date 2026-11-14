@@ -102,3 +102,30 @@ A run of 4 hours (`lua stress.lua sqlite3 soak --csv soak240-sqlite3.csv`) on Wi
 | private bytes              | 3888 KB at the start, 4352 KB after the warm-up of 24 minutes, 4344 KB at the end; slope +16 KB per hour (limit 512). Between 4000 and 4440 KB after the warm-up, in two levels: the samples move between about 4000 and 4352 KB up to minute 109 and between about 4000 and 4440 KB from minute 114 on. The slope comes from this single step of 88 KB; from the end of the warm-up to hour 2 and in the last 2 hours it is 0. |
 | Lua heap                   | 547 KB at the start, 548 KB from the first sample after 30 seconds to the end; slope 0                                                                          |
 | counters                   | locks 1, open transactions 0, the same from the start to the end (the read lock between rounds, see above)                                                      |
+
+## DuckDB
+
+The scenario runs with lanes: each worker changes rows of its own ids only, so the transactions of the lanes do not conflict. The table has the types `INTEGER` and `VARCHAR`; the date and time values come from `current_timestamp`, `make_date`, `make_time`, `epoch_ms(0)` and an `INTERVAL` (`current_date` and `today()` need the extension `icu`, which the DuckDB of the test does not contain). The failing fetch reads a column of type `BIGNUM`, for which `luasql.duckdb` has no Lua value (see [`errorPaths`](errorPaths.md)); an error of DuckDB itself would abort the transaction of the round. The warning step is left out (DuckDB has no such statement), and there is no series `pga`. The only counter is `connections`, the connections to the database of the file, the lanes included.
+A smoke run on Windows looks like this:
+
+```
+scenario soak:
+  1 min, a sample every 10 s, 2 lanes, memory as private bytes
+  rounds          6993 on the test connection (116.5/s), 13959 in 2 lanes, 1 min
+  private bytes   start 13112 KB, end 29752 KB (no leak verdict in tier smoke)
+  lua             start 461 KB, end 461 KB (no leak verdict in tier smoke)
+  counters        connections 4 -> 4
+  sessions        2 -> 2
+  passed
+```
+
+### Reference result
+
+A run of 4 hours (`lua stress.lua duckdb soak --csv soak240-duckdb.csv`) on Windows, with the database file on a local disk, 482 samples:
+
+| Series                     | Result                                                                                                                                                          |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| rounds                     | 1.79 million on the test connection (124 per second), 3.56 million in the 2 lanes                                                                               |
+| private bytes              | 12 980 KB at the start, 29 564 KB after 30 seconds, 30 908 KB after the warm-up of 24 minutes, 33 056 KB at the end; slope +156 KB per hour (limit 512). Between 28 700 and 33 728 KB after the warm-up. From the end of the warm-up to hour 2 the slope is +411 KB per hour, in the last 2 hours +276 KB per hour. |
+| Lua heap                   | 609 KB from the start to the end; slope 0                                                                                                                       |
+| counters                   | connections 4 from the start to the end (the test connection, the admin connection and the 2 lanes), 5 in a single sample after 3 hours 9 minutes               |

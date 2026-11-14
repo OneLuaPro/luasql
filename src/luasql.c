@@ -2,6 +2,7 @@
 ** See Copyright Notice in license.html
 */
 
+#include <ctype.h>
 #include <string.h>
 
 #include "lua.h"
@@ -336,6 +337,119 @@ LUASQL_API int luasql_validate_args (lua_State *L, int first, int last) {
 		lua_pop (L, 1);
 	}
 	return (last >= first) ? last - first + 1 : 0;
+}
+
+
+static int luasql_is_digits (const char *s, int n) {
+	int i;
+	for (i = 0; i < n; i++)
+		if (!isdigit ((unsigned char)s[i]))
+			return 0;
+	return 1;
+}
+
+
+static int luasql_digits_value (const char *s, int n) {
+	int i, v = 0;
+	for (i = 0; i < n; i++)
+		v = v * 10 + (s[i] - '0');
+	return v;
+}
+
+
+/*
+** Parses "HH:MM:SS" with an optional fraction ".f" of 1 to 9 digits
+** (only if allow_frac) into dt. Returns 1 if valid.
+*/
+static int luasql_parse_time (const char *s, size_t len, int allow_frac,
+                              luasql_datetime *dt) {
+	int i;
+	if (len < 8 || !luasql_is_digits (s, 2) || s[2] != ':'
+	    || !luasql_is_digits (s + 3, 2) || s[5] != ':'
+	    || !luasql_is_digits (s + 6, 2))
+		return 0;
+	dt->hour = luasql_digits_value (s, 2);
+	dt->minute = luasql_digits_value (s + 3, 2);
+	dt->second = luasql_digits_value (s + 6, 2);
+	if (dt->hour > 23 || dt->minute > 59 || dt->second > 59)
+		return 0;
+	dt->has_time = 1;
+	if (len == 8)
+		return 1;
+	if (!allow_frac || s[8] != '.' || len < 10 || len > 18
+	    || !luasql_is_digits (s + 9, (int)(len - 9)))
+		return 0;
+	dt->nanos = luasql_digits_value (s + 9, (int)(len - 9));
+	for (i = (int)(len - 9); i < 9; i++)
+		dt->nanos *= 10;
+	return 1;
+}
+
+
+/*
+** Parses the text of a T.date, T.timestamp or T.time value in the fixed
+** form of LuaSQL into dt, also checked against the calendar (a day like
+** 2026-02-30 or the time 24:00:00 is invalid). Returns 1 if valid.
+**   T.date       YYYY-MM-DD, optional " HH:MM:SS"
+**   T.timestamp  YYYY-MM-DD, optional " HH:MM:SS" with optional fraction
+**   T.time       HH:MM:SS with optional fraction
+** Drivers whose client library does not convert such text themselves
+** (sqlite3, duckdb) use it.
+*/
+LUASQL_API int luasql_parse_datetime (const char *s, size_t len, int type,
+                                      luasql_datetime *dt) {
+	static const int days[12] = { 31, 28, 31, 30, 31, 30,
+	                              31, 31, 30, 31, 30, 31 };
+	int dim;
+
+	memset (dt, 0, sizeof (*dt));
+	if (type == LUASQL_TYPE_TIME)
+		return luasql_parse_time (s, len, 1, dt);
+	if (len < 10 || !luasql_is_digits (s, 4) || s[4] != '-'
+	    || !luasql_is_digits (s + 5, 2) || s[7] != '-'
+	    || !luasql_is_digits (s + 8, 2))
+		return 0;
+	dt->year = luasql_digits_value (s, 4);
+	dt->month = luasql_digits_value (s + 5, 2);
+	dt->day = luasql_digits_value (s + 8, 2);
+	if (dt->month < 1 || dt->month > 12 || dt->day < 1)
+		return 0;
+	dim = days[dt->month - 1];
+	if (dt->month == 2 && ((dt->year % 4 == 0 && dt->year % 100 != 0)
+	                       || dt->year % 400 == 0))
+		dim = 29;
+	if (dt->day > dim)
+		return 0;
+	if (len == 10)
+		return 1;
+	if (s[10] != ' ')
+		return 0;
+	return luasql_parse_time (s + 11, len - 11,
+	                          type == LUASQL_TYPE_TIMESTAMP, dt);
+}
+
+
+/*
+** Pushes nil and the message for a T.date, T.timestamp or T.time value
+** that luasql_parse_datetime rejected. Returns 2.
+*/
+LUASQL_API int luasql_datetime_fail (lua_State *L, int type) {
+	lua_pushnil (L);
+	switch (type) {
+		case LUASQL_TYPE_DATE:
+			lua_pushliteral (L, LUASQL_PREFIX"invalid T.date value, expected "
+				"YYYY-MM-DD or YYYY-MM-DD HH:MM:SS");
+			break;
+		case LUASQL_TYPE_TIMESTAMP:
+			lua_pushliteral (L, LUASQL_PREFIX"invalid T.timestamp value, "
+				"expected YYYY-MM-DD, optional HH:MM:SS and fraction");
+			break;
+		default:
+			lua_pushliteral (L, LUASQL_PREFIX"invalid T.time value, expected "
+				"HH:MM:SS, optional fraction");
+			break;
+	}
+	return 2;
 }
 
 

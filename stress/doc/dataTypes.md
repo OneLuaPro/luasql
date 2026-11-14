@@ -6,6 +6,7 @@ This file describes the scenario for every DBMS. The cases, with what each one c
 
 - [`dataTypes-oracle.md`](dataTypes-oracle.md): all cases with Oracle;
 - [`dataTypes-sqlite3.md`](dataTypes-sqlite3.md): what differs with SQLite.
+- [`dataTypes-duckdb.md`](dataTypes-duckdb.md): what differs with DuckDB.
 
 For every case the scenario writes one row, reads it back with `cur:fetch` and checks:
 

@@ -975,9 +975,10 @@ end
 local function runRowsCase(ctx, id, case)
    local backend = ctx.backend
    local int = ctx.types.int
+   -- Placeholders :2, :3, ...; with backend.paramPrefix e.g. $2, $3.
    local placeholders = {}
    for k = 1, #case.columns do
-      placeholders[k] = ":" .. (k + 1)
+      placeholders[k] = (backend.paramPrefix or ":") .. (k + 1)
    end
    local columnList = table.concat(case.columns, ", ")
    local insert = string.format(backend.typesInsertColumns, columnList,

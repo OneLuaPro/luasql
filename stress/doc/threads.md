@@ -40,3 +40,7 @@ The driver must create its OCI (Oracle Call Interface) environment with `OCI_THR
 ## SQLite
 
 There are no sessions: what a lane leaves behind is counted as the lock of other connections on the database file (`backend.leftoverCounter`, read by the probe of the admin connection, see SQLite under [DBMS-Specific Notes](../README.md#dbms-specific-notes)); it must be back at 0. In `lockWait` both lanes set a busy timeout first (`backend.threadsLockSetup`), and B waits for the write lock of the database instead of a row; so do the lanes of `parallelWriters`, one writer at a time. Their transactions begin with the update: a transaction that has read before it writes would get `database is locked` at once instead of waiting. `deadlock` is skipped: a second writer gets `database is locked` at once, SQLite does not wait in a deadlock. `killDuringCall` is skipped: there is no session to kill.
+
+## DuckDB
+
+There are no sessions: what a lane leaves behind is counted as connections to the database (`backend.leftoverCounter`, `duckdb_connection_count()`); they must be back where they were. Two transactions that change the same row conflict instead of waiting (see [`concurrency`](concurrency.md)), so `parallelWriters` raises the value of row 1 by inserting a row with id 1, and the value of a row is the number of its rows: the case checks parallel write transactions that do not conflict. `lockWait` and `deadlock` are skipped: DuckDB never waits for a lock. `killDuringCall` is skipped: there is no session to kill.

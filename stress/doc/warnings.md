@@ -33,3 +33,7 @@ OCI (Oracle Call Interface) reports a warning as `OCI_SUCCESS_WITH_INFO`. The ca
 ## SQLite
 
 Skipped: the backend has no warning statements; the C interface of SQLite has no result for a success with a warning.
+
+## DuckDB
+
+Skipped: the backend has no warning statements; the C interface of DuckDB has no result for a success with a warning.

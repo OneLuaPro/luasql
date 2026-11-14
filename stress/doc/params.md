@@ -46,7 +46,7 @@ Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 | `argCount` | in turn: two arguments for one placeholder, one for two, `conn:execute(sql, i, i)` for one placeholder, `conn:execute(sql)` without a value; every 10th iteration a valid execute of both statements | a call does not give `nil` and a message, the values bound before do not stay, or a counter or the memory grows |
 | `connQuery` | `conn:execute` of a query with a string and a timestamp, in a table or as variable arguments in turn; the cursor is read to its end, closed after the row, or dropped without close, in turn; a full GC every 10th iteration | a value comes back wrong, or a counter or the memory grows: the bindings belong to the cursor until it is closed, also by the GC |
 | `connDml` | `conn:execute` of a PL/SQL block (not a query) with a timestamp and a number, in a table or as variable arguments; every 5th iteration a string that is not a number fails at the execute | the call does not return a number of rows (an integer; a float with an integral value where the backend says so, `backend.rowCountFloat`), the failing one does not give `nil` and the error, or a counter or the memory grows |
-| `spellings` | binds one named placeholder as `a`, `:a`, `A` and by position, in turn | the value does not come back, or a counter or the memory grows. `luasql.oci8` keeps one binding per spelling until `stmt:reset()` or `stmt:close()`; there are only four, so the memory must stay flat. Where names are case sensitive (`backend.namesCaseSensitive`, SQLite), `A` is an unknown name and must give `nil` and a message |
+| `spellings` | binds one named placeholder as `a`, `:a`, `A` and by position, in turn; the prefix of `:a` is that of the DBMS (`backend.paramPrefix`, e.g. `$a` with DuckDB) | the value does not come back, or a counter or the memory grows. `luasql.oci8` keeps one binding per spelling until `stmt:reset()` or `stmt:close()`; there are only four, so the memory must stay flat. Where names are case sensitive (`backend.namesCaseSensitive`, SQLite), `A` is an unknown name and must give `nil` and a message |
 
 ## Oracle
 
@@ -55,3 +55,7 @@ Too many parameters in a table and a placeholder without a value give the errors
 ## SQLite
 
 `connDml` runs an `UPDATE` of a helper table that is `STRICT`, so a string that is not a number fails; `argCount` expects a row with NULL for `conn:execute(sql)` without a value (see `neverBound`); `failedBindKeeps` passes, because `luasql.sqlite3` resolves all names and positions before it binds.
+
+## DuckDB
+
+Placeholders are `$1`, `$2`, ... and `$name` (`backend.paramPrefix`); DuckDB does not tell `$a` and `$A` apart. A placeholder without a value gives `nil` and `Values were not provided` through a prepared statement, and `Expected 1 parameters, but none were supplied` through `conn:execute(sql)` without values (`argCount`). `connDml` runs an `UPDATE` of a helper table whose `INTEGER` column rejects a string that is not a number (`Conversion Error`). `failedBindKeeps` passes, because `luasql.duckdb` resolves all names and positions before it binds.

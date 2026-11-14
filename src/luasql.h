@@ -40,6 +40,15 @@
    drivers in one Lua state */
 #define LUASQL_NULL_KEY "LuaSQL null"
 
+/* fields of a T.date, T.timestamp or T.time value, filled by
+   luasql_parse_datetime */
+typedef struct {
+	int year, month, day;     /* 0 for T.time */
+	int hour, minute, second; /* 0 if there is no time part */
+	long nanos;               /* fraction of a second in nanoseconds */
+	int has_time;             /* 1 if the value has a time part */
+} luasql_datetime;
+
 // Macro to handle userdata creation across Lua versions
 #if LUA_VERSION_NUM >= 504
 #define LUASQL_NEWUD(L, size) lua_newuserdatauv(L, size, 0)
@@ -58,6 +67,8 @@ LUASQL_API int luasql_isnull (lua_State *L, int idx);
 LUASQL_API int luasql_check_param (lua_State *L, int idx, int *is_null);
 LUASQL_API int luasql_validate_params (lua_State *L, int tbl_idx, int *is_named_out, int *num_params_out);
 LUASQL_API int luasql_validate_args (lua_State *L, int first, int last);
+LUASQL_API int luasql_parse_datetime (const char *s, size_t len, int type, luasql_datetime *dt);
+LUASQL_API int luasql_datetime_fail (lua_State *L, int type);
 
 #if !defined LUA_VERSION_NUM || LUA_VERSION_NUM==501
 void luaL_setfuncs (lua_State *L, const luaL_Reg *l, int nup);

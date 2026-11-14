@@ -18,3 +18,7 @@ A session of a killed child process may still exist on the server for a moment; 
 ## SQLite
 
 `prep/sqlite3.lua` drops the helper tables. The file itself stays; it may be deleted after the run.
+
+## DuckDB
+
+`prep/duckdb.lua` drops the helper tables, on an admin connection that the run opens again for it (the run closes its connections while the scenarios run, see [`prep`](prep.md)). The file and its write-ahead log (the same name with `.wal` appended) stay; they may be deleted after the run.

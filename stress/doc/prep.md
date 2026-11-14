@@ -37,3 +37,17 @@ prep:   file /tmp/luastress_sqlite3.db, journal mode delete, helper tables creat
 ```
 
 There is no state file: nothing on a server has to be restored. With `--keep` the helper tables stay in the file.
+
+## DuckDB
+
+The admin connection of DuckDB is a second connection to the test file, so the step always runs. `prep/duckdb.lua` drops the tables of an aborted run (names starting with `luastress`) and creates two helper tables: `luastress_err` has one row and a `CHECK` constraint, for a statement that fails (scenario [`errorPaths`](errorPaths.md)); `luastress_dml` has an `INTEGER` column that rejects a string that is not a number (scenario [`params`](params.md)). A `CHECKPOINT` then writes the write-ahead log into the file, so the scenarios start with an empty log.
+
+The output names the file (from a run on Windows, the user folder shortened):
+
+```
+prep:   file C:\Users\...\AppData\Local\Temp\luastress_duckdb.duckdb, helper tables created
+```
+
+There is no state file: nothing on a server has to be restored. With `--keep` the helper tables stay in the file.
+
+Only one process at a time can open a DuckDB file. After this step the run therefore closes its own connections while the scenarios run in their child processes (`config.exclusiveFile`) and says so in a note; the teardown opens the admin connection again.
