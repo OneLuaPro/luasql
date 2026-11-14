@@ -89,3 +89,7 @@ The insert path of the driver is checked all the same by phases whose table does
 - `DELETE` and `INSERT` into a table without key, with the small threshold, grew by about 6 MB only until the memory up to a cap was full (see `processWarmup` under DuckDB in the [README](../README.md#dbms-specific-notes)); after the warm-up it did not grow. A `TEMP` table instead kept every deleted value until `DROP TABLE` (1.6 GB after 5000 rows).
 - Binding the values in a `SELECT` without a table did not grow (between +0.4 and +2.3 MB, no direction).
 - In the scenario, after `lobInsert` and `lobFetch`, the phase in this form still grew by about 6 MB per round of 200 rows in tier `smoke` (trend +8871 KB, +7076 KB in the second round); without the two LOB phases before it, it did not. A `CHECKPOINT` before the phase stopped that (trend 0); `DROP TABLE` of the LOB table before the `CHECKPOINT` did not (trend +3236 KB, +2403 KB in the second round). One run each.
+
+## Firebird
+
+Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`).

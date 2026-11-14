@@ -33,9 +33,15 @@
 --                       unchanged, rollback and commit fail, close
 --                       works
 --
--- Phase:
---   killLoop  connect, query, kill, failing call, close; checks memory
---             and the sessions of the test user
+-- Phases:
+--   killLoop       connect, query, kill, failing call, close; checks
+--                  memory and the sessions of the test user
+--   killFetchLoop  connect, open a cursor over many rows (every second
+--                  iteration one with a temporary CLOB per row, if the
+--                  backend has clobRowsLiteral), fetch a few rows, kill,
+--                  fetch until the error, close cursor and connection;
+--                  what the client keeps for an open cursor of a lost
+--                  connection must be freed
 --
 -- Sessions are counted without those in status KILLED
 -- (backend.liveSessionCountQuery): Oracle removes a killed session from
@@ -50,7 +56,7 @@ local report = require("report")
 
 local connectionLoss = {}
 
--- Iterations of phase killLoop per tier; a logon and a kill per
+-- Iterations of the phases per tier; a logon and a kill per
 -- iteration.
 local iterations = {
    smoke = 20,
@@ -184,7 +190,7 @@ local function setPrefetch(conn, value)
    end
 end
 
--- Phase.
+-- Phases.
 
 local function killLoopStep(ctx)
    local conn = open(ctx)
@@ -195,8 +201,35 @@ local function killLoopStep(ctx)
    closeObject(conn, "connection")
 end
 
+-- The cursor of a lost connection: rows already on the client may
+-- still come, then the error; closing the cursor and the connection
+-- must free what the client kept for it.
+local function killFetchLoopStep(ctx, i)
+   local conn = open(ctx)
+   local cur, limit, expectedRow
+   if i % 2 == 0 and ctx.backend.clobRowsLiteral then
+      cur = check(conn:execute(string.format(ctx.backend.clobRowsLiteral,
+                                             lobRowSize, lobRowCount)))
+      limit = lobRowCount
+      expectedRow = function(k) return string.rep("x", k * lobRowSize) end
+   else
+      cur = check(conn:execute(ctx.backend.manyRowsQuery))
+      limit = ctx.backend.manyRowsCount
+      expectedRow = function(k) return k end
+   end
+   for k = 1, rowsBeforeKill do
+      check(cur:fetch({}), nil, "fetch row " .. k)
+   end
+   kill(ctx, conn)
+   fetchUntilLost(ctx, cur, rowsBeforeKill + 1, limit, expectedRow)
+   -- The failed fetch may have closed the cursor already.
+   pcall(cur.close, cur)
+   closeObject(conn, "connection")
+end
+
 local phaseList = {
    { name = "killLoop", step = killLoopStep },
+   { name = "killFetchLoop", step = killFetchLoopStep },
 }
 
 -- Cases. Each returns nothing for a pass, or "limit" and the reason;

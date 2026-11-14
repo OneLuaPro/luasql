@@ -56,3 +56,7 @@ The cases `closeOpen`, `gcOpen` and `closeVariable` matter because Oracle commit
 ## DuckDB
 
 "Another session" is the second connection to the test file; it sees only committed rows. DuckDB shows no open transactions of a connection, so the phases run without the counter `open tx`. An error during the execution of a statement (a constraint, a conversion, a conflict with another transaction) aborts the whole transaction: every further statement fails until it is rolled back, and `conn:commit()` rolls back and gives `false` and a message. `errorKeepsWork` is therefore a limit and checks exactly this (`backend.transactionLimits.errorAborts`). Errors of the parser, the catalog and the binder do not abort the transaction. DDL is part of the transaction: `ddlCommits` passes. `commit()` and `rollback()` in autocommit mode give `false` and `no transaction is active`. `savepoint` is skipped (DuckDB has no `SAVEPOINT`), so is `plsqlAutocommit`.
+
+## Firebird
+
+Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`).

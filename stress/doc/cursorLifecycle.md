@@ -32,3 +32,7 @@ There are no temporary LOBs and no prefetch: the LOB phases read long text and b
 ## DuckDB
 
 There are no temporary LOBs and no prefetch: `luasql.duckdb` reads the whole result at the execute, and the LOB phases read long text and blobs made by SQL (`repeat`, `unhex`). DuckDB shows neither the cursors nor the statements of a connection; the only server counter is `connections`, the connections to the database of the file (see DuckDB under [DBMS-Specific Notes](../README.md#dbms-specific-notes)). A cursor that is not freed shows in the memory of the process only.
+
+## Firebird
+
+The 10-row query is a recursive CTE (Common Table Expression). The LOB phases read BLOBs made on the server: `RPAD` of a text BLOB with `x` and of a binary BLOB with the byte 0xAB, over a derived table of the numbers 1 to 100. Firebird shows no temporary BLOBs of an attachment, so there is no check of the LOB queries (`backend.tempLobChecks`); the phases check that every value comes back whole and that nothing grows. The server counter is `statements`, the statements of the test attachment in `MON$STATEMENTS`, read in an autonomous transaction: a cursor closed early or left to the GC must drop its statement on the server (A2 of `fix-firebird`), also after 100 000 of them (cursor names, A3).

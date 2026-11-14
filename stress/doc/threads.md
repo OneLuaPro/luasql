@@ -44,3 +44,7 @@ There are no sessions: what a lane leaves behind is counted as the lock of other
 ## DuckDB
 
 There are no sessions: what a lane leaves behind is counted as connections to the database (`backend.leftoverCounter`, `duckdb_connection_count()`); they must be back where they were. Two transactions that change the same row conflict instead of waiting (see [`concurrency`](concurrency.md)), so `parallelWriters` raises the value of row 1 by inserting a row with id 1, and the value of a row is the number of its rows: the case checks parallel write transactions that do not conflict. `lockWait` and `deadlock` are skipped: DuckDB never waits for a lock. `killDuringCall` is skipped: there is no session to kill.
+
+## Firebird
+
+Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`).

@@ -51,3 +51,7 @@ prep:   file C:\Users\...\AppData\Local\Temp\luastress_duckdb.duckdb, helper tab
 There is no state file: nothing on a server has to be restored. With `--keep` the helper tables stay in the file.
 
 Only one process at a time can open a DuckDB file. After this step the run therefore closes its own connections while the scenarios run in their child processes (`config.exclusiveFile`) and says so in a note; the teardown opens the admin connection again.
+
+## Firebird
+
+There is no module `prep/firebird.lua`; the output shows `prep:   nothing to prepare for this DBMS`. The test database, the test user and its right `CREATE TABLE` are set up once by hand (see Firebird under [Preparing a Run](../README.md#preparing-a-run)). The scenarios create their tables themselves and drop what an aborted run left.

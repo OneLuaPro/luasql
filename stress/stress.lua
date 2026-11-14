@@ -233,6 +233,8 @@ local function runScenario(name, options, session)
       openFailingConnection = extra.openFailingConnection,
       openUserConnection = extra.openUserConnection,
       laneSpec = extra.laneSpec,
+      -- The database allows one process at a time (config.exclusiveFile).
+      exclusiveFile = session.exclusiveFile,
       soakMinutes = options.duration or defaultSoakMinutes,
       csvPath = options.csv,
       backend = session.backend,
@@ -354,6 +356,9 @@ local function spawnScenario(uv, options, name, seconds)
       timer:close()
       return nil, "cannot start a child process: " .. tostring(spawnErr)
    end
+   -- The loop caches its time and updates it only while it runs; after
+   -- a long time without uv.run the timer would be due at once.
+   uv.update_time()
    timer:start(math.max(1, math.floor(seconds * 1000)), 0, function()
       result.killed = true
       handle:kill("sigkill")

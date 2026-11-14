@@ -18,6 +18,7 @@ Each case runs once. A failing connect may take seconds (a delay of the server f
 | `closableError`    | Raises an error inside a block with a connection in a to-be-closed variable (`<close>`).                                                              | Pass: the error comes through unchanged, the session is gone, a second close returns `false` and a message. Fail: anything else.                                                          |
 | `manyOpen`         | Opens 20 connections at the same time, queries on each, closes them in reverse order.                                                                 | Pass: 20 more sessions while open, back to the start after closing. Fail: an error or a wrong session count.                                                            |
 | `envReleased`      | Opens and closes a connection and its environment, then drops the environment.                                                                        | Pass: the environment is collected. Fail: it is not; then the failing connects below cannot tell anything either, because they use the same method.                    |
+| `exitWithOpen`     | Starts a Lua child process 20 times (`scenarios/connectionExit.lua`, with the interpreter of the run). It opens two environments with a connection each (as a lane does, from the environment variables), leaves three cursors open (one partly fetched, one over a temporary CLOB per row, one not fetched) and ends without closing anything: Lua then runs all finalizers in an order no program chooses. | Pass: every child process ends with exit code 0, and within 10 seconds the sessions are back to the start. Fail: a crash in a finalizer (another exit code), a hang (stopped after 60 seconds) or a session that stays. Skipped without `luv`, and for a database that only one process at a time may open (DuckDB). |
 
 Then one case per connect that must fail, as the backend lists them (`backend.failingConnects`; the sections of the DBMS below name them). Each must give `nil` and the error of the backend, leave no session, and the environment must be collected after it is closed: the failed connect kept no reference to it.
 
@@ -61,3 +62,17 @@ Connects that must fail:
 | Test              | Checks                                          | Results                                                               |
 | ----------------- | ----------------------------------------------- | --------------------------------------------------------------------- |
 | `missingFolder`   | Opens a file in a folder that does not exist.   | Pass: `nil` and `Cannot open file`. Fail: anything else.              |
+
+## Firebird
+
+A session is an attachment in `MON$ATTACHMENTS`, counted on the admin connection (`SYSDBA`) in an autonomous transaction, without the attachments of the server itself (`MON$SYSTEM_FLAG = 0`): within the transaction of the driver the monitoring tables would show the state of their first query. The test user sees only its own attachments there, the admin connection sees all of them. The server counter is `statements` (see [`errorPaths`](errorPaths.md)).
+
+Connects that must fail:
+
+| Test          | Checks                                                     | Results                                                                                   |
+| ------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `unknownUser` | Connects as a user that does not exist.                    | Pass: `nil` and `Your user name and password are not defined`. Fail: anything else.      |
+| `closedPort`  | Connects to port 1, where no server listens.               | Pass: `nil` and `Unable to complete network request to host`. Fail: anything else.       |
+| `noSuchFile`  | Connects to a database file that does not exist, next to the test database. | Pass: `nil` and `I/O error during "CreateFile (open)"` (on Windows). Fail: anything else. |
+
+Firebird locks no account after failed logons; the test user is never used with a wrong password all the same. Skipped: `closeWithStmt` and `gcAll` (no `conn:prepare` yet).

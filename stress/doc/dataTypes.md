@@ -59,3 +59,7 @@ Where LuaSQL promises nothing, e.g. for the text form of a date read back, the e
 - **Binary data as hex text.** A plain string is bound as text: the driver goes by the Lua type, never by the content. The cases that bind hex text such as `"00FF4100"` into a binary column and expect the bytes check a conversion of the DBMS; they run only if the backend says the DBMS does it (`backend.hexTextBinary`). Binary data itself is checked by the cases with `luasql.type.binary`, which run for every DBMS.
 - **JSON.** How a DBMS stores JSON (order of the keys, numbers, `\u` escapes, spaces) is its own matter. A JSON case expects the text the server gives for the stored value (`backend.jsonAsText`): the driver must deliver it unchanged.
 - **Limits.** The backend marks a case as a limit with a reason (`backend.typeCaseOverrides`): NULL read back (`limitNull`), an expected write error (`limitError`), a value read back (`limitValue`, also for a case that expects an error but the DBMS stored the value), or cells of a rows case (`limitCells`).
+
+## Firebird
+
+Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`). There is no `dataTypes-firebird.md` yet.

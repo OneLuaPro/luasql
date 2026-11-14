@@ -59,3 +59,7 @@ Too many parameters in a table and a placeholder without a value give the errors
 ## DuckDB
 
 Placeholders are `$1`, `$2`, ... and `$name` (`backend.paramPrefix`); DuckDB does not tell `$a` and `$A` apart. A placeholder without a value gives `nil` and `Values were not provided` through a prepared statement, and `Expected 1 parameters, but none were supplied` through `conn:execute(sql)` without values (`argCount`). `connDml` runs an `UPDATE` of a helper table whose `INTEGER` column rejects a string that is not a number (`Conversion Error`). `failedBindKeeps` passes, because `luasql.duckdb` resolves all names and positions before it binds.
+
+## Firebird
+
+Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`).

@@ -20,6 +20,7 @@ The [upstream documentation](https://lunarmodules.github.io/luasql/) describes t
 | Oracle driver           | `luasql.oci8` reworked: data type coverage, typed parameters, prepared statement semantics, transactions, threads and many fixes; see [below](#oracle-driver-luasqloci8) |
 | SQLite driver           | `luasql.sqlite3` reworked: prepared statements, typed parameters, the functions of sqlean, transactions and fixes; see [below](#sqlite-driver-luasqlsqlite3) |
 | DuckDB driver           | `luasql.duckdb` reworked: prepared statements, typed parameters, values read by their type, one database per file in the process, transactions and fixes; DuckDB with its extensions built in; see [below](#duckdb-driver-luasqlduckdb) |
+| Firebird driver         | `luasql.firebird` fixed: a crash after a failed query, statements left on the server, the error convention; see [Differences](#differences-from-lunarmodulesluasql) |
 | Stress test suite       | [`stress/`](stress/README.md): a long-running test of driver robustness, implemented for Oracle so far; see [below](#stress-test-suite) |
 
 The guiding rule for the Oracle driver: *the driver uses OCI (Oracle Call Interface) correctly, it does not try to improve OCI.* It covers the OCI features well, but stays inside the frame of the LuaSQL API; additions are kept where another LuaSQL driver already offers the same, so that the drivers behave alike. Where Oracle or OCI behaves differently from what a user might expect, the driver does not hide it; such behavior is documented as a known limitation.
@@ -43,10 +44,11 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **duckdb: `conn:setautocommit(true)` rolls back an open transaction**; LuaSQL leaves it open, and the following statements run in it.
 - **duckdb: `conn:commit()` returns `false` and a message** when DuckDB has aborted the transaction after an error in a statement (the driver rolls it back and begins the next transaction), and when the commit fails, e.g. after a conflict with another transaction; LuaSQL returns `true` in both cases, while DuckDB has dropped the changes.
 - **duckdb: `":memory:"` is a new database for each connection**, as in LuaSQL; earlier versions of this fork shared one database in memory (and one file) among the connections of an environment. `":memory:name"` shares a database in memory by name.
+- **firebird: dates and times are text in ISO form** (`2026-11-14`, `12:34:56`, `2026-11-14 12:34:56`); LuaSQL writes them in the form of the locale of the C library (`%x`, `%X`).
 
 **Other changes**
 
-- **Errors** follow the section "Error handling" of the LuaSQL manual in all drivers documented here (so far oci8, sqlite3 and duckdb):
+- **Errors** follow the section "Error handling" of the LuaSQL manual in all drivers documented here (so far oci8, sqlite3, duckdb and firebird):
   - A wrong use of the API raises an error: a closed object, an argument of the wrong type, an unknown option or value of `setoption`/`getoption`, an invalid parameter, `execute` or `reset` while the cursor of the statement is open.
   - A failure in the database or the client library returns `nil` and a message.
   - `commit`, `rollback` and `setautocommit` return `false` and a message on failure (LuaSQL: partly `nil`); code that tests for `nil` misses it.
@@ -69,6 +71,11 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **duckdb: `conn:close()` with open cursors or statements** returns `false` and a message, as the LuaSQL manual says; LuaSQL closes the connection all the same.
 - **duckdb: an SQL text without a statement** (`""`, `";"`, a comment) returns 0; LuaSQL returns a cursor without columns.
 - **duckdb: `cur:getcoltypes()`** names all types of DuckDB, e.g. `"DATE"` or `"DECIMAL(10,2)"`; LuaSQL gives `"UNKNOWN"` for all but eight of them.
+- **firebird: `cur:fetch()` on a closed cursor** raises an error; LuaSQL returns no value. After the last row `fetch` returns `nil` and closes the cursor; LuaSQL returns no value (the same for `local row = cur:fetch()`).
+- **firebird: `conn:close()` with open cursors** returns `false` and a message; LuaSQL returns `nil` and a message. A to-be-closed connection or environment with open objects stays open, as with `close`; LuaSQL closes them all the same, and the cursors of such a connection are left on a closed connection.
+- **firebird: an error while reading a `BLOB`** returns `nil` and a message; LuaSQL returns what was read so far, or an empty string, without a message.
+- **firebird: a column of type `ARRAY`** is `nil` where it is NULL; a value returns `nil` and a message (not supported). LuaSQL gives the client no valid buffer for such a column, so a `fetch` fails or writes to random memory, also where it is NULL.
+- **firebird: `BOOLEAN` is read as a boolean**, and `INT128`, `DECFLOAT` and the types `WITH TIME ZONE` as text written by the server; LuaSQL returns the string `"<unsupported data type>"` for them.
 
 **Extensions**
 
@@ -198,9 +205,9 @@ Tested with DuckDB 1.5.6 and Lua 5.5 on Windows, built with DuckDB and its exten
 
 ## Testing
 
-- `tests/test.lua` is the test bench of upstream LuaSQL, e.g. `lua test.lua oci8 <source> <user> <password>` in `tests/`.
+- `tests/test.lua` is the test bench of upstream LuaSQL, e.g. `lua test.lua oci8 <source> <user> <password>` in `tests/`; for firebird, `lua test.lua firebird` takes the connection from the variables `FIREBIRD_TEST_*` of `checks/firebird.lua`.
 - [`stress/`](stress/README.md) holds the stress test suite.
-- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD`, `lua checks/sqlite3.lua [<database file>]` or `lua checks/duckdb.lua [<database file>]`; so far for `luasql.oci8`, `luasql.sqlite3` and `luasql.duckdb`. `checks/bench_oci8.lua` measures short queries and large results, e.g. to compare values of the option `prefetch` (`-p`).
+- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD`, `lua checks/sqlite3.lua [<database file>]`, `lua checks/duckdb.lua [<database file>]` or `lua checks/firebird.lua` with the connection in `FIREBIRD_TEST_SOURCE`, `FIREBIRD_TEST_USER` and `FIREBIRD_TEST_PASSWORD`; so far for `luasql.oci8`, `luasql.sqlite3`, `luasql.duckdb` and `luasql.firebird`. `checks/bench_oci8.lua` measures short queries and large results, e.g. to compare values of the option `prefetch` (`-p`).
 
 ### Stress Test Suite
 

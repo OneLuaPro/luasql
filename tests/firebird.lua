@@ -2,6 +2,12 @@
 -- Firebird specific tests and configurations.
 ---------------------------------------------------------------------
 
+-- Connection data from the environment, unless already given (e.g. with
+-- lua -e); arguments on the command line still come first
+DEFAULT_TEST_DATABASE = DEFAULT_TEST_DATABASE or os.getenv"FIREBIRD_TEST_SOURCE"
+DEFAULT_USERNAME = DEFAULT_USERNAME or os.getenv"FIREBIRD_TEST_USER"
+DEFAULT_PASSWORD = DEFAULT_PASSWORD or os.getenv"FIREBIRD_TEST_PASSWORD"
+
 DEFINITION_STRING_TYPE_NAME = "VARCHAR(80)"
 QUERYING_STRING_TYPE_NAME = "string"
 

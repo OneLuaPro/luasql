@@ -22,3 +22,7 @@ A session of a killed child process may still exist on the server for a moment; 
 ## DuckDB
 
 `prep/duckdb.lua` drops the helper tables, on an admin connection that the run opens again for it (the run closes its connections while the scenarios run, see [`prep`](prep.md)). The file and its write-ahead log (the same name with `.wal` appended) stay; they may be deleted after the run.
+
+## Firebird
+
+Nothing to do: there is no module `prep/firebird.lua`. The scenarios drop their own tables; a table that an aborted run left stays until the scenario runs again.

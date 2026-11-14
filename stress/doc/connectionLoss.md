@@ -30,6 +30,7 @@ Iterations per phase: smoke 20, standard 200, nightly 1000 (one logon and one ki
 | Phase      | Each iteration                                                                   | Fails when                                                                                                                          |
 | ---------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `killLoop` | connects, queries, kills the session, executes (must fail), closes               | the call after the kill does not fail with a lost connection error, or sessions, a counter or the memory grow (see [Phases](../README.md#phases)) |
+| `killFetchLoop` | connects, opens a cursor over 100 000 rows (every second iteration over 50 rows with a temporary CLOB each, if the backend has the query) and fetches 3 rows, kills the session, fetches on until the error, closes cursor and connection | a wrong row, all rows arrive, the error is not a lost connection error, or sessions, a counter or the memory grow: what the client keeps for the cursor of a lost connection is not freed |
 
 ## Oracle
 
@@ -42,3 +43,11 @@ Skipped: SQLite has no sessions that could be killed.
 ## DuckDB
 
 Skipped: DuckDB has no sessions that could be killed and no network connection.
+
+## Firebird
+
+The kill is a `DELETE FROM MON$ATTACHMENTS` on the admin connection (as `SYSDBA`), in an autonomous transaction (`EXECUTE BLOCK ... IN AUTONOMOUS TRANSACTION`): within the transaction of the driver the monitoring tables would show the state of their first query, and the attachment of a newer connection would not be found. The kill takes effect at once, and the attachment is gone from `MON$ATTACHMENTS` right away, so the sessions are counted without waiting. A lost connection shows as `connection shutdown` with `Killed by database administrator`, later as `Error writing data to the connection` (or `Error reading data from the connection`).
+
+The table of `killInTransaction` (`luastress_loss`) is created and dropped in an autonomous transaction, and the row is counted in one: `luasql.firebird` starts a connection with autocommit off, and its transaction would neither show the table to other connections before a commit nor see a row committed after it began (decisions D4 and D5 of the driver, changed with its bind API).
+
+The prefetch cases and `killWithStmt` are skipped: `luasql.firebird` has no driver options and no `conn:prepare` yet.

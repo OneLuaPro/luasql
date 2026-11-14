@@ -48,3 +48,7 @@ DuckDB has no row locks and never waits. Its transactions use MVCC (Multi-Versio
 The WAL cases are skipped (`backend.walChange`): they check the WAL (Write-Ahead Logging) mode of SQLite.
 
 **Process memory of `interleaveLoop`.** After statements of DuckDB the process keeps memory up to a cap of about 14 MB, outside the buffer pool, freed when the database closes (see DuckDB under [DBMS-Specific Notes](../README.md#dbms-specific-notes)). Before the backend filled it ahead of the phases (`backend.processWarmup`), `interleaveLoop` with its 4 queries per iteration grew by about 1.2 MB in the 450 measured iterations of tier `smoke`, close to the limit, so a smoke run passed or failed by chance (trend +1350 KB and +887 KB in the second round in one run, +1500 KB and +1073 KB in another); in tier `standard` it filled the cap during its first round (`private bytes +11996 KB (trend +12703 KB), second round -100 KB (trend +0 KB)`), in tier `nightly` within the first few percent. Probes on Windows (2026-11-13), 32 000 queries each, showed the same growth and the same cap with 1 or 4 connections, with results open at the same time or read one after the other, with new or the same values, with SQL text through `conn:execute` instead of prepared statements (so not in the driver), with `threads = 1` and with `allocator_flush_threshold = '1MB'`; `duckdb_memory()` does not show it, and the log of DuckDB keeps only warnings.
+
+## Firebird
+
+Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`).

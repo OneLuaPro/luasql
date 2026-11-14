@@ -8,7 +8,13 @@
 --   sqlError         invalid SQL via conn:execute and conn:prepare
 --   executeError     one statement that fails and succeeds in turn, plus
 --                    a failing block via conn:execute
---   fetchError       a query that fails in the middle of fetching
+--   fetchError       a query that fails in the middle of fetching,
+--                    through conn:execute and a prepared statement in
+--                    turn (only conn:execute without prepare())
+--   openError        a query whose open fails (backend.openErrorQuery),
+--                    through conn:execute; the GC runs every few
+--                    iterations, so a cursor object left behind by the
+--                    failed execute is collected
 --   badColumnType    a column type the driver cannot fetch; the
 --                    statement must be closable afterwards
 --   stmtMisuse       execute a statement with an open cursor (raises an
@@ -140,13 +146,23 @@ local function executeErrorStep(ctx, i, stmt)
    end
 end
 
+-- Without prepare() the phase uses conn:execute only.
 local function setupFetchError(ctx)
+   if ctx.testConn.prepare == nil then
+      return nil
+   end
    return prepare(ctx.testConn, ctx.backend.fetchErrorQuery)
+end
+
+local function finishFetchError(_, stmt)
+   if stmt ~= nil then
+      closeStatement(stmt)
+   end
 end
 
 local function fetchErrorStep(ctx, i, stmt)
    local cur, err
-   if i % 2 == 0 then
+   if i % 2 == 0 or stmt == nil then
       cur, err = ctx.testConn:execute(ctx.backend.fetchErrorQuery)
    else
       cur, err = stmt:execute({})
@@ -167,6 +183,30 @@ local function fetchErrorStep(ctx, i, stmt)
    -- Drivers differ on whether a fetch error closes the cursor, so the
    -- result of close() is not checked. Leaks show up in phases.lua.
    cur:close()
+end
+
+-- Full GC after this many failed executes in phase openError.
+local openErrorGcEvery = 10
+
+-- A query that fails when it is opened, e.g. a division by zero in its
+-- only row: the error comes at the execute or, if the client opens the
+-- cursor only later, at the first fetch. Both give nil and a message.
+local function openErrorStep(ctx, i)
+   local cur, err = ctx.testConn:execute(ctx.backend.openErrorQuery)
+   if cur ~= nil then
+      local row
+      row, err = cur:fetch({})
+      cur:close()
+      if row ~= nil then
+         error("query whose open fails: got a row", 0)
+      end
+      expectNil("fetch of a query whose open fails", row, err)
+   else
+      expectNil("execute of a query whose open fails", cur, err)
+   end
+   if i % openErrorGcEvery == 0 then
+      collectgarbage("collect")
+   end
 end
 
 local function badColumnTypeStep(ctx, i)
@@ -267,8 +307,10 @@ local phaseList = {
      step = executeErrorStep, finish = finishStatement,
      needs = { "failingBlock", "conditionalBlock" }, usesPrepare = true },
    { name = "fetchError", setup = setupFetchError,
-     step = fetchErrorStep, finish = finishStatement,
-     needs = { "fetchErrorQuery" }, usesPrepare = true },
+     step = fetchErrorStep, finish = finishFetchError,
+     needs = { "fetchErrorQuery" } },
+   { name = "openError", step = openErrorStep,
+     needs = { "openErrorQuery" } },
    { name = "badColumnType", step = badColumnTypeStep,
      needs = { "unsupportedTypeQuery" } },
    { name = "stmtMisuse", setup = setupStmtMisuse,

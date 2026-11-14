@@ -27,6 +27,13 @@
 --   manyOpen          20 connections open at the same time
 --   envReleased       a closed environment can be collected (checks
 --                     the method of the failing connects below)
+--   exitWithOpen      20 times a Lua child process
+--                     (scenarios/connectionExit.lua) that opens two
+--                     connections, leaves cursors open (one with LOBs)
+--                     and ends without closing them: it must end with
+--                     exit code 0, and no session may stay; skipped
+--                     without luv and for a database that one process
+--                     at a time may open (config.exclusiveFile)
 -- and one case per connect that must fail (backend.failingConnects,
 -- e.g. with Oracle unknownUser, a user that does not exist, and
 -- closedPort, a port without listener): clean error, no session, the
@@ -61,6 +68,13 @@ local gcEvery = 10
 
 -- Connections open at the same time in case manyOpen.
 local manyCount = 20
+
+-- Child processes of case exitWithOpen; seconds one may run; seconds
+-- to wait until the sessions of the ended ones are gone (a DBMS may
+-- show a session for a moment after its process has ended).
+local exitRuns = 20
+local exitChildSeconds = 60
+local exitSettleSeconds = 10
 
 -- Full GC cycles at most until an object is collected: each cycle may
 -- free one more link of a chain (cursor, statement, connection,
@@ -331,6 +345,102 @@ local function failingConnectCase(entry)
    end
 end
 
+-- Runs scenarios/connectionExit.lua in a child process (the same
+-- interpreter, through luv) and waits for its end; its stderr is
+-- collected. Returns a table with code, signal, killed and stderr, or
+-- nil and an error message.
+local function runExitChild(ctx, uv)
+   local exe, exeErr = uv.exepath()
+   if not exe then
+      return nil, "cannot find the Lua interpreter: " .. tostring(exeErr)
+   end
+   local script = package.searchpath("scenarios.connectionExit",
+                                     package.path)
+   if not script then
+      return nil, "cannot find scenarios/connectionExit.lua"
+   end
+   local spec = ctx.laneSpec
+   local result, output = {}, {}
+   local pipe = uv.new_pipe(false)
+   local timer = uv.new_timer()
+   local handle, spawnErr
+   handle, spawnErr = uv.spawn(exe, {
+      args = { script, spec.dbms, spec.path, spec.cpath },
+      stdio = { nil, nil, pipe },
+   }, function(code, signal)
+      result.code, result.signal = code, signal
+      timer:stop()
+      timer:close()
+      handle:close()
+   end)
+   if not handle then
+      timer:close()
+      pipe:close()
+      return nil, "cannot start a child process: " .. tostring(spawnErr)
+   end
+   pipe:read_start(function(_, data)
+      if data then
+         output[#output + 1] = data
+      else
+         pipe:close()
+      end
+   end)
+   -- The loop caches its time and updates it only while it runs; after
+   -- the phases (no uv.run for minutes) the timer would be due at once
+   -- and stop the child as hanging.
+   uv.update_time()
+   timer:start(exitChildSeconds * 1000, 0, function()
+      result.killed = true
+      handle:kill("sigkill")
+   end)
+   uv.run("default")
+   result.stderr = table.concat(output):gsub("%s+$", "")
+   return result
+end
+
+-- Why case exitWithOpen cannot run, or nil.
+local function exitWithOpenSkip(ctx)
+   if not ctx.laneSpec then
+      return "runner gives no lane spec"
+   end
+   if ctx.exclusiveFile then
+      return "the database allows one process at a time"
+   end
+   if not pcall(require, "luv") then
+      return "needs luv"
+   end
+   return nil
+end
+
+local function exitWithOpenCase(ctx)
+   local uv = require("luv")
+   local base = sessionCount(ctx)
+   for k = 1, exitRuns do
+      local result, err = runExitChild(ctx, uv)
+      check(result, err, "child process " .. k)
+      expect(not result.killed, string.format("child process %d: no end"
+             .. " after %d s, stopped", k, exitChildSeconds))
+      local stderr = result.stderr ~= "" and (": " .. result.stderr) or ""
+      expect((result.signal or 0) == 0, string.format("child process %d"
+             .. " ended by signal %s%s", k, tostring(result.signal), stderr))
+      expect(result.code == 0, string.format("child process %d ended with"
+             .. " exit code 0x%08X%s", k, (result.code or 0) & 0xFFFFFFFF,
+             stderr))
+   end
+   if base == nil then
+      return
+   end
+   local deadline = os.time() + exitSettleSeconds
+   local count = sessionCount(ctx)
+   while count ~= base and os.time() < deadline do
+      uv.sleep(200)
+      count = sessionCount(ctx)
+   end
+   expect(count == base, string.format("%d sessions of the test user %d s"
+          .. " after the child processes ended, expected %d", count,
+          exitSettleSeconds, base))
+end
+
 local caseList = {
    { name = "closeWithCursor", run = closeWithCursorCase },
    { name = "closeWithStmt", run = closeWithStmtCase, usesPrepare = true },
@@ -340,6 +450,8 @@ local caseList = {
    { name = "closableError", run = closableErrorCase },
    { name = "manyOpen", run = manyOpenCase },
    { name = "envReleased", run = envReleasedCase },
+   { name = "exitWithOpen", run = exitWithOpenCase,
+     skip = exitWithOpenSkip },
 }
 
 -- Runs all cases, prints failures, limits, skips and a summary.
@@ -358,6 +470,8 @@ local function runCases(ctx)
          reason = "driver has no prepare()"
       elseif case.needs and ctx.backend[case.needs] == nil then
          reason = "backend has no " .. case.needs
+      elseif case.skip then
+         reason = case.skip(ctx)
       end
       if reason then
          skipped = skipped + 1
@@ -390,7 +504,8 @@ local function runCases(ctx)
 end
 
 -- ctx: tier, driver, backend, testConn, adminConn (may be nil),
--- testUser, openTestConnection, newEnvironment, openFailingConnection
+-- testUser, openTestConnection, newEnvironment, openFailingConnection,
+-- laneSpec, exclusiveFile
 -- Returns true and optionally a note on known limitations, or nil and an
 -- error message.
 function connectionLifecycle.run(ctx)
@@ -426,6 +541,8 @@ function connectionLifecycle.run(ctx)
       openTestConnection = ctx.openTestConnection,
       newEnvironment = ctx.newEnvironment,
       openFailingConnection = ctx.openFailingConnection,
+      laneSpec = ctx.laneSpec,
+      exclusiveFile = ctx.exclusiveFile,
       serverCounters = counters,
       sessionQuery = sessionQuery,
    }

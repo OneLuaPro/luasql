@@ -2,7 +2,7 @@
 
 The LuaSQL stress test suite exercises a LuaSQL driver under load: it opens and closes connections, cursors and prepared statements hundreds of thousands of times, provokes errors, kills sessions, uses the driver from several threads at once and runs for hours. It checks that the driver never crashes, never leaks memory, cursors, temporary LOBs (Large Objects) or sessions, never loses or changes data and never leaves a session blocked. Behavior of the client library or the DBMS (Database Management System) that a user might not expect is reported as a known limitation with its reason, without failing the run.
 
-The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3` and the DuckDB driver `luasql.duckdb` are implemented:
+The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3`, the DuckDB driver `luasql.duckdb` and the Firebird driver `luasql.firebird` are implemented:
 
 | Driver            | DBMS                    | Status    |
 | ----------------- | ----------------------- | --------- |
@@ -11,7 +11,7 @@ The suite is written for several DBMS. Everything specific to one DBMS lives in 
 | `luasql.postgres` | PostgreSQL              | planned   |
 | `luasql.mysql`    | MariaDB/MySQL           | planned   |
 | `luasql.duckdb`   | DuckDB                  | available |
-| `luasql.firebird` | Firebird                | planned   |
+| `luasql.firebird` | Firebird                | available |
 | `luasql.odbc`     | any, via an ODBC driver | planned   |
 
 Many scenarios depend on prepared statements (`conn:prepare`, `stmt:execute`), which most LuaSQL drivers do not offer yet. The suite detects this at run time and skips what it cannot test, so it can serve as the acceptance test for prepared statements once a driver gets them. The suite was written alongside the further development of [LuaSQL](https://github.com/OneLuaPro/luasql) for [OneLuaPro](https://github.com/OneLuaPro) and relies on its extensions (prepared statements, `stmt:reset()`, `conn:setoption()`); it does not necessarily work with the official LuaSQL release of the [Lunar Modules project](https://github.com/lunarmodules/luasql).
@@ -32,7 +32,7 @@ The suite needs only plain Lua and two common modules; further modules are optio
 
 ## Preparing a Run
 
-Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite and DuckDB are available; instructions for the other DBMS will follow when their backends are implemented.
+Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite, DuckDB and Firebird are available; instructions for the other DBMS will follow when their backends are implemented.
 
 ### Oracle
 
@@ -162,6 +162,73 @@ export DUCKDB_TEST_NAME=/tmp/luastress.duckdb
 
 There are no admin variables: the admin connection is always a second connection to the same file, in the same process. It reads the counter of the connections (see [DuckDB](#dbms-specific-notes) under DBMS-Specific Notes), runs the preparation step and is "another session" in scenario `transactions`. DuckDB lets only one process at a time open the file: close other programs that have it open, e.g. a `duckdb` shell, before the run.
 
+### Firebird
+
+**Driver and client library:** `luasql.firebird` of OneLuaPro contains the client library of Firebird, linked statically; it always connects over the network, also to a server on the same computer. The suite was tested with a Firebird 5 server (SuperServer).
+
+**Connection data:** as with Oracle, everything comes from environment variables; a missing one stops the run with its name.
+
+| Variable                  | Meaning                                                                  | Required     |
+| ------------------------- | ------------------------------------------------------------------------ | ------------ |
+| `FIREBIRD_TEST_HOST`      | host name of the server, e.g. `localhost`                                | yes          |
+| `FIREBIRD_TEST_PORT`      | port of the server, e.g. 3050                                            | yes          |
+| `FIREBIRD_TEST_NAME`      | the test database: a path on the server or an alias, e.g. `C:\temp\fb504\stress.fdb` | yes |
+| `FIREBIRD_TEST_USER`      | test user, e.g. `LUATEST`                                                | yes          |
+| `FIREBIRD_TEST_PASSWORD`  | password of the test user                                                | yes          |
+| `FIREBIRD_ADMIN_USER`     | admin user, e.g. `SYSDBA`                                                | both or none |
+| `FIREBIRD_ADMIN_PASSWORD` | password of the admin user                                               | both or none |
+
+In Windows command prompt (CMD):
+
+```CMD
+set FIREBIRD_TEST_HOST=localhost
+set FIREBIRD_TEST_PORT=3050
+set FIREBIRD_TEST_NAME=C:\temp\fb504\stress.fdb
+set FIREBIRD_TEST_USER=LUATEST
+set "FIREBIRD_TEST_PASSWORD=..."
+set FIREBIRD_ADMIN_USER=SYSDBA
+set "FIREBIRD_ADMIN_PASSWORD=..."
+```
+
+In bash (Linux, macOS):
+
+```bash
+export FIREBIRD_TEST_HOST=localhost
+export FIREBIRD_TEST_PORT=3050
+export FIREBIRD_TEST_NAME=/var/lib/firebird/data/stress.fdb
+export FIREBIRD_TEST_USER=LUATEST
+read -rsp "Test passwd: " FIREBIRD_TEST_PASSWORD && echo && export FIREBIRD_TEST_PASSWORD
+export FIREBIRD_ADMIN_USER=SYSDBA
+read -rsp "Admin passwd: " FIREBIRD_ADMIN_PASSWORD && echo && export FIREBIRD_ADMIN_PASSWORD
+```
+
+The admin connection uses host, port and database of the test connection. Without the admin variables the suite still runs, but skips the server counters, the session counts and scenario `connectionLoss`, which kills attachments.
+
+**Rights of the database users:**
+
+- Test user: `CREATE TABLE` in the test database. Since Firebird 4 this is a right of its own, which a user who does not own the database lacks (`No permission for CREATE TABLE operation`). The test user drops only its own tables, which needs no right.
+- Admin user: `SYSDBA` or the owner of the database. Only they see all attachments in the monitoring tables (`MON$ATTACHMENTS`, `MON$STATEMENTS`), a regular user only its own; the kill of an attachment (`DELETE FROM MON$ATTACHMENTS`) needs this as well.
+
+**Setting up the database and the user:** the run creates and drops tables in the test database (names starting with `luastress`); give it a database of its own. With `isql` of Firebird, which reads user and password from `ISC_USER` and `ISC_PASSWORD` (no password on the command line):
+
+```CMD
+set ISC_USER=%FIREBIRD_ADMIN_USER%
+set ISC_PASSWORD=%FIREBIRD_ADMIN_PASSWORD%
+isql -q
+```
+
+Run the following SQL commands, with the password of the test user instead of the dots:
+
+```sql
+CREATE DATABASE 'localhost/3050:C:\temp\fb504\stress.fdb' DEFAULT CHARACTER SET UTF8;
+CREATE USER LUATEST PASSWORD '...';
+GRANT CREATE TABLE TO USER LUATEST;
+COMMIT;
+QUIT;
+```
+
+A user of Firebird belongs to the server, not to a database: it exists for all databases of the server. To remove the test environment again: `DROP USER LUATEST;` and `DROP DATABASE;` while connected to the test database.
+
 
 ## Running
 
@@ -214,6 +281,7 @@ Scenarios with slow steps use fewer iterations, e.g. one logon per iteration; ea
 | Short soak run, to check that it works                     | `lua stress.lua oracle soak --duration 10 --csv soak.csv`   |
 | Quick check of the SQLite driver                           | `lua stress.lua sqlite3 smoke`                              |
 | Quick check of the DuckDB driver                           | `lua stress.lua duckdb smoke`                               |
+| Quick check of the Firebird driver                         | `lua stress.lua firebird smoke`                             |
 | Output without colors                                      | `set NO_COLOR=1` before the run                             |
 
 
@@ -262,6 +330,15 @@ Exit codes: 0 all scenarios passed (limits do not count), 1 a scenario or the cl
 - **`Cannot open file`** before the first scenario: the folder of `DUCKDB_TEST_NAME` (or of `TEMP`) does not exist or is not writable.
 - **`Could not set lock on file`**: another process has the test file open, e.g. a `duckdb` shell or another run. Close it, or use another file.
 - **A run was aborted.** Its tables stay in the file; the next run drops them first. The file and its `.wal` file can also simply be deleted.
+
+### Firebird
+
+- **`Your user name and password are not defined`** before the first scenario: user or password of the test or admin connection; the user must exist on the server.
+- **`No permission for CREATE TABLE operation`**: the test user lacks the right `CREATE TABLE` in the test database, see [Preparing a Run](#preparing-a-run).
+- **`Unable to complete network request to host`**: host or port, or the server does not run.
+- **`I/O error during "CreateFile (open)"`**: the test database does not exist; `FIREBIRD_TEST_NAME` is a path on the server.
+- **A run or a scenario hangs.** Firebird waits for a lock without a time limit, the default of the driver: a connection left open by another program, e.g. an `isql` session that changed a table of the run without a commit, makes DDL of the run wait. End that session.
+- **A run was aborted.** Its tables stay in the database; each scenario drops its own tables first.
 
 
 ## Scenarios
@@ -465,7 +542,25 @@ Tested with DuckDB 1.5.6, linked statically into the `luasql.duckdb` of OneLuaPr
 
 ### Firebird
 
-No information yet; not implemented.
+Tested with Firebird 5.0.4 (SuperServer) on Windows 10 and the `luasql.firebird` of OneLuaPro, which contains the client of Firebird 6. Tier smoke takes about 40 seconds, tier nightly about 1¼ hours, of it about 20 minutes for the 40 000 logons of `connectionLifecycle`. `luasql.firebird` has no `conn:prepare` and no driver options yet; they come with the bind API of the driver. Until then the suite tests what goes through `conn:execute`: scenarios `cursorLifecycle`, `errorPaths`, `connectionLifecycle` and `connectionLoss`; the others are skipped.
+
+**Monitoring tables:** what a connection holds on the server shows in the monitoring tables (`MON$ATTACHMENTS`, `MON$STATEMENTS`). Within one transaction they show the state of their first query; `COMMIT RETAIN` does not change that, and `conn:commit()` and `conn:rollback()` of `luasql.firebird` commit and roll back with `RETAIN`. The backend therefore reads them in an autonomous transaction, a new one at each query: `EXECUTE BLOCK RETURNS (n BIGINT) AS BEGIN IN AUTONOMOUS TRANSACTION DO SELECT COUNT(*) FROM ... INTO :n; SUSPEND; END`. The kill of an attachment is such a block as well; it takes effect at once.
+
+**What a connection holds:** the only server counter is `statements`, the statements of the test attachment in `MON$STATEMENTS`: a statement that the driver does not drop stays there. The state of a statement (`MON$STATE`) does not show an open cursor: it is 0 also while a cursor is open, because the client has fetched its rows ahead. Firebird shows no temporary BLOBs of an attachment. Sessions are the attachments of the test user, without those of the server itself (garbage collector, cache writer).
+
+**Transactions:** `luasql.firebird` starts a connection with autocommit off, in a `SNAPSHOT` transaction that `conn:commit()` and `conn:rollback()` continue with `RETAIN`: a connection does not see what other connections commit after its transaction began, and its DDL is not seen by others before its commit. Tables of the scenarios are therefore created and dropped in autonomous transactions, and a row that another connection may have committed is counted in one. Both is behavior of the driver as it is today (decisions D4 and D5 in the plans of the driver) and changes with its bind API.
+
+**Known limitations**, reported as "limit": none so far.
+
+**Behavior worth knowing**, checked but not reported as limit:
+
+- A killed attachment gives `connection shutdown` with `Killed by database administrator` at the next call, then `Error writing data to the connection`. `close` of its cursor and connection returns `true`.
+- Locks wait without a time limit (the default of Firebird and of the driver): a connection that a program forgets can make DDL of other connections wait forever.
+- Firebird 5 has no `DROP TABLE IF EXISTS`; the backend looks into `RDB$RELATIONS` first.
+- `clobRows` of `cursorLifecycle` lets the process grow at first and then not any more: in smoke +7504 KB in the first round and a trend of 0 in the second, in nightly +10796 KB with a trend of 0. `blobRows`, which reads the same amounts right after it, grows by 0. This is the heap settling in, as with Oracle (see [Phases](#phases) in the Annex), not a leak.
+- `EXECUTE PROCEDURE` and `INSERT ... RETURNING` give a cursor whose fetch fails (`Cursor is not open`); the backend uses queries and `EXECUTE BLOCK` with `SUSPEND` wherever it needs a row.
+
+**Not covered with Firebird yet:** everything that needs `conn:prepare` (scenarios `stmtLifecycle`, `params`, `concurrency`, `threads`, `dataTypes`, `transactions`, `volume`, `soak` and single phases and cases of the others), `prefetch` (no driver options), `warnings` (no warnings of this kind) and `badColumnType` of `errorPaths` (the error of the unsupported type `ARRAY` comes at the fetch).
 
 ### ODBC
 

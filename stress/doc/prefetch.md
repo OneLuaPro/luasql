@@ -47,3 +47,7 @@ Skipped: `luasql.sqlite3` has no option `prefetch`.
 ## DuckDB
 
 Skipped: `luasql.duckdb` has no option `prefetch`; it reads the whole result at the execute.
+
+## Firebird
+
+Skipped: `luasql.firebird` has no option `prefetch` (no driver options at all).

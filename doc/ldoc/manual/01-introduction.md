@@ -174,6 +174,9 @@ code without an error message come first.
   LuaSQL; earlier versions of this fork shared one database in memory (and
   one file) among the connections of an environment. `":memory:name"`
   shares a database in memory by name.
+- **firebird: dates and times are text in ISO form** (`2026-11-14`,
+  `12:34:56`, `2026-11-14 12:34:56`); LuaSQL writes them in the form of the
+  locale of the C library (`%x`, `%X`).
 
 **Other changes**
 
@@ -232,6 +235,24 @@ code without an error message come first.
   returns 0; LuaSQL returns a cursor without columns.
 - **duckdb: `cur:getcoltypes()`** names all types of DuckDB, e.g. `"DATE"`
   or `"DECIMAL(10,2)"`; LuaSQL gives `"UNKNOWN"` for all but eight of them.
+- **firebird: `cur:fetch()` on a closed cursor** raises an error; LuaSQL
+  returns no value. After the last row `fetch` returns `nil` and closes the
+  cursor; LuaSQL returns no value (the same for `local row = cur:fetch()`).
+- **firebird: `conn:close()` with open cursors** returns `false` and a
+  message; LuaSQL returns `nil` and a message. A to-be-closed connection or
+  environment with open objects stays open, as with `close`; LuaSQL closes
+  them all the same, and the cursors of such a connection are left on a
+  closed connection.
+- **firebird: an error while reading a `BLOB`** returns `nil` and a
+  message; LuaSQL returns what was read so far, or an empty string, without
+  a message.
+- **firebird: a column of type `ARRAY`** is `nil` where it is NULL; a value
+  returns `nil` and a message (not supported). LuaSQL gives the client no
+  valid buffer for such a column, so a `fetch` fails or writes to random
+  memory, also where it is NULL.
+- **firebird: `BOOLEAN` is read as a boolean**, and `INT128`, `DECFLOAT`
+  and the types `WITH TIME ZONE` as text written by the server; LuaSQL
+  returns the string `"<unsupported data type>"` for them.
 
 **Extensions**
 

@@ -37,3 +37,7 @@ Skipped: the backend has no warning statements; the C interface of SQLite has no
 ## DuckDB
 
 Skipped: the backend has no warning statements; the C interface of DuckDB has no result for a success with a warning.
+
+## Firebird
+
+Skipped: the backend has no warning statements; Firebird has no statements that succeed with a warning of this kind.

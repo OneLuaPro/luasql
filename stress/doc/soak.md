@@ -129,3 +129,7 @@ A run of 4 hours (`lua stress.lua duckdb soak --csv soak240-duckdb.csv`) on Wind
 | private bytes              | 12 980 KB at the start, 29 564 KB after 30 seconds, 30 908 KB after the warm-up of 24 minutes, 33 056 KB at the end; slope +156 KB per hour (limit 512). Between 28 700 and 33 728 KB after the warm-up. From the end of the warm-up to hour 2 the slope is +411 KB per hour, in the last 2 hours +276 KB per hour. |
 | Lua heap                   | 609 KB from the start to the end; slope 0                                                                                                                       |
 | counters                   | connections 4 from the start to the end (the test connection, the admin connection and the 2 lanes), 5 in a single sample after 3 hours 9 minutes               |
+
+## Firebird
+
+Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`).
