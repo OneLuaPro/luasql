@@ -79,9 +79,13 @@ local commitEvery = 1000
 local lobChars = 4000
 
 -- Rows of phase binaryInsert per tier: up to 1 MB per row, so far fewer
--- than in the other phases.
+-- than in the other phases. Tier smoke has as many as standard: with
+-- values up to 1 MB the process memory moves in a band of about 10 MB,
+-- and over 150 measured rows the trend depended on where a few jumps
+-- fell (DuckDB, 2026-11-14: -3297 to +2462 KB in 10 runs with 200 rows,
+-- one of them failed; -59 to +4 KB in 3 runs with 1000).
 local binaryRows = {
-   smoke = 200,
+   smoke = 1000,
    standard = 1000,
    nightly = 5000,
 }

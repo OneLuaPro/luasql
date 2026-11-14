@@ -6,7 +6,7 @@ The scenario uses the tables `luastress_vol` (`id`, a number `n`, a text `s`) an
 
 ## Phases
 
-Rows per phase: smoke 10 000, standard 100 000, nightly 1 000 000; the two LOB (Large Object) phases use a tenth of it, `binaryInsert` smoke 200, standard 1000, nightly 5000. One iteration is one row.
+Rows per phase: smoke 10 000, standard 100 000, nightly 1 000 000; the two LOB (Large Object) phases use a tenth of it, `binaryInsert` smoke and standard 1000, nightly 5000. One iteration is one row. `binaryInsert` has as many rows in smoke as in standard: with values up to 1 MB the process memory moves in a band of about 10 MB, and over the 150 measured rows of 200 the trend depended on where a few jumps fell (DuckDB: from -3297 to +2462 KB in 10 runs with 200 rows, one of them failed; from -59 to +4 KB in 3 runs with 1000).
 
 Row *i* holds `id` = *i*, `n` = *i* + 0.25 and a string `s` of 53 characters with the row number; in every 7th row `s` is NULL. The fetch phases compare every row with these values, in order.
 
