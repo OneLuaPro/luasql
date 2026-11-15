@@ -20,7 +20,7 @@ The [upstream documentation](https://lunarmodules.github.io/luasql/) describes t
 | Oracle driver           | `luasql.oci8` reworked: data type coverage, typed parameters, prepared statement semantics, transactions, threads and many fixes; see [below](#oracle-driver-luasqloci8) |
 | SQLite driver           | `luasql.sqlite3` reworked: prepared statements, typed parameters, the functions of sqlean, transactions and fixes; see [below](#sqlite-driver-luasqlsqlite3) |
 | DuckDB driver           | `luasql.duckdb` reworked: prepared statements, typed parameters, values read by their type, one database per file in the process, transactions and fixes; DuckDB with its extensions built in; see [below](#duckdb-driver-luasqlduckdb) |
-| Firebird driver         | `luasql.firebird` fixed: a crash after a failed query, statements left on the server, the error convention; see [Differences](#differences-from-lunarmodulesluasql) |
+| Firebird driver         | `luasql.firebird` reworked: a crash after a failed query, statements left on the server, the error convention, transactions (autocommit with a transaction per statement), text in UTF-8, exact `NUMERIC`, `RETURNING`; see [Differences](#differences-from-lunarmodulesluasql) |
 | Stress test suite       | [`stress/`](stress/README.md): a long-running test of driver robustness, implemented for Oracle so far; see [below](#stress-test-suite) |
 
 The guiding rule for the Oracle driver: *the driver uses OCI (Oracle Call Interface) correctly, it does not try to improve OCI.* It covers the OCI features well, but stays inside the frame of the LuaSQL API; additions are kept where another LuaSQL driver already offers the same, so that the drivers behave alike. Where Oracle or OCI behaves differently from what a user might expect, the driver does not hide it; such behavior is documented as a known limitation.
@@ -44,7 +44,16 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **duckdb: `conn:setautocommit(true)` rolls back an open transaction**; LuaSQL leaves it open, and the following statements run in it.
 - **duckdb: `conn:commit()` returns `false` and a message** when DuckDB has aborted the transaction after an error in a statement (the driver rolls it back and begins the next transaction), and when the commit fails, e.g. after a conflict with another transaction; LuaSQL returns `true` in both cases, while DuckDB has dropped the changes.
 - **duckdb: `":memory:"` is a new database for each connection**, as in LuaSQL; earlier versions of this fork shared one database in memory (and one file) among the connections of an environment. `":memory:name"` shares a database in memory by name.
-- **firebird: dates and times are text in ISO form** (`2026-11-14`, `12:34:56`, `2026-11-14 12:34:56`); LuaSQL writes them in the form of the locale of the C library (`%x`, `%X`).
+- **firebird: a new connection has autocommit on**, as with the other drivers; LuaSQL starts with autocommit off, where nothing is stored without `conn:commit()`.
+- **firebird: with autocommit on every statement runs in a transaction of its own** and sees what other connections have committed; the transaction of a query ends when its cursor is closed. With autocommit off the transaction starts with the first statement, and `conn:commit()` and `conn:rollback()` end it; while cursors of it are open they only retain it, so that the cursors stay readable. LuaSQL keeps one transaction for the whole life of a connection (it only retains it at a commit or rollback), so a connection never sees what others commit after it has connected. A statement costs a start and a commit more than before: measured on one machine, a small query takes about twice as long with autocommit on, while nothing changes with autocommit off.
+- **firebird: `conn:setautocommit(true)` rolls back pending work**; LuaSQL leaves it pending, and the next statement that changes data commits it.
+- **firebird: text is always UTF-8.** The character set of the connection is UTF8: the server converts the text of all character sets to and from it, and the name of the database, the user name and the password are read as UTF-8. LuaSQL uses the character set NONE: text comes and goes as the bytes that are stored.
+- **firebird: a `CHAR(n)` value has n characters**; LuaSQL returns the bytes the client gives, which are n * 4 bytes for a column in UTF8, filled up with spaces.
+- **firebird: dates and times are text in ISO form**, times with four digits of a second, as Firebird writes them itself (`2026-11-14`, `12:34:56.0000`, `2026-11-14 12:34:56.0000`); LuaSQL writes them in the form of the locale of the C library (`%x`, `%X`), without the fraction of a second.
+- **firebird: `NUMERIC` and `DECIMAL` with a scale are exact text** (`"12.30"`); LuaSQL returns the integer without its scale (`1230`). With a scale of 0 they are integers as before.
+- **firebird: the number of rows a statement has changed is an integer** (`1`); LuaSQL returns a float (`1.0`).
+- **firebird: statements use the SQL dialect of the database**; the third argument of `conn:execute`, which is the dialect in LuaSQL, is ignored.
+- **firebird: the driver does not set the size of the page cache** (LuaSQL asks for 90 pages with every connection, which a server in the mode Classic or SuperClassic follows): the configuration of the server decides.
 
 **Other changes**
 
@@ -76,6 +85,8 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **firebird: an error while reading a `BLOB`** returns `nil` and a message; LuaSQL returns what was read so far, or an empty string, without a message.
 - **firebird: a column of type `ARRAY`** is `nil` where it is NULL; a value returns `nil` and a message (not supported). LuaSQL gives the client no valid buffer for such a column, so a `fetch` fails or writes to random memory, also where it is NULL.
 - **firebird: `BOOLEAN` is read as a boolean**, and `INT128`, `DECFLOAT` and the types `WITH TIME ZONE` as text written by the server; LuaSQL returns the string `"<unsupported data type>"` for them.
+- **firebird: `INSERT ... RETURNING` and `EXECUTE PROCEDURE` with output** return a cursor with their one row; with LuaSQL and a current client the `fetch` of that cursor fails (`Cursor is not open`).
+- **firebird: `SAVEPOINT`, `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT` and `SELECT ... FOR UPDATE` or `WITH LOCK`** are accepted; LuaSQL returns `unsupported SQL statement`. `COMMIT`, `ROLLBACK` and `SET TRANSACTION` by SQL are still refused: the driver holds the transactions.
 
 **Extensions**
 
@@ -85,6 +96,7 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - The additions of oci8 described [below](#oracle-driver-luasqloci8): options `numbers` and `prefetch`, data types, threads.
 - The additions of sqlite3 described [below](#sqlite-driver-luasqlsqlite3): the functions of sqlean on every connection, names of parameters without a prefix (`id` for `:id`) and `?NNN` as a name, dates and times checked against the calendar.
 - The additions of duckdb described [below](#duckdb-driver-luasqlduckdb): parameters (also `conn:execute(sql, ...)`), `luasql.type`, names of parameters without `$`, `":memory:name"`, the extensions built into OneLuaPro.
+- `luasql._CLIENTVERSION` of firebird: the version of the Firebird client library.
 
 ## Oracle Driver `luasql.oci8`
 

@@ -2,19 +2,22 @@
 -- Child process of case exitWithOpen of scenario connectionLifecycle,
 -- run as a script, not loaded as a module:
 --
---   lua connectionExit.lua <dbms> <package.path> <package.cpath>
+--   lua connectionExit.lua <dbms> <package.path> <package.cpath> [<id>]
 --
 -- Opens two environments with a test connection each (laneconn.lua,
 -- which reads the connection settings from the environment variables),
 -- leaves cursors open on them (one partly fetched, one over a temporary
 -- CLOB per row if the backend has clobRowsLiteral, one not fetched at
--- all) and ends without closing anything. At its end Lua closes its
+-- all) and ends without closing anything. With <id>, the second
+-- connection has autocommit off and has inserted the row <id> into the
+-- table of connectionLoss (backend.lossInsert) before its cursor, without
+-- a commit. At its end Lua closes its
 -- state and runs the finalizers of all these objects, in an order that
 -- no program chooses. Exit code 0 if the end is reached and Lua closes
 -- cleanly; a crash in a finalizer gives another exit code. An error
 -- before the end goes to stderr, with exit code 2.
 
-local dbms, path, cpath = arg[1], arg[2], arg[3]
+local dbms, path, cpath, id = arg[1], arg[2], arg[3], tonumber(arg[4])
 if not (dbms and path and cpath) then
    io.stderr:write("usage: lua connectionExit.lua <dbms> <path> <cpath>\n")
    os.exit(2)
@@ -80,6 +83,17 @@ if backend.clobRowsLiteral then
                                                  lobRowSize, lobRowCount))
    fetch(lob)
    held[#held + 1] = lob
+end
+if id then
+   local ok, setErr = second.conn:setautocommit(false)
+   if not ok then
+      fail("setautocommit(false): " .. tostring(setErr))
+   end
+   local count, insertErr = second.conn:execute(string.format(
+      backend.lossInsert, id))
+   if not count then
+      fail("insert: " .. tostring(insertErr))
+   end
 end
 held[#held + 1] = execute(second.conn, backend.multiRowQuery)
 -- The end of the script: Lua closes its state and runs the finalizers.

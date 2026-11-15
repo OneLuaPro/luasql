@@ -11,6 +11,17 @@
 --   clobRows       execute a query with one temporary CLOB per row;
 --                  every second cursor is closed after a few rows
 --   blobRows       the same with temporary BLOBs
+--   commitCursor   autocommit off, a cursor over 2000 rows
+--                  (backend.commitCursorQuery); commit and rollback
+--                  with the cursor open, then read on: in turn the
+--                  cursor ends after a rollback with rows read after
+--                  it, right after a rollback, or after
+--                  setautocommit(true) with the cursor open; the
+--                  connection is back in autocommit after each
+--                  iteration. A tenth of the iterations of the other
+--                  phases, as each reads up to 2000 rows. Only for a
+--                  DBMS whose cursors stay readable over the end of
+--                  the transaction (backend.cursorsSurviveEnd)
 --
 -- conn:execute uses the default prefetch of the driver, so rows after
 -- the current one may already be on the client when a cursor is closed;
@@ -40,6 +51,18 @@ local multiRowCount = 10
 -- backend.blobRowsLiteral.
 local lobRowCount = 10
 local lobRowSize = 200
+
+-- Iterations of phase commitCursor per tier; rows of
+-- backend.commitCursorQuery and rows read after each end of the
+-- transaction: more than a client fetches ahead, so the cursor reads on
+-- at the server. The query gives 2000 rows; an iteration reads at most
+-- 1 + 2 * commitCursorBlock of them.
+local commitCursorIterations = {
+   smoke = 50,
+   standard = 1000,
+   nightly = 10000,
+}
+local commitCursorBlock = 500
 
 -- Full GC after this many dropped cursors. Must stay well below the
 -- server's cursor limit, otherwise even a working GC close would run
@@ -163,6 +186,57 @@ local function blobRowsStep(ctx, i)
    end)
 end
 
+-- Raises an error if a call that returns true or false and a message
+-- failed.
+local function checkCall(what, ok, err)
+   return check(ok, err, what)
+end
+
+-- Reads count rows from first on; row k must be k. Returns the next row.
+local function readBlock(cur, first, count, what)
+   for k = first, first + count - 1 do
+      local row, err = cur:fetch({})
+      if row == nil then
+         error(string.format("row %d %s: %s", k, what,
+                             tostring(err or "no row")), 0)
+      end
+      if tonumber(row[1]) ~= k then
+         error(string.format("row %d %s: got %s", k, what,
+                             describe(row[1])), 0)
+      end
+   end
+   return first + count
+end
+
+local function commitCursorStep(ctx, i)
+   local conn = ctx.testConn
+   checkCall("setautocommit(false)", conn:setautocommit(false))
+   local cur = execute(conn, ctx.backend.commitCursorQuery)
+   local nextRow = readBlock(cur, 1, 1, "before the commit")
+   checkCall("commit with an open cursor", conn:commit())
+   nextRow = readBlock(cur, nextRow, commitCursorBlock, "after the commit")
+   local variant = i % 3
+   if variant == 2 then
+      checkCall("setautocommit(true) with an open cursor",
+                conn:setautocommit(true))
+      readBlock(cur, nextRow, commitCursorBlock,
+                "after setautocommit(true)")
+      closeCursor(cur)
+      return
+   end
+   checkCall("rollback with an open cursor", conn:rollback())
+   if variant == 0 then
+      readBlock(cur, nextRow, commitCursorBlock, "after the rollback")
+   end
+   closeCursor(cur)
+   checkCall("setautocommit(true)", conn:setautocommit(true))
+end
+
+-- Back to autocommit, also after a failed iteration.
+local function finishCommitCursor(ctx)
+   ctx.testConn:setautocommit(true)
+end
+
 local phaseList = {
    { name = "explicitClose", step = explicitCloseStep },
    { name = "fetchAll", step = fetchAllStep },
@@ -190,7 +264,29 @@ function cursorLifecycle.run(ctx)
          list[#list + 1] = phase
       end
    end
-   return phases.run(ctx, list, count)
+   local ok, err = phases.run(ctx, list, count)
+   local backend = ctx.backend
+   local prefix = string.format("  %-14s ", "commitCursor")
+   if not backend.cursorsSurviveEnd then
+      report.print(prefix, "skipped: backend has no cursorsSurviveEnd",
+                   "skip")
+   elseif not backend.commitCursorQuery then
+      report.print(prefix, "skipped: backend has no commitCursorQuery",
+                   "skip")
+   else
+      local commitOk, commitErr = phases.run(ctx, { {
+         name = "commitCursor", step = commitCursorStep,
+         finish = finishCommitCursor,
+      } }, commitCursorIterations[ctx.tier])
+      if not commitOk then
+         if ok then
+            ok, err = nil, commitErr
+         else
+            err = err .. ", commitCursor"
+         end
+      end
+   end
+   return ok, err
 end
 
 return cursorLifecycle

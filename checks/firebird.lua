@@ -120,7 +120,6 @@ local ctx = {}
 function ctx.con()
    if not ctx.main then
       ctx.main = connect()
-      ctx.main:setautocommit(true)
    end
    return ctx.main
 end
@@ -131,8 +130,8 @@ local function count(con, where)
    return tonumber(rows(con, sql)[1].n)
 end
 
--- a count from a MON$ table, read in an autonomous transaction: in the
--- transaction of the driver, MON$ is a fixed snapshot
+-- a count from a MON$ table, read in an autonomous transaction: within a
+-- transaction (autocommit off) MON$ is a fixed snapshot
 local function mon_count(con, from, where)
    local sql = string.format([[
 EXECUTE BLOCK RETURNS (n INTEGER) AS
@@ -152,6 +151,12 @@ end
 -- statements of an attachment on the server, seen from another one
 local function statements(con, id)
    return mon_count(con, "MON$STATEMENTS",
+                    "MON$ATTACHMENT_ID = " .. id)
+end
+
+-- open transactions of an attachment, seen from another one
+local function transactions_of(con, id)
+   return mon_count(con, "MON$TRANSACTIONS",
                     "MON$ATTACHMENT_ID = " .. id)
 end
 
@@ -179,19 +184,27 @@ local function connect_info()
       info("engine version not readable: " .. tostring(r))
    end
    print("  driver: " .. tostring(luasql._VERSION))
+   print("  client: " .. tostring(luasql._CLIENTVERSION))
    check("connected", con ~= nil)
+   check("the client version is a string",
+         type(luasql._CLIENTVERSION) == "string"
+            and luasql._CLIENTVERSION ~= "")
 end
 
 local function create_insert()
    local con = ctx.con()
    pcall(run, con, "DROP TABLE luasql_test")
    run(con, "CREATE TABLE luasql_test (id INTEGER NOT NULL PRIMARY KEY, "
-          .. "name VARCHAR(20), val DOUBLE PRECISION, ts TIMESTAMP)")
+          .. "name VARCHAR(20) CHARACTER SET UTF8, val DOUBLE PRECISION, "
+          .. "ts TIMESTAMP)")
+   local n
    for i = 1, 20 do
-      run(con, string.format(
+      n = run(con, string.format(
          "INSERT INTO luasql_test (id, name, val) VALUES (%d, 'row_%02d', "
             .. "%.1f)", i, i, i * 1.5))
    end
+   check("the row count is the integer 1",
+         n == 1 and math.type(n) == "integer", n)
    check("table is created and 20 rows are inserted", count(con) == 20,
          "count: " .. tostring(count(con)))
 end
@@ -234,30 +247,158 @@ local function null_and_types()
    if x then
       check("NULL arrives as nil", x.name == nil and x.val == nil)
       print("  TIMESTAMP as returned: " .. tostring(x.ts))
-      check("TIMESTAMP value is in ISO format",
-            x.ts == "2026-10-11 12:34:56")
+      check("TIMESTAMP value is in ISO format, with 4 digits of a second",
+            x.ts == "2026-10-11 12:34:56.0000")
    end
    run(con, "DELETE FROM luasql_test WHERE id = 100")
 end
 
+-- Transactions, seen from a second connection. With autocommit on every
+-- statement has its own transaction; with autocommit off the connection
+-- has one, a SNAPSHOT that starts with its first statement.
 local function transactions()
-   local con = ctx.con()
-   con:setautocommit(false)
-   run(con, "INSERT INTO luasql_test (id, name, val) "
-          .. "VALUES (101, 'rolled', 0)")
-   check("rollback returns true", con:rollback() == true)
-   check("rollback removes the row", count(con, "id = 101") == 0)
+   local a, b = connect(), connect()
+   local ida = attachment_id(a)
 
-   run(con, "INSERT INTO luasql_test (id, name, val) VALUES (102, 'kept', 0)")
-   check("commit returns true", con:commit() == true)
-   local con2 = connect()
-   local seen = count(con2, "id = 102")
-   con2:close()
-   check("committed row is seen from a second connection", seen == 1,
-         "seen: " .. tostring(seen))
-   con:setautocommit(true)
-   run(con, "DELETE FROM luasql_test WHERE id = 102")
-   check("table is back to 20 rows", count(con) == 20)
+   -- autocommit on, the mode of a new connection
+   run(a, "INSERT INTO luasql_test (id, name, val) VALUES (101, 'auto', 0)")
+   check("autocommit: a row is seen by another connection at once",
+         count(b, "id = 101") == 1)
+   check("no transaction is open between statements",
+         transactions_of(b, ida) == 0, transactions_of(b, ida))
+   local cur = assert(a:execute("SELECT id FROM luasql_test ORDER BY id"))
+   cur:fetch()
+   check("an open cursor holds one transaction",
+         transactions_of(b, ida) == 1, transactions_of(b, ida))
+   run(a, "UPDATE luasql_test SET val = 1 WHERE id = 101")
+   check("a statement beside the open cursor is committed",
+         count(b, "id = 101 AND val = 1") == 1)
+   check("the cursor reads on", cur:fetch() ~= nil)
+   cur:close()
+   check("the transaction ends when the cursor is closed",
+         transactions_of(b, ida) == 0, transactions_of(b, ida))
+   cur = assert(a:execute("SELECT 1 FROM rdb$database"))
+   while cur:fetch() do end
+   check("and with the last row", transactions_of(b, ida) == 0,
+         transactions_of(b, ida))
+   check("commit and rollback with autocommit on: true",
+         a:commit() == true and a:rollback() == true)
+
+   -- autocommit off
+   check("setautocommit(false): true", a:setautocommit(false) == true)
+   check("it starts no transaction", transactions_of(b, ida) == 0)
+   check("commit without a transaction: true", a:commit() == true)
+   local n0 = count(a)
+   check("the first statement starts the transaction",
+         transactions_of(b, ida) == 1, transactions_of(b, ida))
+   run(b, "INSERT INTO luasql_test (id, name, val) VALUES (102, 'b', 0)")
+   check("snapshot: a row committed later is not seen", count(a) == n0)
+   check("commit: true", a:commit() == true)
+   check("the commit ends the transaction", transactions_of(b, ida) == 0)
+   check("the next transaction sees the row", count(a) == n0 + 1)
+   check("rollback: true", a:rollback() == true)
+
+   run(a, "INSERT INTO luasql_test (id, name, val) VALUES (103, 'rb', 0)")
+   check("own row is seen", count(a, "id = 103") == 1)
+   check("not by another connection", count(b, "id = 103") == 0)
+   check("rollback: true", a:rollback() == true)
+   check("rollback removes the row", count(a, "id = 103") == 0)
+   run(a, "INSERT INTO luasql_test (id, name, val) VALUES (104, 'ci', 0)")
+   check("commit: true", a:commit() == true)
+   check("committed row is seen by another connection",
+         count(b, "id = 104") == 1)
+
+   -- commit and rollback with an open cursor only retain the transaction
+   a:rollback()
+   n0 = count(a)
+   cur = assert(a:execute("SELECT id FROM luasql_test ORDER BY id"))
+   check("cursor is open", cur:fetch() == 1)
+   run(a, "INSERT INTO luasql_test (id, name, val) VALUES (105, 'ret', 0)")
+   run(b, "INSERT INTO luasql_test (id, name, val) VALUES (106, 'b', 0)")
+   check("commit with an open cursor: true", a:commit() == true)
+   check("the row is committed", count(b, "id = 105") == 1)
+   check("the cursor reads on", cur:fetch() == 2)
+   check("the snapshot stays while the cursor is open",
+         count(a) == n0 + 1, count(a))
+   check("rollback with an open cursor: true", a:rollback() == true)
+   check("the transaction is still there",
+         transactions_of(b, ida) == 1, transactions_of(b, ida))
+   cur:close()
+   check("nothing ran in it since: it ends with its last cursor",
+         transactions_of(b, ida) == 0, transactions_of(b, ida))
+   check("the next transaction sees all rows", count(a) == n0 + 2, count(a))
+   a:commit()
+   -- a fetch after the commit is new work in the transaction: it stays
+   cur = assert(a:execute("SELECT id FROM luasql_test ORDER BY id"))
+   check("cursor is open", cur:fetch() == 1)
+   check("commit with an open cursor: true", a:commit() == true)
+   check("the cursor reads on", cur:fetch() == 2)
+   check("rollback with an open cursor: true", a:rollback() == true)
+   check("the cursor reads on", cur:fetch() == 3)
+   cur:close()
+   check("fetched in it since: the transaction stays",
+         transactions_of(b, ida) == 1, transactions_of(b, ida))
+   check("commit ends it", a:commit() == true
+            and transactions_of(b, ida) == 0)
+
+   -- setautocommit(true) rolls back
+   run(a, "INSERT INTO luasql_test (id, name, val) VALUES (107, 'gap', 0)")
+   check("setautocommit(true): true", a:setautocommit(true) == true)
+   check("it rolls back pending work", count(b, "id = 107") == 0
+            and count(a, "id = 107") == 0)
+   check("no transaction is open", transactions_of(b, ida) == 0)
+   a:setautocommit(false)
+   cur = assert(a:execute("SELECT id FROM luasql_test ORDER BY id"))
+   cur:fetch()
+   run(a, "INSERT INTO luasql_test (id, name, val) VALUES (108, 'gap', 0)")
+   check("setautocommit(true) with an open cursor: true",
+         a:setautocommit(true) == true)
+   check("it rolls back", count(b, "id = 108") == 0)
+   check("the cursor reads on", cur:fetch() == 2)
+   run(a, "INSERT INTO luasql_test (id, name, val) VALUES (109, 'auto', 0)")
+   check("statements are committed again", count(b, "id = 109") == 1)
+   cur:close()
+   check("the old transaction ends with its cursor",
+         transactions_of(b, ida) == 0, transactions_of(b, ida))
+
+   -- savepoints, with autocommit off
+   a:setautocommit(false)
+   run(a, "INSERT INTO luasql_test (id, name, val) VALUES (110, 'sp', 0)")
+   check("SAVEPOINT", pcall(run, a, "SAVEPOINT luasql_sp"))
+   run(a, "INSERT INTO luasql_test (id, name, val) VALUES (111, 'sp', 0)")
+   check("ROLLBACK TO SAVEPOINT",
+         pcall(run, a, "ROLLBACK TO SAVEPOINT luasql_sp"))
+   check("only the row before the savepoint is left",
+         count(a, "id IN (110, 111)") == 1)
+   a:rollback()
+   local r, err = a:execute("COMMIT")
+   check("COMMIT by SQL is refused", r == nil
+            and has(err, "LuaSQL: unsupported SQL statement"), err)
+   r, err = a:execute("SET TRANSACTION READ COMMITTED")
+   check("SET TRANSACTION by SQL is refused", r == nil
+            and has(err, "LuaSQL: unsupported SQL statement"), err)
+
+   -- rows locked by a cursor
+   for _, sql in ipairs{ "SELECT id FROM luasql_test WHERE id = 1 FOR UPDATE",
+                         "SELECT id FROM luasql_test WHERE id = 1 WITH LOCK" }
+   do
+      local c, e = a:execute(sql)
+      check(sql:match("[%u ]+$"), c ~= nil and c:fetch() == 1, e)
+      if c then c:close() end
+   end
+   a:rollback()
+   a:setautocommit(true)
+
+   -- DDL of another connection does not disturb (autocommit on)
+   pcall(run, b, "DROP TABLE luasql_ddl")
+   run(b, "CREATE TABLE luasql_ddl (i INTEGER)")
+   check("a table of another connection is usable at once",
+         pcall(run, a, "INSERT INTO luasql_ddl VALUES (1)"))
+   check("and can be dropped", pcall(run, a, "DROP TABLE luasql_ddl"))
+
+   run(a, "DELETE FROM luasql_test WHERE id > 100")
+   check("table is back to 20 rows", count(b) == 20, count(b))
+   check("connections close", a:close() == true and b:close() == true)
 end
 
 local function escape_unicode()
@@ -269,32 +410,61 @@ local function escape_unicode()
    local ok, err = pcall(run, con, string.format(
       "INSERT INTO luasql_test (id, name, val) VALUES (103, '%s', 0)",
       con:escape(s)))
-   if not ok then
-      info("non-ASCII text could not be inserted: " .. tostring(err))
-      info("(the driver sets no connection character set)")
-   else
-      local x = rows(con, "SELECT name FROM luasql_test WHERE id = 103")[1]
-      -- compared as bytes: the console may show umlauts wrongly (code page)
-      info("non-ASCII text comes back identical: "
-           .. tostring(x ~= nil and x.name == s))
-      run(con, "DELETE FROM luasql_test WHERE id = 103")
-   end
+   check("non-ASCII text is inserted", ok, err)
+   local x = rows(con, "SELECT name, CHAR_LENGTH(name) AS n "
+                     .. "FROM luasql_test WHERE id = 103")[1]
+   -- compared as bytes: the console may show umlauts wrongly (code page)
+   check("it comes back identical", x ~= nil and x.name == s)
+   check("the server counts 4 characters", x ~= nil and x.n == 4,
+         x and x.n)
+   run(con, "DELETE FROM luasql_test WHERE id = 103")
 end
 
--- today the driver commits here; this changes to a rollback with the
--- bind API of the driver (decision D6)
-local function known_gap()
+local function hex(s)
+   return (tostring(s):gsub(".", function(c)
+      return string.format("%02X", c:byte())
+   end))
+end
+
+-- CHAR(n): the client gives n * 4 bytes for UTF8, the driver returns the
+-- n characters. NUMERIC with a scale and fractions of a second.
+local function values()
    local con = ctx.con()
-   con:setautocommit(false)
-   run(con, "INSERT INTO luasql_test (id, name, val) VALUES (200, 'gap', 0)")
-   con:setautocommit(true)
-   local con2 = connect()
-   local seen = count(con2, "id = 200")
-   con2:close()
-   check("setautocommit(true) commits pending work", seen == 1,
-         "the row is still pending")
-   assert(con:rollback())   -- removes the row if it was not committed
-   pcall(run, con, "DELETE FROM luasql_test WHERE id = 200")
+   pcall(run, con, "DROP TABLE luasql_values")
+   run(con, "CREATE TABLE luasql_values (u CHAR(5) CHARACTER SET UTF8, "
+          .. "w CHAR(5) CHARACTER SET WIN1252, "
+          .. "o CHAR(5) CHARACTER SET OCTETS, n CHAR(5) CHARACTER SET NONE, "
+          .. "num NUMERIC(9,2), big NUMERIC(18,4), whole NUMERIC(9,0), "
+          .. "t TIME, ts TIMESTAMP, d DATE)")
+   local umlauts = "\xC3\xA4\xC3\xB6\xC3\xBC"   -- a, o, u with umlaut
+   run(con, "INSERT INTO luasql_values VALUES ('" .. umlauts .. "', '"
+          .. umlauts .. "', x'C3A462', 'abc', 12.3, -0.05, 42, "
+          .. "'12:34:56.5', '2026-10-11 12:34:56.7891', '2026-10-11')")
+   local x, _, types = rows(con, "SELECT * FROM luasql_values")
+   x = x[1]
+   check("CHAR(5) UTF8 is 5 characters: 3 umlauts and 2 spaces",
+         x.u == umlauts .. "  ", #x.u .. " bytes " .. hex(x.u))
+   check("CHAR(5) WIN1252 comes as UTF-8, 5 characters",
+         x.w == umlauts .. "  ", #x.w .. " bytes " .. hex(x.w))
+   info("CHAR(5) OCTETS: " .. #x.o .. " bytes " .. hex(x.o))
+   info("CHAR(5) NONE:   " .. #x.n .. " bytes " .. hex(x.n))
+   check("CHAR(5) OCTETS is 5 bytes", #x.o == 5, #x.o)
+   check("CHAR(5) NONE is 5 bytes", x.n == "abc  ", #x.n)
+   check("NUMERIC(9,2) is exact text", x.num == "12.30", x.num)
+   check("NUMERIC(18,4) is exact text", x.big == "-0.0500", x.big)
+   check("NUMERIC(9,0) is an integer",
+         x.whole == 42 and math.type(x.whole) == "integer", x.whole)
+   check("TIME with 4 digits of a second", x.t == "12:34:56.5000", x.t)
+   check("TIMESTAMP with 4 digits of a second",
+         x.ts == "2026-10-11 12:34:56.7891", x.ts)
+   check("DATE", x.d == "2026-10-11", x.d)
+   info("column types: " .. table.concat(types, ", "))
+   local name = rows(con, "SELECT rdb$relation_name AS n FROM rdb$relations "
+                        .. "WHERE rdb$relation_name = 'LUASQL_VALUES'")[1].n
+   info("rdb$relation_name: " .. #name .. " bytes")
+   check("a name of the system tables starts right",
+         name:sub(1, 14) == "LUASQL_VALUES ", name)
+   run(con, "DROP TABLE luasql_values")
 end
 
 local function new_types()
@@ -503,13 +673,12 @@ local function anchors()
    check("it closes", k2:close() == true)
 end
 
--- A7: a column of type ARRAY. A connection of its own: in autocommit
--- mode the driver keeps one SNAPSHOT transaction between DML statements,
--- and DDL in it after DDL of another connection (dropped_statements)
--- fails with "update conflicts with concurrent update".
+-- A7: a column of type ARRAY. On the common connection: its DDL comes
+-- after DDL of another connection (dropped_statements), which failed with
+-- "update conflicts with concurrent update" while the driver kept one
+-- SNAPSHOT transaction for all statements.
 local function array_column()
-   local con = connect()
-   con:setautocommit(true)
+   local con = ctx.con()
    pcall(run, con, "DROP TABLE luasql_array")
    run(con, "CREATE TABLE luasql_array (i INTEGER, a INTEGER[3])")
    run(con, "INSERT INTO luasql_array (i, a) VALUES (1, NULL)")
@@ -520,17 +689,16 @@ local function array_column()
    cur:close()
    info("a value of an ARRAY column (nil, msg) cannot be written by SQL")
    run(con, "DROP TABLE luasql_array")
-   con:close()
 end
 
--- Statements with output that are not a SELECT. EXECUTE BLOCK without
--- SUSPEND gives no row. INSERT ... RETURNING and EXECUTE PROCEDURE (type
--- exec_procedure) give a cursor whose fetch fails ("Cursor is not open");
--- the values are lost until decision D3 (bind API of the driver) changes
--- this. A loop over fetch ends at once in all cases.
+-- Statements with output that are not a SELECT. INSERT ... RETURNING
+-- and EXECUTE PROCEDURE give one row, read at the execute: a cursor with
+-- one row. UPDATE and DELETE ... RETURNING are queries in Firebird 5.
+-- EXECUTE BLOCK without SUSPEND gives no row (behavior of Firebird).
 local function exec_procedure()
    local con = connect()
-   con:setautocommit(true)
+   local watch = ctx.con()
+   local id = attachment_id(con)
    local cur = assert(con:execute(
       "EXECUTE BLOCK RETURNS (a INTEGER) AS BEGIN a = 1; END"))
    check("EXECUTE BLOCK without SUSPEND: fetch returns one nil",
@@ -539,26 +707,33 @@ local function exec_procedure()
    check("and closes the cursor", r == false and msg ~= nil)
 
    pcall(run, con, "DROP TABLE luasql_returning")
-   run(con, "CREATE TABLE luasql_returning (id INTEGER)")
-   cur = assert(con:execute(
-      "INSERT INTO luasql_returning (id) VALUES (7) RETURNING id"))
+   run(con, "CREATE TABLE luasql_returning (id INTEGER, b BLOB)")
+   cur = assert(con:execute("INSERT INTO luasql_returning (id, b) "
+                            .. "VALUES (7, 'text') RETURNING id, b"))
    check("INSERT ... RETURNING gives a cursor", type(cur) == "userdata",
          cur)
-   local v, err = cur:fetch()
-   check("its fetch: nil, msg (until D3)", v == nil and err ~= nil, v)
-   info("fetch: " .. tostring(err))
-   v, err = cur:fetch()
-   check("a second fetch: nil, msg again", v == nil and err ~= nil, v)
-   check("cur:close: true", cur:close() == true)
+   check("the row is committed at the execute",
+         tonumber(rows(watch, "SELECT COUNT(*) AS n "
+                          .. "FROM luasql_returning")[1].n) == 1)
+   check("no transaction and no statement stay",
+         transactions_of(watch, id) == 0 and statements(watch, id) == 0)
+   check("column names", table.concat(cur:getcolnames(), ",") == "ID,B",
+         table.concat(cur:getcolnames(), ","))
+   local v, b = cur:fetch()
+   check("its fetch gives the row", v == 7 and b == "text", v)
+   check("a second fetch returns one nil", select("#", cur:fetch()) == 1)
+   r, msg = cur:close()
+   check("and closes the cursor", r == false and msg ~= nil)
    cur = assert(con:execute(
       "INSERT INTO luasql_returning (id) VALUES (8) RETURNING id"))
    local n = 0
-   while cur:fetch() do n = n + 1 end
-   check("a loop over fetch ends at once", n == 0, n)
-   cur:close()
-   check("both rows are inserted", tonumber(rows(con,
-      "SELECT COUNT(*) AS n FROM luasql_returning")[1].n) == 2)
-   run(con, "DROP TABLE luasql_returning")
+   local t = cur:fetch({}, "a")
+   while t do
+      n = n + 1
+      check("the row in a table", t.ID == 8, t.ID)
+      t = cur:fetch(t, "a")
+   end
+   check("a loop over fetch reads one row", n == 1, n)
 
    pcall(run, con, "DROP PROCEDURE luasql_proc")
    run(con, "CREATE PROCEDURE luasql_proc RETURNS (a INTEGER, "
@@ -568,29 +743,113 @@ local function exec_procedure()
    check("with the output columns",
          table.concat(cur:getcolnames(), ",") == "A,B",
          table.concat(cur:getcolnames(), ","))
-   v, err = cur:fetch()
-   check("its fetch: nil, msg (until D3)", v == nil and err ~= nil, v)
-   v, err = cur:fetch()
-   check("a second fetch: nil, msg again", v == nil and err ~= nil, v)
+   v, b = cur:fetch()
+   check("its fetch gives the row", v == 42 and b == "x", v)
    check("cur:close: true", cur:close() == true)
-   cur = assert(con:execute("EXECUTE PROCEDURE luasql_proc"))
-   n = 0
-   while cur:fetch() do n = n + 1 end
-   check("a loop over fetch ends at once", n == 0, n)
-   cur:close()
    run(con, "DROP PROCEDURE luasql_proc")
+
+   -- UPDATE ... RETURNING is a query: when are the rows changed, and
+   -- when is the statement committed?
+   run(con, "DELETE FROM luasql_returning")
+   for i = 1, 5 do
+      run(con, "INSERT INTO luasql_returning (id) VALUES (" .. i .. ")")
+   end
+   local function changed()
+      return tonumber(rows(watch, "SELECT COUNT(*) AS n "
+                             .. "FROM luasql_returning WHERE id > 100")[1].n)
+   end
+   cur = assert(con:execute(
+      "UPDATE luasql_returning SET id = id + 100 RETURNING id"))
+   check("UPDATE ... RETURNING gives a cursor", type(cur) == "userdata")
+   info("rows seen as changed by another connection, cursor not fetched: "
+        .. changed())
+   check("first row", cur:fetch() == 101)
+   info("after one fetch: " .. changed())
+   cur:close()
+   local after = changed()
+   info("after the cursor was closed early: " .. after)
+   check("all 5 rows are changed and committed when the cursor is closed",
+         after == 5, after)
+   do
+      local left = assert(con:execute(
+         "UPDATE luasql_returning SET id = id + 100 WHERE id < 200 "
+            .. "RETURNING id"))
+      check("a second UPDATE ... RETURNING", left ~= nil)
+   end
+   collectgarbage()
+   collectgarbage()
+   after = tonumber(rows(watch, "SELECT COUNT(*) AS n "
+                            .. "FROM luasql_returning WHERE id > 200")[1].n)
+   check("all 5 rows are changed when the cursor is left to the collector",
+         after == 5, after)
+   run(con, "DROP TABLE luasql_returning")
    con:close()
+end
+
+-- The end of Lua with open cursors: a child process ends with a cursor
+-- of each mode. The cursor with autocommit on is committed (as when it is
+-- closed), the transaction with autocommit off is rolled back.
+local function exit_open()
+   local con = ctx.con()
+   local index = -1
+   while arg[index - 1] do index = index - 1 end
+   local lua = arg[index]
+   local windows = package.config:sub(1, 1) == "\\"
+   local file = windows
+      and ((os.getenv("TEMP") or ".") .. "\\luasql_firebird_exit.lua")
+      or os.tmpname()
+   local f = assert(io.open(file, "w"))
+   f:write([[
+local luasql = require "luasql.firebird"
+local env = assert(luasql.firebird())
+local con = assert(env:connect(os.getenv("FIREBIRD_TEST_SOURCE"),
+   os.getenv("FIREBIRD_TEST_USER"), os.getenv("FIREBIRD_TEST_PASSWORD")))
+-- autocommit on: a cursor that has changed a row, never fetched
+local written = assert(con:execute(
+   "UPDATE luasql_exit SET val = 1 WHERE id = 1 RETURNING id"))
+-- autocommit off: a pending row and an open cursor
+assert(con:setautocommit(false))
+assert(con:execute("INSERT INTO luasql_exit VALUES (2, 2)"))
+local reading = assert(con:execute("SELECT id FROM luasql_exit"))
+assert(reading:fetch())
+-- all objects stay open to the end of Lua
+KEEP = { env, con, written, reading }
+]])
+   f:close()
+
+   pcall(run, con, "DROP TABLE luasql_exit")
+   run(con, "CREATE TABLE luasql_exit (id INTEGER, val INTEGER)")
+   run(con, "INSERT INTO luasql_exit VALUES (1, 0)")
+   local before = attachments(con)
+   local command = string.format('"%s" "%s"', lua, file)
+   if windows then
+      -- cmd.exe takes off the outer quotes of a command with several
+      command = '"' .. command:gsub("/", "\\") .. '"'
+   end
+   local ok, how, code = os.execute(command)
+   os.remove(file)
+   check("the child process ends without an error", ok == true,
+         tostring(how) .. " " .. tostring(code))
+   local x = rows(con, "SELECT id, val FROM luasql_exit ORDER BY id")
+   check("the cursor of autocommit on is committed",
+         x[1] ~= nil and x[1].val == 1, x[1] and x[1].val)
+   check("the transaction of autocommit off is rolled back", #x == 1, #x)
+   check("no attachment is left", attachments(con) == before,
+         attachments(con))
+   run(con, "DROP TABLE luasql_exit")
 end
 
 -- BLOB read in several segments
 local function blob()
    local con = ctx.con()
+   -- 8000 characters: a VARCHAR holds 32765 bytes, which are 8191
+   -- characters in UTF8
    local cur = assert(con:execute(
-      "SELECT CAST(LPAD('', 30000, 'x') AS BLOB SUB_TYPE TEXT) AS b "
+      "SELECT CAST(LPAD('', 8000, 'x') AS BLOB SUB_TYPE TEXT) AS b "
       .. "FROM rdb$database"))
-   local b = cur:fetch()
-   check("BLOB of 30000 bytes", type(b) == "string" and #b == 30000
-            and b:match("^x+$") ~= nil, b and #b)
+   local b, err = cur:fetch()
+   check("BLOB of 8000 bytes", type(b) == "string" and #b == 8000
+            and b:match("^x+$") ~= nil, b and #b or err)
    cur:close()
 end
 
@@ -605,6 +864,7 @@ local function kill()
    admin:setautocommit(true)
    local con = connect()
    local id = attachment_id(con)
+   con:setautocommit(false)
    local cur = assert(con:execute("SELECT rdb$relation_id "
                                   .. "FROM rdb$relations"))
    run(admin, string.format([[
@@ -622,14 +882,10 @@ END]], id))
    local ok, msg = con:commit()
    check("commit after the kill: false, msg", ok == false and msg ~= nil,
          ok)
-   ok, msg = con:rollback()
-   check("rollback after the kill: false, msg", ok == false and msg ~= nil,
-         ok)
-   check("setautocommit(false) after the kill: true (no call to the server)",
-         con:setautocommit(false) == true)
-   ok, msg = con:setautocommit(true)
-   check("setautocommit(true) after the kill: false, msg",
-         ok == false and msg ~= nil, ok)
+   -- the client takes a lost connection as rolled back
+   check("rollback after the kill: true", con:rollback() == true)
+   check("setautocommit(true) after the kill: true (nothing is pending)",
+         con:setautocommit(true) == true)
    check("conn:close after the kill: true", con:close() == true)
    ok, msg = pcall(con.execute, con, "SELECT 1 FROM rdb$database")
    check("execute on the closed connection raises",
@@ -645,7 +901,7 @@ local scenarios = {
    { "null_and_types",     null_and_types },
    { "transactions",       transactions },
    { "escape_unicode",     escape_unicode },
-   { "known_gap",          known_gap },
+   { "values",             values },
    { "new_types",          new_types },
    { "closed_objects",     closed_objects },
    { "open_error",         open_error },
@@ -654,6 +910,7 @@ local scenarios = {
    { "anchors",            anchors },
    { "array_column",       array_column },
    { "exec_procedure",     exec_procedure },
+   { "exit_open",          exit_open },
    { "blob",               blob },
    { "kill",               kill },
 }
@@ -690,10 +947,9 @@ end
 
 if not args.keep and ctx.main then
    print("\n== Cleanup ==")
-   -- a new snapshot first: other connections have changed the metadata
-   ctx.main:commit()
    for _, t in ipairs{ "luasql_test", "luasql_types", "luasql_drop",
-                       "luasql_array", "luasql_returning" } do
+                       "luasql_array", "luasql_returning", "luasql_values",
+                       "luasql_ddl", "luasql_exit" } do
       local exists = tonumber(rows(ctx.main, string.format(
          "SELECT COUNT(*) AS n FROM rdb$relations "
             .. "WHERE rdb$relation_name = '%s'", t:upper()))[1].n)

@@ -8,31 +8,34 @@
 -- regular user only its own.
 --
 -- Monitoring tables: within a transaction they show the state of the
--- first query on them, also after COMMIT RETAIN, which is what
--- conn:commit() and conn:rollback() of luasql.firebird do (checked with
--- isql and the driver on 2026-11-14). Every query on them therefore
--- runs in an autonomous transaction (EXECUTE BLOCK ... IN AUTONOMOUS
--- TRANSACTION), which is a new transaction each time; with SUSPEND the
--- block gives one row like a query. The kill is such a block as well:
--- DELETE FROM MON$ATTACHMENTS takes effect at once.
+-- first query on them, also after COMMIT RETAIN (checked with isql on
+-- 2026-11-14). Every query on them runs in an autonomous transaction
+-- (EXECUTE BLOCK ... IN AUTONOMOUS TRANSACTION), a new transaction each
+-- time; with SUSPEND the block gives one row like a query. With
+-- autocommit on, luasql.firebird gives every statement a transaction of
+-- its own, so the plain query would be fresh as well; the autonomous
+-- block keeps the measurement independent of what it measures. The kill
+-- is such a block as well: DELETE FROM MON$ATTACHMENTS takes effect at
+-- once.
 --
--- Counters: MON$STATE of a statement is 0 also while its cursor is
--- open (the client has fetched ahead), so the only counter is the
--- number of statements of the test attachment: a statement the driver
--- does not drop stays there.
+-- Counters: the statements and the transactions of the test attachment.
+-- MON$STATE of a statement is 0 also while its cursor is open (the
+-- client has fetched ahead), so there is no counter of open cursors; a
+-- statement the driver does not drop stays in MON$STATEMENTS. With
+-- autocommit on, no transaction is open between statements, so the
+-- transactions must be 0 before every phase (idle).
 --
--- Transactions: luasql.firebird starts a connection with autocommit
--- off, in a SNAPSHOT transaction that commits or rolls back with
--- RETAIN, so a connection does not see what others commit later (D4,
--- D5 in claude/luasql-api-treiber.md, changed with the bind API of the
--- driver). Tables of the scenarios are therefore created and dropped in
--- autonomous transactions, so other connections see them at once, and
--- the server state is read the same way. Locks wait without a limit.
+-- Transactions of the driver: autocommit on, every statement in a
+-- transaction of its own, which ends with the statement or with the
+-- cursor of a query. With autocommit off one SNAPSHOT transaction from
+-- the first statement to commit or rollback; while cursors of it are
+-- open these only retain it, and the cursors read on. Locks wait
+-- without a limit.
 --
 -- No DROP TABLE IF EXISTS in Firebird 5; the drops look into
 -- RDB$RELATIONS first. Statements that must give a row are queries or
--- EXECUTE BLOCK with SUSPEND: luasql.firebird reads no output of
--- EXECUTE PROCEDURE and RETURNING yet (D3).
+-- EXECUTE BLOCK with SUSPEND (without SUSPEND such a block gives no
+-- row).
 
 -- "host/port:database", the connection string of the client.
 local function sourceName(values)
@@ -46,21 +49,10 @@ local function autonomousValue(sel)
       .. " IN AUTONOMOUS TRANSACTION DO " .. sel .. "; SUSPEND; END"
 end
 
--- An EXECUTE BLOCK that runs the statement text stmt in an autonomous
--- transaction, which commits at its end. stmt must not contain quotes.
-local function autonomousStatement(stmt)
-   return "EXECUTE BLOCK AS BEGIN IN AUTONOMOUS TRANSACTION DO"
-      .. " EXECUTE STATEMENT '" .. stmt .. "'; END"
-end
-
--- Creates table name with the column list columns, and drops it if it
--- exists; both committed at once.
-local function createTable(name, columns)
-   return autonomousStatement("CREATE TABLE " .. name .. " (" .. columns
-                              .. ")")
-end
+-- Drops table name if it exists (no DROP TABLE IF EXISTS in Firebird 5);
+-- with autocommit on, committed with the block.
 local function dropTable(name)
-   return "EXECUTE BLOCK AS BEGIN IN AUTONOMOUS TRANSACTION DO"
+   return "EXECUTE BLOCK AS BEGIN"
       .. " IF (EXISTS (SELECT 1 FROM rdb$relations"
       .. " WHERE rdb$relation_name = '" .. name:upper() .. "')) THEN"
       .. " EXECUTE STATEMENT 'DROP TABLE " .. name .. "'; END"
@@ -81,6 +73,12 @@ local function rowsUpTo(count)
       .. " a CROSS JOIN " .. digits .. " b) r WHERE r.n <= " .. count
       .. " ORDER BY r.n"
 end
+
+-- The rows 1 .. 2000 in order, for phase commitCursor.
+local commitCursorQuery = "SELECT r.n FROM (SELECT a.d + 10 * b.d"
+   .. " + 100 * c.d + 1000 * e.d + 1 AS n FROM " .. digits .. " a CROSS JOIN "
+   .. digits .. " b CROSS JOIN " .. digits .. " c CROSS JOIN " .. digits
+   .. " e) r WHERE r.n <= 2000 ORDER BY r.n"
 
 -- The rows 1 .. 10 and 1 .. 100000 (a CTE of the digits, five times).
 local tenRowsQuery = "WITH RECURSIVE r (n) AS (SELECT 1 FROM rdb$database"
@@ -118,6 +116,12 @@ return {
          query = autonomousValue("SELECT COUNT(*) FROM MON$STATEMENTS"
             .. " WHERE MON$ATTACHMENT_ID = %d INTO :n"),
       },
+      {
+         label = "transactions",
+         query = autonomousValue("SELECT COUNT(*) FROM MON$TRANSACTIONS"
+            .. " WHERE MON$ATTACHMENT_ID = %d INTO :n"),
+         idle = 0,
+      },
    },
    -- Without binds for conn:execute: row k has k * the first %d
    -- characters 'x' (a text BLOB) or bytes 0xAB (a binary BLOB), made on
@@ -126,6 +130,11 @@ return {
       .. " r.n * %d, 'x')" .. rowsUpTo("%d"),
    blobRowsLiteral = "SELECT RPAD(CAST(x'AB' AS BLOB SUB_TYPE BINARY),"
       .. " r.n * %d, x'AB')" .. rowsUpTo("%d"),
+   -- Phase commitCursor of cursorLifecycle: with autocommit off, commit
+   -- and rollback with open cursors only retain the transaction, and the
+   -- cursors read on; setautocommit(true) leaves them their transaction.
+   cursorsSurviveEnd = true,
+   commitCursorQuery = commitCursorQuery,
    -- Used by the error path scenario.
    invalidQuery = "SELEC 1 FROM rdb$database",
    emptyStatement = "",
@@ -164,14 +173,20 @@ return {
                             "Killed by database administrator",
                             "Error writing data to the connection",
                             "Error reading data from the connection" },
+   lossLimits = {
+      endAfterKill = "the client of Firebird takes a transaction of a lost"
+         .. " connection as rolled back, and without an open transaction"
+         .. " luasql.firebird does not call the server: setautocommit(true),"
+         .. " rollback and commit after the kill return true",
+   },
    manyRowsQuery = manyRowsQuery,
    manyRowsCount = 100000,
-   lossTableCreate = createTable("luastress_loss",
-                                 "id INTEGER PRIMARY KEY"),
+   lossTableCreate = "CREATE TABLE luastress_loss (id INTEGER PRIMARY KEY)",
    lossTableDrop = dropTable("luastress_loss"),
    lossInsert = "INSERT INTO luastress_loss (id) VALUES (%d)",
-   -- Read in an autonomous transaction: the test connection would not
-   -- see a row committed after its transaction began.
+   -- Read in an autonomous transaction, independent of the transaction
+   -- handling of the driver (a stale snapshot would count 0 and hide a
+   -- row that was committed).
    lossCount = autonomousValue("EXECUTE STATEMENT 'SELECT COUNT(*)"
       .. " FROM luastress_loss WHERE id = %d' INTO :n"),
 }

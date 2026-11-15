@@ -18,12 +18,15 @@ Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 | `gcClose`       | executes a query and drops the cursor without closing it; a full GC runs every 10 iterations                                     | a counter or the memory grows: the finalizer of the cursor does not release it                     |
 | `clobRows`      | executes a query with 10 rows and a temporary CLOB (Character Large Object) in each, 200 more characters per row; every second cursor is closed after 3 rows | a value is wrong, or temporary LOBs, cursors or memory grow                                        |
 | `blobRows`      | the same with a temporary BLOB (Binary Large Object), 200 more bytes per row                                                     | the same                                                                                           |
+| `commitCursor`  | turns autocommit off, opens a cursor over 2000 rows (`backend.commitCursorQuery`), fetches one row, commits and fetches 500 rows; then in turn: rolls back and fetches 500 rows, closes the cursor and turns autocommit on; rolls back, closes the cursor at once and turns autocommit on; or turns autocommit on with the cursor open and fetches 500 rows before it closes it | a row is missing or wrong after the end of the transaction, a call fails, or a counter or the memory grows: a transaction is left over |
+
+Phase `commitCursor` has a tenth of the iterations (smoke 50, standard 1000, nightly 10 000), as each iteration reads up to 1001 rows: more than a client fetches ahead, so the cursor reads on at the server. It runs only for a DBMS whose cursors stay readable over the end of their transaction (`backend.cursorsSurviveEnd`), so far Oracle and Firebird; SQLite, for example, ends open readers at a `ROLLBACK`.
 
 A LOB phase first checks that its query really gives temporary LOBs (`backend.tempLobChecks`); if not, it fails as invalid, because it would test nothing. A LOB phase is skipped if the backend has no query for it.
 
 ## Oracle
 
-`conn:execute` fetches 100 rows ahead (the default prefetch of `luasql.oci8`). The server counters are the open cursors and the temporary LOBs of the test session.
+`conn:execute` fetches 100 rows ahead (the default prefetch of `luasql.oci8`). The server counters are the open cursors and the temporary LOBs of the test session. `commitCursor` runs: Oracle reads a cursor on after commit and rollback (fetch across commit), checked with prefetch 100 and 1.
 
 ## SQLite
 
@@ -35,4 +38,6 @@ There are no temporary LOBs and no prefetch: `luasql.duckdb` reads the whole res
 
 ## Firebird
 
-The 10-row query is a recursive CTE (Common Table Expression). The LOB phases read BLOBs made on the server: `RPAD` of a text BLOB with `x` and of a binary BLOB with the byte 0xAB, over a derived table of the numbers 1 to 100. Firebird shows no temporary BLOBs of an attachment, so there is no check of the LOB queries (`backend.tempLobChecks`); the phases check that every value comes back whole and that nothing grows. The server counter is `statements`, the statements of the test attachment in `MON$STATEMENTS`, read in an autonomous transaction: a cursor closed early or left to the GC must drop its statement on the server (A2 of `fix-firebird`), also after 100 000 of them (cursor names, A3).
+The 10-row query is a recursive CTE (Common Table Expression). The LOB phases read BLOBs made on the server: `RPAD` of a text BLOB with `x` and of a binary BLOB with the byte 0xAB, over a derived table of the numbers 1 to 100. Firebird shows no temporary BLOBs of an attachment, so there is no check of the LOB queries (`backend.tempLobChecks`); the phases check that every value comes back whole and that nothing grows. The server counters are `statements`, the statements of the test attachment in `MON$STATEMENTS`, and `transactions`, its transactions in `MON$TRANSACTIONS`, both read in an autonomous transaction. A cursor closed early or left to the GC must drop its statement on the server, also after 100 000 of them; with autocommit on the transaction of a query ends with its cursor, so `transactions` must be 0 before every phase.
+
+`commitCursor` runs: with autocommit off, `conn:commit()` and `conn:rollback()` only retain the transaction while a cursor of it is open, and the cursor reads on; the transaction then ends with its last cursor, or with the next commit or rollback if the cursor fetched after the retain; `conn:setautocommit(true)` leaves the transaction to its open cursor. The 2000-row query is a derived table of the digits, four times, in order.

@@ -102,6 +102,12 @@ return {
       .. " FROM dual CONNECT BY level <= %d",
    blobRowsLiteral = "SELECT TO_BLOB(HEXTORAW(RPAD('AB', 2 * level * %d,"
       .. " 'AB'))) FROM dual CONNECT BY level <= %d",
+   -- Phase commitCursor of cursorLifecycle: cursors stay readable after
+   -- commit, rollback and setautocommit(true) of their connection (fetch
+   -- across commit, checked with prefetch 100 and 1 on 2026-11-15); the
+   -- query gives the rows 1 to 2000 in order.
+   cursorsSurviveEnd = true,
+   commitCursorQuery = "SELECT level FROM dual CONNECT BY level <= 2000",
    -- JSON object {"t":"<clobQuery value>"}, {"t":null} for a NULL :1.
    -- Fetching it leaves no temporary LOB, so there is no tempLobChecks
    -- entry for phase jsonRead.

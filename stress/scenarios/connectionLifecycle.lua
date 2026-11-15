@@ -31,7 +31,12 @@
 --                     (scenarios/connectionExit.lua) that opens two
 --                     connections, leaves cursors open (one with LOBs)
 --                     and ends without closing them: it must end with
---                     exit code 0, and no session may stay; skipped
+--                     exit code 0, and no session may stay. If the
+--                     backend has the table of connectionLoss
+--                     (lossTableCreate, lossInsert, lossCount), the
+--                     second connection has autocommit off and a row
+--                     inserted; that row must not be on the server
+--                     afterwards (only committed work stays); skipped
 --                     without luv and for a database that one process
 --                     at a time may open (config.exclusiveFile)
 -- and one case per connect that must fail (backend.failingConnects,
@@ -349,7 +354,7 @@ end
 -- interpreter, through luv) and waits for its end; its stderr is
 -- collected. Returns a table with code, signal, killed and stderr, or
 -- nil and an error message.
-local function runExitChild(ctx, uv)
+local function runExitChild(ctx, uv, id)
    local exe, exeErr = uv.exepath()
    if not exe then
       return nil, "cannot find the Lua interpreter: " .. tostring(exeErr)
@@ -365,7 +370,8 @@ local function runExitChild(ctx, uv)
    local timer = uv.new_timer()
    local handle, spawnErr
    handle, spawnErr = uv.spawn(exe, {
-      args = { script, spec.dbms, spec.path, spec.cpath },
+      args = { script, spec.dbms, spec.path, spec.cpath,
+               id and tostring(id) or nil },
       stdio = { nil, nil, pipe },
    }, function(code, signal)
       result.code, result.signal = code, signal
@@ -412,11 +418,25 @@ local function exitWithOpenSkip(ctx)
    return nil
 end
 
-local function exitWithOpenCase(ctx)
-   local uv = require("luv")
-   local base = sessionCount(ctx)
+-- The row the child processes insert with autocommit off.
+local exitRowId = 4713
+
+-- The table keys of connectionLoss, or nil if the backend lacks one.
+local function exitTable(backend)
+   for _, key in ipairs({ "lossTableCreate", "lossTableDrop", "lossInsert",
+                          "lossCount" }) do
+      if backend[key] == nil then
+         return nil
+      end
+   end
+   return backend
+end
+
+-- Runs the child processes; with a table, each inserts exitRowId with
+-- autocommit off and ends without a commit.
+local function runExitChildren(ctx, uv, id)
    for k = 1, exitRuns do
-      local result, err = runExitChild(ctx, uv)
+      local result, err = runExitChild(ctx, uv, id)
       check(result, err, "child process " .. k)
       expect(not result.killed, string.format("child process %d: no end"
              .. " after %d s, stopped", k, exitChildSeconds))
@@ -427,18 +447,57 @@ local function exitWithOpenCase(ctx)
              .. " exit code 0x%08X%s", k, (result.code or 0) & 0xFFFFFFFF,
              stderr))
    end
-   if base == nil then
-      return
-   end
+end
+
+-- Waits until the sessions of the test user are back at base (a DBMS
+-- may show a session for a moment after its process has ended).
+-- Returns the last count.
+local function settleSessions(ctx, uv, base)
    local deadline = os.time() + exitSettleSeconds
    local count = sessionCount(ctx)
    while count ~= base and os.time() < deadline do
       uv.sleep(200)
       count = sessionCount(ctx)
    end
-   expect(count == base, string.format("%d sessions of the test user %d s"
-          .. " after the child processes ended, expected %d", count,
-          exitSettleSeconds, base))
+   return count
+end
+
+local function exitWithOpenCase(ctx)
+   local uv = require("luv")
+   local base = sessionCount(ctx)
+   local tbl = exitTable(ctx.backend)
+   if tbl then
+      check(dbutil.exec(ctx.testConn, tbl.lossTableDrop))
+      check(dbutil.exec(ctx.testConn, tbl.lossTableCreate))
+   end
+   local ok, err = pcall(runExitChildren, ctx, uv, tbl and exitRowId)
+   local count
+   if base ~= nil then
+      count = settleSessions(ctx, uv, base)
+   end
+   -- After the sessions are gone, so that no lock of a child is left
+   -- on the table.
+   local rows, rowsErr
+   if tbl then
+      if ok then
+         rows, rowsErr = dbutil.queryValue(ctx.testConn,
+            string.format(tbl.lossCount, exitRowId))
+      end
+      dbutil.exec(ctx.testConn, tbl.lossTableDrop)
+   end
+   if not ok then
+      error(err, 0)
+   end
+   if tbl then
+      check(rows, rowsErr, "count rows")
+      expect(tonumber(rows) == 0, "a row inserted with autocommit off"
+             .. " by a child process is on the server")
+   end
+   if base ~= nil then
+      expect(count == base, string.format("%d sessions of the test user"
+             .. " %d s after the child processes ended, expected %d", count,
+             exitSettleSeconds, base))
+   end
 end
 
 local caseList = {

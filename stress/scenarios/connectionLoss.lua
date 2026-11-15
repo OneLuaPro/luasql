@@ -27,11 +27,17 @@
 --                       closing; the GC frees them and the environment
 --   killThenReconnect   a new connection on the same environment
 --                       works after the kill
---   killThenAutocommit  autocommit off, kill, setautocommit(true): it
---                       must fail (the rollback it needs cannot run),
---                       a second time as well; the driver options are
---                       unchanged, rollback and commit fail, close
---                       works
+--   killThenAutocommit  autocommit off, insert a row, kill: commit
+--                       must fail (never a limit); then
+--                       setautocommit(true) must fail (the rollback it
+--                       needs cannot run), a second time as well; the
+--                       driver options are unchanged, rollback and
+--                       commit fail, close works, the row is not on
+--                       the server. With backend.lossLimits.endAfterKill
+--                       a true of setautocommit(true), rollback or
+--                       commit after the commit is a limit (e.g. a
+--                       client that takes the lost transaction as
+--                       rolled back)
 --
 -- Phases:
 --   killLoop       connect, query, kill, failing call, close; checks
@@ -41,7 +47,9 @@
 --                  backend has clobRowsLiteral), fetch a few rows, kill,
 --                  fetch until the error, close cursor and connection;
 --                  what the client keeps for an open cursor of a lost
---                  connection must be freed
+--                  connection must be freed. Two of four iterations
+--                  run with autocommit off, so the cursor reads in a
+--                  transaction of the connection
 --
 -- Sessions are counted without those in status KILLED
 -- (backend.liveSessionCountQuery): Oracle removes a killed session from
@@ -206,6 +214,9 @@ end
 -- must free what the client kept for it.
 local function killFetchLoopStep(ctx, i)
    local conn = open(ctx)
+   if i % 4 >= 2 then
+      check(conn:setautocommit(false), nil, "setautocommit(false)")
+   end
    local cur, limit, expectedRow
    if i % 2 == 0 and ctx.backend.clobRowsLiteral then
       cur = check(conn:execute(string.format(ctx.backend.clobRowsLiteral,
@@ -349,10 +360,15 @@ local function killThenReconnectCase(ctx)
    closeObject(env, "environment")
 end
 
--- Turning autocommit on rolls back the open transaction first; on a
--- killed session that rollback fails, so the call must fail too and
--- leave the connection as it was.
+-- A commit with open work after the kill must fail. Turning autocommit
+-- on rolls back the open transaction first; on a killed session that
+-- rollback fails, so the call must fail too and leave the connection as
+-- it was. Where the client library takes the lost transaction as rolled
+-- back, these later calls may return true: a limit of the backend
+-- (lossLimits.endAfterKill), never for the commit with open work.
 local function killThenAutocommitCase(ctx)
+   local backend = ctx.backend
+   local endLimit = backend.lossLimits and backend.lossLimits.endAfterKill
    local base = sessionCount(ctx)
    local conn = open(ctx)
    check(conn:setautocommit(false))
@@ -360,22 +376,40 @@ local function killThenAutocommitCase(ctx)
    for _, name in ipairs({ "numbers", "prefetch" }) do
       options[name] = option(conn, name)
    end
+   local id = 4712
+   check(dbutil.exec(conn, string.format(backend.lossInsert, id)))
    kill(ctx, conn)
-   local ok, err = conn:setautocommit(true)
-   expectLost(ctx, "setautocommit(true) after the kill", false, ok, err)
-   ok, err = conn:setautocommit(true)
-   expectLost(ctx, "second setautocommit(true)", false, ok, err)
+   local ok, err = conn:commit()
+   expectLost(ctx, "commit after the kill, with open work", false, ok, err)
+   local limited = false
+   local function afterCommit(what, result, message)
+      if endLimit and result == true then
+         limited = true
+      else
+         expectLost(ctx, what, false, result, message)
+      end
+   end
+   afterCommit("setautocommit(true) after the kill",
+               conn:setautocommit(true))
+   afterCommit("second setautocommit(true)", conn:setautocommit(true))
    for name, value in pairs(options) do
       expect(option(conn, name) == value, string.format("option %s is"
                 .. " %s after the failed call, was %s", name,
                 tostring(option(conn, name)), tostring(value)))
    end
-   ok, err = conn:rollback()
-   expectLost(ctx, "rollback after the kill", false, ok, err)
-   ok, err = conn:commit()
-   expectLost(ctx, "commit after the kill", false, ok, err)
+   afterCommit("rollback after the kill", conn:rollback())
+   afterCommit("commit after the kill", conn:commit())
    closeObject(conn, "connection")
    expectSessions(ctx, base, "after closing")
+   local count
+   count, err = dbutil.queryValue(ctx.testConn,
+                                  string.format(backend.lossCount, id))
+   check(count, err, "count rows")
+   expect(tonumber(count) == 0, "the row of the killed transaction is"
+          .. " on the server")
+   if limited then
+      return "limit", endLimit
+   end
 end
 
 local caseList = {
