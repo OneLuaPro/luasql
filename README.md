@@ -16,11 +16,11 @@ The [upstream documentation](https://lunarmodules.github.io/luasql/) describes t
 | Area                    | Addition                                                                                                       |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------- |
 | Build                   | `CMakeLists.txt` for Windows, used by the OneLuaPro build; finds Lua through its CMake package `liblua`         |
-| Prepared statements     | `conn:prepare()` and `stmt:execute()` for Oracle, SQLite and DuckDB from upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), not yet merged upstream, extended by plain values, variable arguments and `luasql.type.binary` |
+| Prepared statements     | `conn:prepare()` and `stmt:execute()` for Oracle, SQLite, DuckDB and Firebird from upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), not yet merged upstream, extended by plain values, variable arguments and `luasql.type.binary` |
 | Oracle driver           | `luasql.oci8` reworked: data type coverage, typed parameters, prepared statement semantics, transactions, threads and many fixes; see [below](#oracle-driver-luasqloci8) |
 | SQLite driver           | `luasql.sqlite3` reworked: prepared statements, typed parameters, the functions of sqlean, transactions and fixes; see [below](#sqlite-driver-luasqlsqlite3) |
 | DuckDB driver           | `luasql.duckdb` reworked: prepared statements, typed parameters, values read by their type, one database per file in the process, transactions and fixes; DuckDB with its extensions built in; see [below](#duckdb-driver-luasqlduckdb) |
-| Firebird driver         | `luasql.firebird` reworked: a crash after a failed query, statements left on the server, the error convention, transactions (autocommit with a transaction per statement), text in UTF-8, exact `NUMERIC`, `RETURNING`; see [Differences](#differences-from-lunarmodulesluasql) |
+| Firebird driver         | `luasql.firebird` reworked: prepared statements, typed parameters, a crash after a failed query, statements left on the server, the error convention, transactions (autocommit with a transaction per statement), text in UTF-8, exact `NUMERIC`, `RETURNING`; see [Differences](#differences-from-lunarmodulesluasql) |
 | Stress test suite       | [`stress/`](stress/README.md): a long-running test of driver robustness, implemented for Oracle so far; see [below](#stress-test-suite) |
 
 The guiding rule for the Oracle driver: *the driver uses OCI (Oracle Call Interface) correctly, it does not try to improve OCI.* It covers the OCI features well, but stays inside the frame of the LuaSQL API; additions are kept where another LuaSQL driver already offers the same, so that the drivers behave alike. Where Oracle or OCI behaves differently from what a user might expect, the driver does not hide it; such behavior is documented as a known limitation.
@@ -52,7 +52,6 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **firebird: dates and times are text in ISO form**, times with four digits of a second, as Firebird writes them itself (`2026-11-14`, `12:34:56.0000`, `2026-11-14 12:34:56.0000`); LuaSQL writes them in the form of the locale of the C library (`%x`, `%X`), without the fraction of a second.
 - **firebird: `NUMERIC` and `DECIMAL` with a scale are exact text** (`"12.30"`); LuaSQL returns the integer without its scale (`1230`). With a scale of 0 they are integers as before.
 - **firebird: the number of rows a statement has changed is an integer** (`1`); LuaSQL returns a float (`1.0`).
-- **firebird: statements use the SQL dialect of the database**; the third argument of `conn:execute`, which is the dialect in LuaSQL, is ignored.
 - **firebird: the driver does not set the size of the page cache** (LuaSQL asks for 90 pages with every connection, which a server in the mode Classic or SuperClassic follows): the configuration of the server decides.
 
 **Other changes**
@@ -87,16 +86,18 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **firebird: `BOOLEAN` is read as a boolean**, and `INT128`, `DECFLOAT` and the types `WITH TIME ZONE` as text written by the server; LuaSQL returns the string `"<unsupported data type>"` for them.
 - **firebird: `INSERT ... RETURNING` and `EXECUTE PROCEDURE` with output** return a cursor with their one row; with LuaSQL and a current client the `fetch` of that cursor fails (`Cursor is not open`).
 - **firebird: `SAVEPOINT`, `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT` and `SELECT ... FOR UPDATE` or `WITH LOCK`** are accepted; LuaSQL returns `unsupported SQL statement`. `COMMIT`, `ROLLBACK` and `SET TRANSACTION` by SQL are still refused: the driver holds the transactions.
+- **firebird: statements use the SQL dialect of the database**, and `conn:execute(sql, ...)` binds further arguments as parameters: a program that passes the dialect as third argument, as in LuaSQL, gets `nil` and `LuaSQL: statement has 0 parameters, 1 given`.
+- **firebird: the first row of a query is read by the execute**: an error in it (e.g. a division by zero) is the result of `conn:execute`; with LuaSQL it comes from the first `fetch`. Cursors get no name; LuaSQL names each one, which costs a call to the server per query.
 
 **Extensions**
 
-- Prepared statements for oci8, sqlite3 and duckdb: `conn:prepare`, statement objects with `execute`, `reset` and `close` (upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
+- Prepared statements for oci8, sqlite3, duckdb and firebird: `conn:prepare`, statement objects with `execute`, `reset` and `close` (upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
 - `luasql.type` with the pairs `{value, type}`, `T.null` (a special value), `T.binary`, fixed forms for dates and times, `{T.null, type}`.
 - Plain Lua values and variable arguments as parameters, also for `conn:execute`.
 - The additions of oci8 described [below](#oracle-driver-luasqloci8): options `numbers` and `prefetch`, data types, threads.
 - The additions of sqlite3 described [below](#sqlite-driver-luasqlsqlite3): the functions of sqlean on every connection, names of parameters without a prefix (`id` for `:id`) and `?NNN` as a name, dates and times checked against the calendar.
 - The additions of duckdb described [below](#duckdb-driver-luasqlduckdb): parameters (also `conn:execute(sql, ...)`), `luasql.type`, names of parameters without `$`, `":memory:name"`, the extensions built into OneLuaPro.
-- `luasql._CLIENTVERSION` of firebird: the version of the Firebird client library.
+- The additions of firebird: prepared statements, parameters (also `conn:execute(sql, ...)`), `luasql.type`, long values as temporary `BLOB`s, and `luasql._CLIENTVERSION`, the version of the Firebird client library; see the topic Firebird of the manual (`doc/ldoc/manual/06-firebird.md`).
 
 ## Oracle Driver `luasql.oci8`
 
@@ -235,7 +236,7 @@ So far it is implemented for Oracle (`luasql.oci8`); backends for the other driv
 
 ## Documentation
 
-The reference and the manual are written for [LDoc](https://github.com/lunarmodules/LDoc): the doc comments in `src/ls_oci8.c`, `src/ls_sqlite3.c` and `src/ls_duckdb.c` describe the API, `doc/ldoc/` holds the manual topics, the examples, the configuration and the style. The CMake build generates the HTML into `<build>/doc` and installs it to `share/doc/luasql`; to generate it by hand, run from the root of the repository:
+The reference and the manual are written for [LDoc](https://github.com/lunarmodules/LDoc): the doc comments in `src/ls_oci8.c`, `src/ls_sqlite3.c`, `src/ls_duckdb.c` and `src/ls_firebird.c` describe the API, `doc/ldoc/` holds the manual topics, the examples, the configuration and the style. The CMake build generates the HTML into `<build>/doc` and installs it to `share/doc/luasql`; to generate it by hand, run from the root of the repository:
 
 ```CMD
 ldoc -c doc/ldoc/config.ld -d <output directory> .

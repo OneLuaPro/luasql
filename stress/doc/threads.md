@@ -47,4 +47,6 @@ There are no sessions: what a lane leaves behind is counted as connections to th
 
 ## Firebird
 
-Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`).
+The lanes lock a row with `UPDATE` or `SELECT ... WITH LOCK` and wait without a limit (the default of Firebird). With `SNAPSHOT`, the isolation of `luasql.firebird` in a transaction, a transaction that waited for a lock cannot change or lock the row once the holder has committed: it gets `update conflicts with concurrent update`, and goes on only if the holder rolls back. `parallelWriters` and `lockWait` are therefore a limit when they fail with this error (`backend.threadsLimits`); any other error fails them. `deadlock` runs: Firebird detects the deadlock and gives one of the two lanes an error with `deadlock`; the other one goes on after the victim has rolled back. Firebird has no query for the attachment that blocks another one, so the cases wait a second for the block instead.
+
+`killDuringCall` lets the lane run an `EXECUTE BLOCK` that loops for 20 seconds on the server (Firebird has no sleep), until `CAST('NOW' AS TIMESTAMP)` is 20 seconds later; the lane counts as busy while a statement of its attachment is active (`MON$STATE = 1` in `MON$STATEMENTS`). The kill is a `DELETE FROM MON$ATTACHMENTS`.

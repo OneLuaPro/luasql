@@ -389,6 +389,8 @@ return {
    volLobTableDrop = "DROP TABLE IF EXISTS luastress_vollob",
    volLobInsert = "INSERT INTO luastress_vollob (id, c) VALUES (?1, ?2)",
    volLobSelect = "SELECT id, c FROM luastress_vollob ORDER BY id",
+   volLobSelectOne = "SELECT c FROM luastress_vollob WHERE id = ?1",
+   volLobDelete = "DELETE FROM luastress_vollob WHERE id = ?1",
    volBinaryTableCreate = "CREATE TABLE luastress_volbin"
       .. " (slot INTEGER PRIMARY KEY, id INTEGER, b BLOB)",
    volBinaryTableDrop = "DROP TABLE IF EXISTS luastress_volbin",

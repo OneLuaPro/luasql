@@ -245,6 +245,8 @@ return {
    volLobTableDrop = "DROP TABLE IF EXISTS luastress_vollob",
    volLobInsert = "INSERT INTO luastress_vollob (id, c) VALUES ($1, $2)",
    volLobSelect = "SELECT id, c FROM luastress_vollob ORDER BY id",
+   volLobSelectOne = "SELECT c FROM luastress_vollob WHERE id = $1",
+   volLobDelete = "DELETE FROM luastress_vollob WHERE id = $1",
    -- Phase binaryInsert replaces the row of a slot by DELETE and INSERT
    -- into a table without primary key, with checkpoint_threshold at
    -- 1 MB during the phase. Probes on 2026-11-13, 5000 rows: INSERT OR

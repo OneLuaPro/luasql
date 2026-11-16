@@ -311,6 +311,8 @@ return {
    volLobTableDrop = "DROP TABLE IF EXISTS luastress_vollob PURGE",
    volLobInsert = "INSERT INTO luastress_vollob (id, c) VALUES (:1, :2)",
    volLobSelect = "SELECT id, c FROM luastress_vollob ORDER BY id",
+   volLobSelectOne = "SELECT c FROM luastress_vollob WHERE id = :1",
+   volLobDelete = "DELETE FROM luastress_vollob WHERE id = :1",
    -- Phase binaryInsert: a temporary table whose rows go at the commit
    -- (checked in SQL*Plus: the BLOB of such a row is no temporary LOB
    -- in v$temporary_lobs, and the commit frees its temporary segments).

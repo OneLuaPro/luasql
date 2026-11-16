@@ -59,7 +59,10 @@
 --   rejectedTables  execute with parameters that are not valid, one
 --                   after the other; a valid bind every 10th
 --   plainValues     plain values of every Lua type that binds, in a
---                   table and as variable arguments, read back
+--                   table and as variable arguments, read back; an
+--                   integer above 2^53 through backend.bindIntegerQuery
+--                   if given (a DBMS whose query result has one type,
+--                   e.g. DOUBLE PRECISION in Firebird)
 --   argCount        a wrong number of variable arguments through
 --                   stmt:execute and conn:execute; valid executes every
 --                   10th, the values bound before must stay
@@ -73,6 +76,10 @@
 --                   message) where names are case sensitive
 --                   (backend.namesCaseSensitive); the prefix of :a is
 --                   backend.paramPrefix if given (e.g. $ for DuckDB)
+--
+-- Timestamps are bound with 6 digits of a second; a DBMS that keeps
+-- fewer (backend.timestampDigits, e.g. 4 in Firebird) gives them back
+-- cut to these digits.
 --
 -- Skipped if the driver has no prepare() or the backend lacks a query;
 -- cases and phases that need another backend key are skipped without
@@ -630,14 +637,20 @@ local function reuseBindsStep(ctx, i, stmt)
    expectValue(kept, i, "execute again")
 end
 
--- String and timestamp of iteration i; the timestamp as it is bound
--- and as backend.rebindQuery gives it back.
-local function rebindValues(i)
+-- Digits of a second of a timestamp as it is bound.
+local stampDigits = 6
+
+-- String and timestamp of iteration i: the timestamp as it is bound,
+-- and as backend.rebindQuery gives it back, cut to the digits of a
+-- second the DBMS keeps (backend.timestampDigits).
+local function rebindValues(ctx, i)
    local text = string.rep("x", i % 300 + 1) .. i
    local stamp = string.format("2026-01-%02d 12:%02d:%02d.%06d",
                                i % 28 + 1, i % 60, i * 7 % 60,
                                i % 1000000)
-   return text, stamp
+   local digits = ctx.backend.timestampDigits or stampDigits
+   local readBack = stamp:sub(1, #stamp - stampDigits + digits)
+   return text, stamp, readBack
 end
 
 local function expectRebindRow(row, text, stamp, what)
@@ -647,10 +660,11 @@ end
 
 local function rebindResetStep(ctx, i, stmt)
    local types = ctx.types
-   local text, stamp = rebindValues(i)
+   local text, stamp, readBack = rebindValues(ctx, i)
    local cur, err = stmt:execute({ { text, types.string },
                                    { stamp, types.timestamp } })
-   expectRebindRow(fetchRow(check(cur, err, "bind")), text, stamp, "bind")
+   expectRebindRow(fetchRow(check(cur, err, "bind")), text, readBack,
+                   "bind")
    -- The GC runs before execute() without parameters in some
    -- iterations (multiples of 150), so the bound string must survive it.
    if i % 50 == 0 then
@@ -658,8 +672,8 @@ local function rebindResetStep(ctx, i, stmt)
    end
    if i % 3 == 0 then
       cur, err = stmt:execute()
-      expectRebindRow(fetchRow(check(cur, err, "execute()")), text, stamp,
-                      "execute()")
+      expectRebindRow(fetchRow(check(cur, err, "execute()")), text,
+                      readBack, "execute()")
    end
    if i % 5 == 0 and ctx.hasReset then
       reset(stmt)
@@ -677,17 +691,24 @@ local function rejectedTablesStep(ctx, i, stmt)
    end
 end
 
--- A number and a string query, for phases that read values back.
+-- A number and a string query, for phases that read values back, and
+-- an integer query if the backend has one.
 local function prepareValueQueries(ctx)
+   local backend = ctx.backend
    return {
-      number = prepare(ctx.testConn, ctx.backend.bindNumberQuery),
-      text = prepare(ctx.testConn, ctx.backend.bindStringQuery),
+      number = prepare(ctx.testConn, backend.bindNumberQuery),
+      text = prepare(ctx.testConn, backend.bindStringQuery),
+      integer = backend.bindIntegerQuery
+         and prepare(ctx.testConn, backend.bindIntegerQuery),
    }
 end
 
 local function finishValueQueries(_, shared)
    closeStatement(shared.number)
    closeStatement(shared.text)
+   if shared.integer then
+      closeStatement(shared.integer)
+   end
 end
 
 -- Integers above 2^53 are exact only as integers (bound as 64 bits).
@@ -696,13 +717,15 @@ local bigInteger = 1 << 53
 -- Plain value of iteration i: the query that reads it back, how it is
 -- passed ("table": {value}, "args": as variable argument), the value
 -- and what the query gives back. A boolean comes back as the text the
--- driver binds it as (backend.boolText).
+-- driver binds it as (backend.boolText). An integer above 2^53 goes
+-- through the integer query if the backend has one.
 local function plainValue(ctx, i)
    local k = i % 7
    if k == 0 then
       return "number", "table", i, i
    elseif k == 1 then
-      return "number", "args", bigInteger + i, bigInteger + i
+      local query = ctx.backend.bindIntegerQuery and "integer" or "number"
+      return query, "args", bigInteger + i, bigInteger + i
    elseif k == 2 then
       return "number", "table", i + 0.5, i + 0.5
    elseif k == 4 and ctx.backend.boolText then
@@ -773,7 +796,7 @@ end
 -- turn; the cursor is read to its end, closed after the row, or dropped
 -- for the GC.
 local function connQueryStep(ctx, i)
-   local text, stamp = rebindValues(i)
+   local text, stamp, readBack = rebindValues(ctx, i)
    local stampParam = { stamp, ctx.types.timestamp }
    local cur, err
    if i % 2 == 0 then
@@ -786,11 +809,11 @@ local function connQueryStep(ctx, i)
    check(cur, err, "conn:execute")
    local k = i % 3
    if k == 0 then
-      expectRebindRow(fetchRow(cur), text, stamp, "conn:execute")
+      expectRebindRow(fetchRow(cur), text, readBack, "conn:execute")
    elseif k == 1 then
       local row = cur:fetch({})
       expect(row ~= nil, "conn:execute: no row")
-      expectRebindRow(row, text, stamp, "conn:execute")
+      expectRebindRow(row, text, readBack, "conn:execute")
       closeCursor(cur)
    end
    -- k == 2: the cursor is dropped, only the GC closes it.
@@ -801,7 +824,7 @@ end
 
 local function connDmlStep(ctx, i)
    local backend = ctx.backend
-   local _, stamp = rebindValues(i)
+   local _, stamp = rebindValues(ctx, i)
    local second = i
    if i % 5 == 0 then
       second = "x" .. i

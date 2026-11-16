@@ -4,6 +4,140 @@
 ** ls_firebird.c
 */
 
+/***
+Firebird driver of LuaSQL.
+
+`luasql.firebird` connects Lua to Firebird databases through the client
+library of Firebird (`fbclient`), to a server or to an embedded database.
+It implements the common LuaSQL objects (@{environment}, @{connection},
+@{cursor}) and prepared statements (@{statement}) with typed parameters
+that stay with the statement, as the other drivers do.
+
+Text is UTF-8 in both directions: the connection uses the character set
+UTF8, and the server converts the text of all character sets. The
+@{06-firebird.md|Firebird topic} describes connecting, the data types,
+transactions and the behavior of Firebird that is worth knowing.
+
+All objects follow the same rules:
+
+- A call that fails in the database returns `nil` (or `false`) and an error
+  message, the message of Firebird; a message of the driver itself starts
+  with `LuaSQL:`. A wrong use of the API raises an error instead: a closed
+  object, an argument of the wrong type, an invalid parameter.
+- An object is closed by its `close` method, by a to-be-closed variable
+  (`<close>`) or by the garbage collector.
+- An object can be closed only after the objects it created: an environment
+  after its connections, a connection after its cursors and statements.
+
+Besides the function @{firebird} and the table @{type}, the module holds the
+strings `_VERSION` (e.g. `"LuaSQL 2.8.1 (for Lua 5.5)"`), `_COPYRIGHT`,
+`_DESCRIPTION` and `_CLIENTVERSION` (the version of the client library, e.g.
+`"WI-V5.0.4.1812 Firebird 5.0"`).
+
+@module luasql.firebird
+@usage
+local driver = require "luasql.firebird"
+local env  = assert(driver.firebird())
+local conn = assert(env:connect("localhost:C:/data/fruit.fdb", "SYSDBA",
+                                os.getenv("ISC_PASSWORD")))
+local cur  = assert(conn:execute("SELECT id, name FROM fruit ORDER BY id"))
+local id, name = cur:fetch()
+while id do
+  print(id, name)
+  id, name = cur:fetch()
+end
+conn:close()
+env:close()
+*/
+
+/***
+Creates an environment.
+
+The environment opens connections. Create one per Lua state and open any
+number of connections on it.
+
+@function firebird
+@treturn environment the new environment
+@usage local env = assert(require("luasql.firebird").firebird())
+*/
+
+/***
+Type constants for parameters.
+
+A parameter of @{statement:execute} or @{connection:execute} is a plain Lua
+value or a pair `{value, type}` with one of these constants. A plain value is
+bound by its Lua type only, never by its content: an integer as `int`, a
+float as `number`, a string as `string`, a boolean as `boolean`. The pair is
+for what the Lua type does not say: binary data, dates and times, or a type
+wanted on purpose. `type.null` is NULL, alone or as the value of a pair
+(`{T.null, T.binary}`). Reading a field that does not exist raises an error,
+so a misspelled type is found at once. The
+@{02-prepared-statements.md|topic on prepared statements} explains the rules.
+
+The driver binds a value in a type of its own, and the server converts it to
+the type of the parameter, as it converts a literal of SQL: a string goes
+into a number or a date, an integer into a `VARCHAR`. A value it cannot
+convert gives `nil` and the message of Firebird.
+
+@table type
+@field int an integer; a float only if its value is integral, e.g.
+`{3.0, T.int}`. Bound as a `BIGINT`, exact
+@field number a float (or an integer), bound as a `DOUBLE PRECISION`
+@field string a string in UTF-8, bound as text in UTF8; an embedded `"\0"`
+is kept. Over 32767 bytes it is bound as a `BLOB SUB_TYPE TEXT`
+@field boolean `true` or `false`, bound as a `BOOLEAN`
+@field date a string `"YYYY-MM-DD"`, bound as a `DATE`, or
+`"YYYY-MM-DD HH:MM:SS"`, bound as a `TIMESTAMP`
+@field time a string `"HH:MM:SS"` with an optional fraction of a second,
+bound as a `TIME`; Firebird keeps four digits of the fraction, more are cut
+off
+@field timestamp a string `"YYYY-MM-DD"` with optional `" HH:MM:SS"` and
+fraction, bound as a `TIMESTAMP`
+@field binary a string of bytes, bound unchanged in the character set
+`OCTETS`; over 32767 bytes as a `BLOB`
+@field null NULL: a special value, not a number, the same in all drivers;
+alone or as the value of a pair
+@usage
+local T = require("luasql.firebird").type
+stmt:execute{ 42, "text", {"2026-11-15", T.date}, {data, T.binary}, T.null }
+*/
+
+
+/***
+An environment, created by @{firebird}.
+
+It opens connections. It can be closed only after all of its connections.
+@type environment
+*/
+
+/***
+A connection to a database, created by @{environment:connect}.
+
+It runs SQL statements, prepares statements and controls transactions. It can
+be closed only after all of its cursors and statements.
+@type connection
+*/
+
+/***
+A cursor over the rows of a query, created by @{connection:execute} or
+@{statement:execute}.
+
+The first row is read at the execute, the others one by one with
+@{cursor:fetch}. The cursor is closed automatically after its last row.
+@type cursor
+*/
+
+/***
+A prepared statement, created by @{connection:prepare}.
+
+It runs the same SQL statement many times, with parameters. The driver keeps
+the values given to it: a placeholder keeps its value until it gets a new
+one, @{statement:reset} is called or the statement is closed. The
+@{02-prepared-statements.md|topic on prepared statements} explains this in
+detail.
+@type statement
+*/
+
 #include <ibase.h>	/* The Firebird API*/
 #include <time.h>	/* For managing time values */
 #include <stdlib.h>
@@ -23,6 +157,7 @@
 #define LUASQL_ENVIRONMENT_FIREBIRD "Firebird environment"
 #define LUASQL_CONNECTION_FIREBIRD "Firebird connection"
 #define LUASQL_CURSOR_FIREBIRD "Firebird cursor"
+#define LUASQL_STATEMENT_FIREBIRD "Firebird statement"
 
 typedef struct {
 	short closed;
@@ -54,11 +189,43 @@ typedef struct {
 	short			dpb_length;		/* the used amount of the dpb */
 	tx_data*		tx;				/* the transaction with autocommit off */
 	tx_data*		tx_list;		/* all open transactions */
-	int				lock;			/* lock count for open cursors */
+	int				lock;			/* lock count for open cursors and
+									   statements */
 	int				autocommit;		/* should each statement be committed */
-	unsigned int	cursor_count;	/* for unique names of cursors */
+	int				stmts;			/* open statements (of the lock count) */
 	unsigned short	dialect;		/* the SQL dialect of the database */
 } conn_data;
+
+/*
+** The buffer of a parameter: its value as the client reads it, and its
+** NULL flag. Text is not copied: the XSQLVAR points into the Lua string.
+*/
+typedef struct {
+	union {
+		ISC_INT64		i;
+		double			d;
+		ISC_QUAD		q;			/* the id of a temporary BLOB */
+		ISC_TIMESTAMP	ts;
+		ISC_DATE		date;
+		ISC_TIME		time;
+		unsigned char	b;
+	} v;
+	short			ind;
+} param_slot;
+
+/*
+** A statement prepared by the client: its handle and type, its columns
+** with their buffers, and its parameters
+*/
+typedef struct {
+	isc_stmt_handle	handle;			/* the statement handle */
+	int				type;			/* the type of the statement */
+	XSQLDA			*out_sqlda;		/* the columns */
+	XSQLDA			*in_sqlda;		/* the parameters, NULL without */
+	param_slot		*slots;			/* the buffers of the parameters */
+} prep_data;
+
+struct stmt_data;
 
 typedef struct {
 	short			closed;
@@ -70,7 +237,26 @@ typedef struct {
 	tx_data*		tx;				/* the transaction it reads in */
 	int				single;			/* one row, read at the execute: 1 the
 									   row is to be fetched, 2 it was */
+	int				pending;		/* the first fetch, done at the execute:
+									   1 its row is in the buffers, 2 there
+									   are no rows */
+	struct stmt_data *owner;		/* the statement of the cursor; NULL if
+									   the cursor has the handle and the
+									   columns of its own */
 } cur_data;
+
+/*
+** A prepared statement of Lua. Its values are kept in a Lua table, at
+** [2i-1] the value of parameter i (nil for NULL), at [2i] its type, a
+** constant of luasql.type; a parameter without a value has no type.
+*/
+typedef struct stmt_data {
+	short			closed;
+	conn_data*		conn;			/* the DB connection this is from */
+	prep_data		prep;			/* the statement of the client */
+	int				values;			/* reference of the table of values */
+	cur_data*		cur;			/* the open cursor, or NULL */
+} stmt_data;
 
 /* Bytes of the longest text the server makes of a number with a scale */
 #define NUMERIC_TEXT_LENGTH 32
@@ -79,6 +265,14 @@ typedef struct {
    driver: the connection uses UTF8, the server converts all others */
 #define CHARSET_UNICODE_FSS 3
 #define CHARSET_UTF8 4
+
+/* Bytes, for binary parameters */
+#define CHARSET_OCTETS 1
+
+/* The longest parameter of type text; longer text and binary data go into
+   a temporary BLOB, written in segments of this size */
+#define TEXT_PARAM_MAX 32767
+#define BLOB_SEGMENT 32768
 
 /* The parameters of every transaction: the defaults of Firebird
    (SNAPSHOT, read and write, wait for locks without a limit) */
@@ -289,31 +483,70 @@ static void lua_unregisterobj(lua_State *L, void *obj)
 }
 
 /*
-** Free's up the memory alloc'd to the cursor data
+** Free's up the memory alloc'd to the columns
 */
-static void free_cur(cur_data* cur)
+static void free_sqlda(XSQLDA **psqlda)
 {
 	int i;
 	XSQLVAR *var;
+	XSQLDA *sqlda = *psqlda;
 
-	if (cur->out_sqlda == NULL)
+	if (sqlda == NULL)
 		return;
 
 	/* free the field memory blocks (free(NULL) does nothing) */
-	for (i=0, var = cur->out_sqlda->sqlvar; i < cur->out_sqlda->sqld; i++, var++) {
+	for (i=0, var = sqlda->sqlvar; i < sqlda->sqld; i++, var++) {
 		free(var->sqldata);
 		if(var->sqlind != NULL)
 			free(var->sqlind);
 	}
 
 	/* free the data array */
-	free(cur->out_sqlda);
-	cur->out_sqlda = NULL;
+	free(sqlda);
+	*psqlda = NULL;
 }
 
 /*
-** Shuts down a cursor: drops its statement and frees its data. A failure
-** of the client library is ignored, the cursor is closed all the same.
+** Frees a prepared statement but its columns, which a cursor can take
+** over: drops the handle (see drop_statement) and frees the parameters.
+** Their XSQLVARs point into the slots and into Lua strings.
+*/
+static void prep_release(prep_data *p)
+{
+	drop_statement(&p->handle);
+	free(p->in_sqlda);
+	p->in_sqlda = NULL;
+	free(p->slots);
+	p->slots = NULL;
+}
+
+/*
+** Frees a prepared statement
+*/
+static void prep_free(prep_data *p)
+{
+	prep_release(p);
+	free_sqlda(&p->out_sqlda);
+}
+
+/*
+** Closes the cursor of a prepared statement, so that the statement can
+** run again; the client keeps it open after the last row. Like
+** drop_statement it uses a status vector of its own and ignores a
+** failure, also the one for a cursor that is not open.
+*/
+static void close_cursor(isc_stmt_handle *stmt)
+{
+	ISC_STATUS_ARRAY status;
+
+	if (*stmt != 0)
+		isc_dsql_free_statement(status, stmt, DSQL_close);
+}
+
+/*
+** Shuts down a cursor: drops its statement and frees its data; the
+** cursor of a prepared statement only closes it. A failure of the client
+** library is ignored, the cursor is closed all the same.
 ** If the connection is already closed (order of the finalizers at the
 ** end of Lua), the client has freed the statement with the attachment,
 ** and the handles are not used again.
@@ -331,13 +564,22 @@ static int cur_shut(lua_State *L, cur_data *cur, ISC_STATUS *pvector)
 	tx_data *tx = cur->tx;
 	int ok = 1;
 
-	if (conn->closed)
+	if (cur->owner != NULL) {
+		/* the statement keeps its handle and its columns */
+		if (cur->single == 0 && !conn->closed)
+			close_cursor(&cur->stmt);
+		cur->stmt = 0;
+		cur->out_sqlda = NULL;
+		cur->owner->cur = NULL;
+		lua_unregisterobj(L, cur->owner);
+		cur->owner = NULL;
+	} else if (conn->closed)
 		cur->stmt = 0;
 	else
 		drop_statement(&cur->stmt);
 
 	/* free the cursor data */
-	free_cur(cur);
+	free_sqlda(&cur->out_sqlda);
 
 	/* the row of a statement that was read at the execute */
 	if (cur->single != 0)
@@ -396,6 +638,16 @@ static cur_data *getcursor (lua_State *L, int i) {
 }
 
 /*
+** Check for valid statement.
+*/
+static stmt_data *getstatement (lua_State *L, int i) {
+	stmt_data *stmt = (stmt_data *)luaL_checkudata (L, i, LUASQL_STATEMENT_FIREBIRD);
+	if (stmt->closed)
+		luaL_error (L, LUASQL_PREFIX "statement is closed");
+	return stmt;
+}
+
+/*
 ** Reads the item isc_info_sql_stmt_type of a reply of isc_dsql_sql_info.
 ** Returns the type, or -2 if the reply does not hold it.
 */
@@ -421,17 +673,17 @@ static int read_statement_type(char **ppres, const char *end)
 /*
 ** Returns the statement type
 */
-static int get_statement_type(cur_data* cur)
+static int get_statement_type(env_data *env, isc_stmt_handle *stmt)
 {
 	char type_item[] = { isc_info_sql_stmt_type };
 	char res_buffer[88], *pres;
 
 	pres = res_buffer;
 
-	isc_dsql_sql_info( cur->env->status_vector, &cur->stmt,
+	isc_dsql_sql_info( env->status_vector, stmt,
 						sizeof(type_item), type_item,
 						sizeof(res_buffer), res_buffer );
-	if (cur->env->status_vector[0] == 1 && cur->env->status_vector[1] > 0)
+	if (env->status_vector[0] == 1 && env->status_vector[1] > 0)
 		return -1;
 
 	/* check the type of the statement */
@@ -441,7 +693,7 @@ static int get_statement_type(cur_data* cur)
 /*
 ** Return the number of rows affected by last operation
 */
-static int count_rows_affected(cur_data* cur)
+static int count_rows_affected(env_data *env, isc_stmt_handle *stmt)
 {
 	int length, type, res=0;
 	int del_count = 0, ins_count = 0, upd_count = 0, sel_count = 0;
@@ -452,10 +704,10 @@ static int count_rows_affected(cur_data* cur)
 
 	pres = res_buffer;
 
-	isc_dsql_sql_info( cur->env->status_vector, &cur->stmt,
+	isc_dsql_sql_info( env->status_vector, stmt,
 						sizeof(type_item), type_item,
 						sizeof(res_buffer), res_buffer );
-	if (cur->env->status_vector[0] == 1 && cur->env->status_vector[1] > 0)
+	if (env->status_vector[0] == 1 && env->status_vector[1] > 0)
 		return -1;
 
 	/* check the type of the statement */
@@ -529,102 +781,75 @@ static void *malloc_zero(size_t len)
 }
 
 /*
-** Frees what conn_execute has allocated, rolls back the transaction of
-** the statement (autocommit on) and returns the error message. The
-** cleanup uses status vectors of its own, the message stays.
+** Frees what prep_statement has allocated and returns the error message.
+** The cleanup uses status vectors of its own, the message stays.
 */
-static int execute_fail(lua_State *L, cur_data *cur, tx_data *tx, const ISC_STATUS *pvector)
+static int prep_fail(lua_State *L, prep_data *p, const ISC_STATUS *pvector)
 {
-	free_cur(cur);
-	drop_statement(&cur->stmt);
-	tx_abort(cur->conn, tx);
+	prep_free(p);
 	return return_db_error(L, pvector);
 }
 
-static int execute_faildirect(lua_State *L, cur_data *cur, tx_data *tx, const char *err)
+static int prep_faildirect(lua_State *L, prep_data *p, const char *err)
 {
-	free_cur(cur);
-	drop_statement(&cur->stmt);
-	tx_abort(cur->conn, tx);
+	prep_free(p);
 	return luasql_faildirect(L, err);
 }
 
 static int push_column(lua_State *L, int i, cur_data *cur, isc_tr_handle *tr);
 
 /*
-** Executes a SQL statement.
-** Returns
-**   cursor object: if there are results or
-**   row count: number of rows affected by statement if no results
+** Prepares an SQL statement in the transaction tx: allocates the handle,
+** prepares the text, checks the type of the statement and describes its
+** columns, with buffers for them, and its parameters.
+** Returns 0, or 2 after pushing nil and an error message; p is freed
+** then. The transaction is left to the caller.
 */
-static int conn_execute (lua_State *L) {
-	conn_data *conn = getconnection(L,1);
-	const char *statement = luaL_checkstring(L, 2);
-
+static int prep_statement(lua_State *L, conn_data *conn, tx_data *tx,
+						  const char *statement, prep_data *p)
+{
 	XSQLVAR *var;
 	long dtype;
-	int i, n, count, res, ud;
+	int i, n;
 
-	cur_data cur;
-	cur_data* user_cur;
-	tx_data *tx = NULL;
+	p->handle = 0;
+	p->in_sqlda = NULL;
+	p->slots = NULL;
 
-	/* The userdata of a cursor is made first, before anything is
-	   allocated, so that a failure of memory here leaves nothing behind.
-	   It gets its metatable only at the end, when it is filled: until then
-	   it is plain garbage after an error, and __gc never sees it empty. */
-	user_cur = (cur_data*)LUASQL_NEWUD(L, sizeof(cur_data));
-	ud = lua_gettop(L);
-
-	cur.closed = 0;
-	cur.env = conn->env;
-	cur.conn = conn;
-	cur.stmt = 0;
-	cur.tx = NULL;
-	cur.single = 0;
-
-	cur.out_sqlda = (XSQLDA *)malloc(XSQLDA_LENGTH(CURSOR_PREALLOC));
-	if (cur.out_sqlda == NULL)
+	p->out_sqlda = (XSQLDA *)malloc(XSQLDA_LENGTH(CURSOR_PREALLOC));
+	if (p->out_sqlda == NULL)
 		return luasql_faildirect(L, "out of memory");
-	cur.out_sqlda->version = SQLDA_VERSION1;
-	cur.out_sqlda->sqln = CURSOR_PREALLOC;
-	cur.out_sqlda->sqld = 0;
-
-	/* the transaction of the statement: its own with autocommit on, else
-	   the one of the connection */
-	if ((res = tx_get(L, conn, &tx)) != 0) {
-		free_cur(&cur);
-		return res;
-	}
+	p->out_sqlda->version = SQLDA_VERSION1;
+	p->out_sqlda->sqln = CURSOR_PREALLOC;
+	p->out_sqlda->sqld = 0;
 
 	/* create a statement to handle the query */
-	isc_dsql_allocate_statement(conn->env->status_vector, &conn->db, &cur.stmt);
+	isc_dsql_allocate_statement(conn->env->status_vector, &conn->db, &p->handle);
 	if ( CHECK_DB_ERROR(conn->env->status_vector) ) {
-		cur.out_sqlda->sqld = 0;
-		return execute_fail(L, &cur, tx, conn->env->status_vector);
+		p->out_sqlda->sqld = 0;
+		return prep_fail(L, p, conn->env->status_vector);
 	}
 
 	/* process the SQL ready to run the query */
-	isc_dsql_prepare(conn->env->status_vector, &tx->handle, &cur.stmt, 0, (char*)statement, conn->dialect, cur.out_sqlda);
+	isc_dsql_prepare(conn->env->status_vector, &tx->handle, &p->handle, 0, (char*)statement, conn->dialect, p->out_sqlda);
 	if ( CHECK_DB_ERROR(conn->env->status_vector) ) {
-		cur.out_sqlda->sqld = 0;
-		return execute_fail(L, &cur, tx, conn->env->status_vector);
+		p->out_sqlda->sqld = 0;
+		return prep_fail(L, p, conn->env->status_vector);
 	}
 
-	/* no field memory yet: free_cur must not free anything but the array */
-	n = cur.out_sqlda->sqld;
-	cur.out_sqlda->sqld = 0;
+	/* no field memory yet: free_sqlda must not free anything but the array */
+	n = p->out_sqlda->sqld;
+	p->out_sqlda->sqld = 0;
 
 	/* what type of SQL statement is it? */
-	cur.stmt_type = get_statement_type(&cur);
-	if(cur.stmt_type < 0) {
-		free_cur(&cur);
-		drop_statement(&cur.stmt);
-		tx_abort(conn, tx);
-		return return_info_error(L, cur.stmt_type, conn->env->status_vector);
+	p->type = get_statement_type(conn->env, &p->handle);
+	if(p->type < 0) {
+		i = p->type;
+		prep_free(p);
+		return return_info_error(L, i, conn->env->status_vector);
 	}
 
-	switch(cur.stmt_type) {
+	switch(p->type) {
 	case isc_info_sql_stmt_select:
 	case isc_info_sql_stmt_select_for_upd:
 	case isc_info_sql_stmt_insert:
@@ -638,39 +863,39 @@ static int conn_execute (lua_State *L) {
 	case isc_info_sql_stmt_rollback:
 	case isc_info_sql_stmt_start_trans:
 		/* the driver holds the transactions */
-		return execute_faildirect(L, &cur, tx, "unsupported SQL statement"
+		return prep_faildirect(L, p, "unsupported SQL statement"
 			" (use conn:commit, conn:rollback and conn:setautocommit)");
 	default:
-		return execute_faildirect(L, &cur, tx, "unsupported SQL statement");
+		return prep_faildirect(L, p, "unsupported SQL statement");
 	}
 
 	/* resize the result set if needed */
-	if (n > cur.out_sqlda->sqln)
+	if (n > p->out_sqlda->sqln)
 	{
-		free(cur.out_sqlda);
-		cur.out_sqlda = (XSQLDA *)malloc(XSQLDA_LENGTH(n));
-		if (cur.out_sqlda == NULL)
-			return execute_faildirect(L, &cur, tx, "out of memory");
-		cur.out_sqlda->sqln = n;
-		cur.out_sqlda->sqld = 0;
-		cur.out_sqlda->version = SQLDA_VERSION1;
-		isc_dsql_describe(conn->env->status_vector, &cur.stmt, 1, cur.out_sqlda);
+		free(p->out_sqlda);
+		p->out_sqlda = (XSQLDA *)malloc(XSQLDA_LENGTH(n));
+		if (p->out_sqlda == NULL)
+			return prep_faildirect(L, p, "out of memory");
+		p->out_sqlda->sqln = n;
+		p->out_sqlda->sqld = 0;
+		p->out_sqlda->version = SQLDA_VERSION1;
+		isc_dsql_describe(conn->env->status_vector, &p->handle, 1, p->out_sqlda);
 		if ( CHECK_DB_ERROR(conn->env->status_vector) ) {
-			cur.out_sqlda->sqld = 0;
-			return execute_fail(L, &cur, tx, conn->env->status_vector);
+			p->out_sqlda->sqld = 0;
+			return prep_fail(L, p, conn->env->status_vector);
 		}
 	}
-	cur.out_sqlda->sqld = n;
+	p->out_sqlda->sqld = n;
 
 	/* the XSQLDA comes from malloc, not zeroed: no field memory yet, so
-	   that free_cur works at any point below */
-	for (i=0, var = cur.out_sqlda->sqlvar; i < cur.out_sqlda->sqld; i++, var++) {
+	   that free_sqlda works at any point below */
+	for (i=0, var = p->out_sqlda->sqlvar; i < p->out_sqlda->sqld; i++, var++) {
 		var->sqldata = NULL;
 		var->sqlind = NULL;
 	}
 
 	/* prep the result set ready to handle the data */
-	for (i=0, var = cur.out_sqlda->sqlvar; i < cur.out_sqlda->sqld; i++, var++) {
+	for (i=0, var = p->out_sqlda->sqlvar; i < p->out_sqlda->sqld; i++, var++) {
 		dtype = (var->sqltype & ~1); /* drop flag bit for now */
 
 		/* A type this driver does not know (INT128, DECFLOAT, the TIME ZONE
@@ -744,46 +969,419 @@ static int conn_execute (lua_State *L) {
 		/* TODO : add extra data type handles here */
 		}
 		if (var->sqldata == NULL)
-			return execute_faildirect(L, &cur, tx, "out of memory");
+			return prep_faildirect(L, p, "out of memory");
 
 		if (var->sqltype & 1) {
 			/* allocate variable to hold NULL status */
 			var->sqlind = (short *)malloc(sizeof(short));
 			if (var->sqlind == NULL)
-				return execute_faildirect(L, &cur, tx, "out of memory");
+				return prep_faildirect(L, p, "out of memory");
 		}
 	}
 
-	if (n > 0 && cur.stmt_type != isc_info_sql_stmt_select &&
-	    cur.stmt_type != isc_info_sql_stmt_select_for_upd) {
+	/* the parameters: their number and types; the driver binds its own
+	   types, the server converts them */
+	p->in_sqlda = (XSQLDA *)malloc(XSQLDA_LENGTH(1));
+	if (p->in_sqlda == NULL)
+		return prep_faildirect(L, p, "out of memory");
+	p->in_sqlda->version = SQLDA_VERSION1;
+	p->in_sqlda->sqln = 1;
+	p->in_sqlda->sqld = 0;
+	isc_dsql_describe_bind(conn->env->status_vector, &p->handle, 1, p->in_sqlda);
+	if ( CHECK_DB_ERROR(conn->env->status_vector) )
+		return prep_fail(L, p, conn->env->status_vector);
+	n = p->in_sqlda->sqld;
+	if (n == 0) {
+		free(p->in_sqlda);
+		p->in_sqlda = NULL;
+		return 0;
+	}
+	if (n > 1) {
+		free(p->in_sqlda);
+		p->in_sqlda = (XSQLDA *)malloc(XSQLDA_LENGTH(n));
+		if (p->in_sqlda == NULL)
+			return prep_faildirect(L, p, "out of memory");
+		p->in_sqlda->version = SQLDA_VERSION1;
+		p->in_sqlda->sqln = n;
+		p->in_sqlda->sqld = 0;
+		isc_dsql_describe_bind(conn->env->status_vector, &p->handle, 1, p->in_sqlda);
+		if ( CHECK_DB_ERROR(conn->env->status_vector) )
+			return prep_fail(L, p, conn->env->status_vector);
+	}
+	p->slots = (param_slot *)malloc(n * sizeof(param_slot));
+	if (p->slots == NULL)
+		return prep_faildirect(L, p, "out of memory");
+	return 0;
+}
+
+/*
+** The number of parameters of a prepared statement
+*/
+static int param_count(const prep_data *p)
+{
+	return (p->in_sqlda != NULL) ? p->in_sqlda->sqld : 0;
+}
+
+/*
+** Checks the parameters of an execute, nargs values from stack index
+** first: one table is a table of parameters, anything else are variable
+** arguments. Raises an error if a parameter is invalid, also for names:
+** Firebird has the placeholder ? only. It must be called before anything
+** is allocated for the execution.
+** Returns 1 for a table of parameters.
+*/
+static int check_params(lua_State *L, int first, int nargs)
+{
+	if (nargs == 1 && lua_istable(L, first)) {
+		int is_named;
+		luasql_validate_params(L, first, &is_named, NULL);
+		if (is_named)
+			return luaL_error(L, LUASQL_PREFIX "named parameters are not"
+				" supported, Firebird has positions (?) only");
+		return 1;
+	}
+	luasql_validate_args(L, first, first + nargs - 1);
+	return 0;
+}
+
+/*
+** Checks the value at stack index idx (checked before with
+** luasql_check_param) for what its Lua type does not tell: the form of a
+** date or time.
+** Returns 0, or 2 after pushing nil and an error message
+*/
+static int check_value(lua_State *L, int idx)
+{
+	int is_null, ok = 1;
+	int type = luasql_check_param(L, idx, &is_null);
+
+	if (!is_null && (type == LUASQL_TYPE_DATE || type == LUASQL_TYPE_TIME
+					 || type == LUASQL_TYPE_TIMESTAMP)) {
+		size_t len;
+		luasql_datetime dt;
+		const char *s = lua_tolstring(L, -1, &len);
+		ok = luasql_parse_datetime(s, len, type, &dt);
+	}
+	lua_pop(L, 1);
+	if (ok)
+		return 0;
+	return luasql_datetime_fail(L, type);
+}
+
+/*
+** Stores the value at stack index idx (checked before) as the value of
+** parameter pos in the table of values at vt; NULL has the type
+** LUASQL_TYPE_NULL, also with a type given.
+*/
+static void store_value(lua_State *L, int vt, int pos, int idx)
+{
+	int is_null;
+	int type = luasql_check_param(L, idx, &is_null);
+
+	if (is_null)
+		type = LUASQL_TYPE_NULL;
+	lua_rawseti(L, vt, 2 * pos - 1);
+	lua_pushinteger(L, type);
+	lua_rawseti(L, vt, 2 * pos);
+}
+
+/*
+** Takes over the parameters of an execute (checked before with
+** check_params) into the table of values at vt, for a statement with n
+** parameters: one table changes the values of the positions in it,
+** variable arguments set all of them. Everything is checked first: on an
+** error nothing is taken over.
+** Returns 0, or 2 after pushing nil and an error message
+*/
+static int set_values(lua_State *L, int vt, int n, int first, int nargs,
+					  int is_table)
+{
+	int pass, i, res;
+
+	if (is_table) {
+		for (pass = 0; pass < 2; pass++) {
+			lua_pushnil(L);
+			while (lua_next(L, first) != 0) {
+				int top = lua_gettop(L);
+				lua_Integer pos = lua_tointeger(L, top - 1);
+				if (pos > n) {
+					const char *key;
+					lua_pushvalue(L, top - 1);
+					key = lua_tostring(L, -1);
+					lua_pushnil(L);
+					lua_pushfstring(L, LUASQL_PREFIX "statement has %d parameter%s,"
+						" no position %s", n, (n == 1) ? "" : "s", key);
+					return 2;
+				}
+				if (pass == 0) {
+					if ((res = check_value(L, top)) != 0)
+						return res;
+				} else
+					store_value(L, vt, (int)pos, top);
+				lua_pop(L, 1);	/* the value, the key stays for lua_next */
+			}
+		}
+		return 0;
+	}
+
+	if (nargs != n) {
+		lua_pushnil(L);
+		lua_pushfstring(L, LUASQL_PREFIX "statement has %d parameter%s,"
+			" %d given", n, (n == 1) ? "" : "s", nargs);
+		return 2;
+	}
+	for (i = first; i < first + nargs; i++)
+		if ((res = check_value(L, i)) != 0)
+			return res;
+	for (i = first; i < first + nargs; i++)
+		store_value(L, vt, i - first + 1, i);
+	return 0;
+}
+
+/*
+** Writes data into a new temporary BLOB of the transaction tx and gives
+** its id. The server makes it the value of the parameter, or frees it
+** with the transaction.
+** Returns 0, or 2 after pushing nil and an error message
+*/
+static int create_blob(lua_State *L, conn_data *conn, tx_data *tx,
+					   const char *s, size_t len, ISC_QUAD *id)
+{
+	ISC_STATUS_ARRAY status;
+	isc_blob_handle blob = 0;
+	size_t pos = 0;
+	unsigned short seg;
+
+	isc_create_blob2(conn->env->status_vector, &conn->db, &tx->handle,
+					 &blob, id, 0, NULL);
+	if ( CHECK_DB_ERROR(conn->env->status_vector) )
+		return return_db_error(L, conn->env->status_vector);
+	while (pos < len) {
+		seg = (unsigned short)((len - pos > BLOB_SEGMENT) ? BLOB_SEGMENT
+							   : len - pos);
+		isc_put_segment(conn->env->status_vector, &blob, seg, (char *)s + pos);
+		if ( CHECK_DB_ERROR(conn->env->status_vector) ) {
+			isc_cancel_blob(status, &blob);
+			return return_db_error(L, conn->env->status_vector);
+		}
+		pos += seg;
+	}
+	isc_close_blob(conn->env->status_vector, &blob);
+	if ( CHECK_DB_ERROR(conn->env->status_vector) ) {
+		if (blob != 0)
+			isc_cancel_blob(status, &blob);
+		return return_db_error(L, conn->env->status_vector);
+	}
+	return 0;
+}
+
+/*
+** Binds the values of the table at vt to the parameters of a prepared
+** statement, for an execute in the transaction tx. A value is bound in
+** the type of the driver for its luasql.type, the server converts it to
+** the type of the parameter. Text and binary data longer than
+** TEXT_PARAM_MAX go into a temporary BLOB.
+** Returns 0, or 2 after pushing nil and an error message
+*/
+static int bind_values(lua_State *L, conn_data *conn, tx_data *tx,
+					   prep_data *p, int vt)
+{
+	int i, type;
+	XSQLVAR *var;
+	param_slot *slot;
+	size_t len;
+	const char *s;
+	luasql_datetime dt;
+	struct tm tm;
+	ISC_TIME frac;
+
+	for (i = 0, var = p->in_sqlda->sqlvar, slot = p->slots;
+		 i < p->in_sqlda->sqld; i++, var++, slot++) {
+		lua_rawgeti(L, vt, 2 * i + 2);
+		type = lua_isnil(L, -1) ? -1 : (int)lua_tointeger(L, -1);
+		lua_pop(L, 1);
+		if (type < 0) {
+			lua_pushnil(L);
+			lua_pushfstring(L, LUASQL_PREFIX "parameter %d has no value", i + 1);
+			return 2;
+		}
+
+		lua_rawgeti(L, vt, 2 * i + 1);	/* the value */
+		var->sqldata = (char *)&slot->v;
+		var->sqlind = &slot->ind;
+		var->sqlscale = 0;
+		var->sqlsubtype = 0;
+		slot->ind = 0;
+		switch (type) {
+		case LUASQL_TYPE_NULL:
+			/* text goes into a parameter of any type */
+			var->sqltype = SQL_TEXT + 1;
+			var->sqllen = 1;
+			slot->ind = -1;
+			break;
+		case LUASQL_TYPE_INT:
+			var->sqltype = SQL_INT64 + 1;
+			var->sqllen = sizeof(ISC_INT64);
+			slot->v.i = (ISC_INT64)lua_tointeger(L, -1);
+			break;
+		case LUASQL_TYPE_NUMBER:
+			var->sqltype = SQL_DOUBLE + 1;
+			var->sqllen = sizeof(double);
+			slot->v.d = (double)lua_tonumber(L, -1);
+			break;
+		case LUASQL_TYPE_BOOLEAN:
+			var->sqltype = SQL_BOOLEAN + 1;
+			var->sqllen = 1;
+			slot->v.b = (unsigned char)(lua_toboolean(L, -1) != 0);
+			break;
+		case LUASQL_TYPE_DATE:
+		case LUASQL_TYPE_TIME:
+		case LUASQL_TYPE_TIMESTAMP:
+			s = lua_tolstring(L, -1, &len);
+			luasql_parse_datetime(s, len, type, &dt);	/* valid here */
+			memset(&tm, 0, sizeof(tm));
+			tm.tm_year = dt.year - 1900;
+			tm.tm_mon = dt.month - 1;
+			tm.tm_mday = dt.day;
+			tm.tm_hour = dt.hour;
+			tm.tm_min = dt.minute;
+			tm.tm_sec = dt.second;
+			/* Firebird keeps 1/10000 s, more digits are cut off */
+			frac = (ISC_TIME)(dt.nanos / 100000);
+			if (type == LUASQL_TYPE_TIME) {
+				isc_encode_sql_time(&tm, &slot->v.time);
+				slot->v.time += frac;
+				var->sqltype = SQL_TYPE_TIME + 1;
+				var->sqllen = sizeof(ISC_TIME);
+			} else if (type == LUASQL_TYPE_DATE && !dt.has_time) {
+				isc_encode_sql_date(&tm, &slot->v.date);
+				var->sqltype = SQL_TYPE_DATE + 1;
+				var->sqllen = sizeof(ISC_DATE);
+			} else {
+				/* T.timestamp, and T.date with a time */
+				isc_encode_timestamp(&tm, &slot->v.ts);
+				slot->v.ts.timestamp_time += frac;
+				var->sqltype = SQL_TIMESTAMP + 1;
+				var->sqllen = sizeof(ISC_TIMESTAMP);
+			}
+			break;
+		default:
+			/* T.string and T.binary: text in UTF-8, or bytes */
+			s = lua_tolstring(L, -1, &len);
+			if (len <= TEXT_PARAM_MAX) {
+				/* not copied: the table of values keeps the string */
+				var->sqltype = SQL_TEXT + 1;
+				var->sqllen = (ISC_SHORT)len;
+				var->sqldata = (char *)s;
+				var->sqlsubtype = (type == LUASQL_TYPE_BINARY) ? CHARSET_OCTETS
+					: CHARSET_UTF8;
+				break;
+			}
+			if (create_blob(L, conn, tx, s, len, &slot->v.q) != 0)
+				return 2;
+			var->sqltype = SQL_BLOB + 1;
+			var->sqllen = sizeof(ISC_QUAD);
+			if (type != LUASQL_TYPE_BINARY) {
+				var->sqlsubtype = isc_blob_text;
+				var->sqlscale = CHARSET_UTF8;	/* the character set */
+			}
+			break;
+		}
+		lua_pop(L, 1);
+	}
+	return 0;
+}
+
+/*
+** Cleans up after a failed execute: frees the prepared statement of
+** conn:execute, or closes the cursor of a statement if it was opened,
+** and rolls back the transaction of the statement (autocommit on). The
+** cleanup uses status vectors of its own, an error message stays.
+*/
+static void run_abort(conn_data *conn, tx_data *tx, prep_data *p,
+					  stmt_data *owner, int opened)
+{
+	if (owner == NULL)
+		prep_free(p);
+	else if (opened)
+		close_cursor(&p->handle);
+	tx_abort(conn, tx);
+}
+
+/*
+** Executes a prepared statement in the transaction tx, with the values
+** of the table at vt if it has parameters, and pushes the result: a
+** cursor in the userdata user_cur at stack index ud, for a query or a
+** statement with one row of output, else the number of rows. owner is
+** the statement object at index 1 (stmt:execute), or NULL (conn:execute):
+** then a cursor takes over the handle and the columns, and the rest of p
+** is freed.
+** The first row of a query is read here: the client opens the cursor of
+** a SELECT only with the next call on the statement, so that an error of
+** the open, and of the first row, is an error of the execute.
+** Returns the number of results
+*/
+static int run_statement(lua_State *L, conn_data *conn, tx_data *tx,
+						 prep_data *p, stmt_data *owner, int vt,
+						 cur_data *user_cur, int ud)
+{
+	int i, n, res, count;
+	ISC_STATUS fetch_stat;
+	cur_data cur;
+
+	cur.closed = 0;
+	cur.env = conn->env;
+	cur.conn = conn;
+	cur.stmt = p->handle;
+	cur.stmt_type = p->type;
+	cur.out_sqlda = p->out_sqlda;
+	cur.tx = NULL;
+	cur.single = 0;
+	cur.pending = 0;
+	cur.owner = owner;
+	n = p->out_sqlda->sqld;
+
+	/* bind the parameters */
+	if (p->in_sqlda != NULL && (res = bind_values(L, conn, tx, p, vt)) != 0) {
+		run_abort(conn, tx, p, owner, 0);
+		return res;
+	}
+
+	if (n > 0 && p->type != isc_info_sql_stmt_select &&
+	    p->type != isc_info_sql_stmt_select_for_upd) {
 		/* A statement with one row of output and no cursor (INSERT ...
 		   RETURNING, EXECUTE PROCEDURE): the client gives the row with the
 		   execute. It is turned into Lua values here, BLOBs included, so
 		   the cursor needs neither the statement nor the transaction. A
 		   failure of memory in Lua here leaves the statement and the
 		   transaction to the end of the connection. */
-		isc_dsql_execute2(conn->env->status_vector, &tx->handle, &cur.stmt, 1, NULL, cur.out_sqlda);
-		if ( CHECK_DB_ERROR(conn->env->status_vector) )
-			return execute_fail(L, &cur, tx, conn->env->status_vector);
+		isc_dsql_execute2(conn->env->status_vector, &tx->handle, &p->handle, 1, p->in_sqlda, p->out_sqlda);
+		if ( CHECK_DB_ERROR(conn->env->status_vector) ) {
+			run_abort(conn, tx, p, owner, 0);
+			return return_db_error(L, conn->env->status_vector);
+		}
 
 		lua_createtable(L, n, 0);
 		for (i = 0; i < n; i++) {
 			if (push_column(L, i, &cur, &tx->handle) != 0) {
 				/* nil and the message are on the stack */
-				free_cur(&cur);
-				drop_statement(&cur.stmt);
-				tx_abort(conn, tx);
+				run_abort(conn, tx, p, owner, 0);
 				return 2;
 			}
 			lua_rawseti(L, -2, i + 1);
 		}
-		drop_statement(&cur.stmt);
+		if (owner == NULL) {
+			prep_release(p);
+			cur.stmt = 0;
+		}
 
 		/* with autocommit on the statement is committed now */
 		if (tx != conn->tx) {
 			isc_commit_transaction(conn->env->status_vector, &tx->handle);
-			if ( CHECK_DB_ERROR(conn->env->status_vector) )
-				return execute_fail(L, &cur, tx, conn->env->status_vector);
+			if ( CHECK_DB_ERROR(conn->env->status_vector) ) {
+				run_abort(conn, tx, p, owner, 0);
+				return return_db_error(L, conn->env->status_vector);
+			}
 			tx_free(conn, tx);
 		}
 
@@ -792,77 +1390,427 @@ static int conn_execute (lua_State *L) {
 		lua_insert(L, -2);
 		lua_settable(L, LUA_REGISTRYINDEX);
 		cur.single = 1;
+	} else {
+		/* run the query */
+		isc_dsql_execute(conn->env->status_vector, &tx->handle, &p->handle, 1, p->in_sqlda);
+		if ( CHECK_DB_ERROR(conn->env->status_vector) ) {
+			run_abort(conn, tx, p, owner, 0);
+			return return_db_error(L, conn->env->status_vector);
+		}
 
-		lua_registerobj(L, 1, conn);
-		++conn->lock;
+		if (n == 0) { /* a count */
+			if( (count = count_rows_affected(conn->env, &p->handle)) < 0 ) {
+				run_abort(conn, tx, p, owner, 0);
+				return return_info_error(L, count, conn->env->status_vector);
+			}
 
-		memcpy((void*)user_cur, (void*)&cur, sizeof(cur_data));
-		lua_settop(L, ud);
-		luasql_setmeta (L, LUASQL_CURSOR_FIREBIRD);
-		return 1;
-	}
+			/* totally finished with the statement of conn:execute */
+			if (owner == NULL)
+				prep_free(p);
 
-	/* run the query */
-	isc_dsql_execute(conn->env->status_vector, &tx->handle, &cur.stmt, 1, NULL);
-	if ( CHECK_DB_ERROR(conn->env->status_vector) )
-		return execute_fail(L, &cur, tx, conn->env->status_vector);
+			/* with autocommit on the statement is committed now */
+			if (tx != conn->tx) {
+				isc_commit_transaction(conn->env->status_vector, &tx->handle);
+				if ( CHECK_DB_ERROR(conn->env->status_vector) ) {
+					return_db_error(L, conn->env->status_vector);
+					tx_end(conn, tx, 0, NULL);
+					return 2;
+				}
+				tx_free(conn, tx);
+			}
 
-	/* what do we return? a cursor or a count */
-	if(cur.out_sqlda->sqld > 0) { /* a cursor */
-		char cur_name[32];
+			lua_pushinteger(L, count);
+			return 1;
+		}
 
-		/* A name that is unique in the attachment: the server keeps the
-		   name until the statement is dropped. */
-		sprintf(cur_name, "LUASQL_CURSOR_%u", ++conn->cursor_count);
-
-		/* open the cursor ready for fetch cycles; the client opens the
-		   cursor of a SELECT only with the next call on the statement, so
-		   an error of the open comes here */
-		isc_dsql_set_cursor_name(conn->env->status_vector, &cur.stmt, cur_name, 0);
-		if ( CHECK_DB_ERROR(conn->env->status_vector) )
-			return execute_fail(L, &cur, tx, conn->env->status_vector);
+		/* a cursor: open it with its first row */
+		fetch_stat = isc_dsql_fetch(conn->env->status_vector, &p->handle, 1, p->out_sqlda);
+		if (fetch_stat != 0 && fetch_stat != 100L) {
+			run_abort(conn, tx, p, owner, 1);
+			return return_db_error(L, conn->env->status_vector);
+		}
+		cur.pending = (fetch_stat == 0) ? 1 : 2;
 
 		/* the cursor reads in the transaction and keeps it open */
 		cur.tx = tx;
 		++tx->cursors;
-
-		/* add cursor to the lock count; if lua_settable fails for lack of
-		   memory, the userdata stays without a metatable and the client
-		   frees the statement with the attachment */
-		lua_registerobj(L, 1, conn);
-		++conn->lock;
-
-		/* copy the cursor into the userdata, then make it a cursor */
-		memcpy((void*)user_cur, (void*)&cur, sizeof(cur_data));
-		lua_settop(L, ud);
-		luasql_setmeta (L, LUASQL_CURSOR_FIREBIRD);
-	} else { /* a count */
-		if( (count = count_rows_affected(&cur)) < 0 ) {
-			free_cur(&cur);
-			drop_statement(&cur.stmt);
-			tx_abort(conn, tx);
-			return return_info_error(L, count, conn->env->status_vector);
+		if (owner == NULL) {
+			p->handle = 0;	/* the cursor has the handle now */
+			prep_release(p);
 		}
-
-		/* totally finished with the cursor */
-		free_cur(&cur);
-		drop_statement(&cur.stmt);
-
-		/* with autocommit on the statement is committed now */
-		if (tx != conn->tx) {
-			isc_commit_transaction(conn->env->status_vector, &tx->handle);
-			if ( CHECK_DB_ERROR(conn->env->status_vector) ) {
-				return_db_error(L, conn->env->status_vector);
-				tx_end(conn, tx, 0, NULL);
-				return 2;
-			}
-			tx_free(conn, tx);
-		}
-
-		lua_pushinteger(L, count);
 	}
 
+	/* add cursor to the lock count; if lua_settable fails for lack of
+	   memory, the userdata stays without a metatable and the client
+	   frees the statement with the attachment. The cursor of a statement
+	   keeps the statement, which keeps the connection. */
+	if (owner != NULL) {
+		lua_registerobj(L, 1, owner);
+		owner->cur = user_cur;
+	} else {
+		lua_registerobj(L, 1, conn);
+		p->out_sqlda = NULL;	/* the cursor has the columns now */
+	}
+	++conn->lock;
+
+	/* copy the cursor into the userdata, then make it a cursor */
+	memcpy((void*)user_cur, (void*)&cur, sizeof(cur_data));
+	lua_settop(L, ud);
+	luasql_setmeta (L, LUASQL_CURSOR_FIREBIRD);
 	return 1;
+}
+
+/*** @type connection */
+/***
+Runs an SQL statement, with parameters if given.
+
+The text holds one statement. With autocommit on, it runs in a transaction
+of its own, which ends with the statement, or for a query with its cursor.
+With autocommit off it runs in the transaction of the connection, which the
+first statement starts. `COMMIT`, `ROLLBACK` and `SET TRANSACTION` are
+refused: use @{connection:commit}, @{connection:rollback} and
+@{connection:setautocommit}.
+
+Parameters are given as in @{statement:execute}: one table of parameters,
+or variable arguments by position. With variable arguments, their number
+must be the number of placeholders `?`, else the result is `nil` and a
+message; this holds without arguments too. The statement is prepared at
+each call; for a statement that runs many times, use @{connection:prepare}.
+
+A query returns a cursor; its first row is read here, so an error of the
+query comes from this call. `INSERT ... RETURNING` and `EXECUTE PROCEDURE`
+return a cursor with their one row, which is read here as well.
+
+@function execute
+@tparam string sql the SQL statement
+@param[opt] ... a table of parameters, or the parameters themselves
+@treturn[1] cursor a cursor for a query or a statement with output
+@treturn[2] integer the number of rows changed, for any other statement
+@treturn[3] nil
+@treturn[3] string error message
+@raise if a parameter is not valid, as in @{statement:execute}
+@usage
+local n = assert(conn:execute("UPDATE emp SET sal = sal * 1.1 WHERE dept = ?", 10))
+print(n .. " rows updated")
+local cur = assert(conn:execute("SELECT name FROM emp WHERE id = ?", 7))
+*/
+/*
+** Executes a SQL statement, with parameters if given: it is prepared,
+** executed and dropped.
+** Returns
+**   cursor object: if there are results or
+**   row count: number of rows affected by statement if no results
+*/
+static int conn_execute (lua_State *L) {
+	conn_data *conn = getconnection(L,1);
+	const char *statement = luaL_checkstring(L, 2);
+	/* parameters as in stmt:execute: one table, or variable arguments */
+	int nargs = lua_gettop(L) - 2;
+	/* checked before anything is allocated (raises an error if one is
+	   invalid) */
+	int is_table = check_params(L, 3, nargs);
+	int res, ud, vt;
+	prep_data prep;
+	cur_data* user_cur;
+	tx_data *tx = NULL;
+
+	/* The userdata of a cursor is made first, before anything is
+	   allocated, so that a failure of memory here leaves nothing behind.
+	   It gets its metatable only at the end, when it is filled: until then
+	   it is plain garbage after an error, and __gc never sees it empty.
+	   So is the table of the values. */
+	user_cur = (cur_data*)LUASQL_NEWUD(L, sizeof(cur_data));
+	ud = lua_gettop(L);
+	lua_newtable(L);
+	vt = lua_gettop(L);
+
+	/* the transaction of the statement: its own with autocommit on, else
+	   the one of the connection */
+	if ((res = tx_get(L, conn, &tx)) != 0)
+		return res;
+
+	if ((res = prep_statement(L, conn, tx, statement, &prep)) != 0) {
+		tx_abort(conn, tx);
+		return res;
+	}
+
+	/* the values, as a statement keeps them */
+	if ((res = set_values(L, vt, param_count(&prep), 3, nargs, is_table)) != 0) {
+		prep_free(&prep);
+		tx_abort(conn, tx);
+		return res;
+	}
+
+	return run_statement(L, conn, tx, &prep, NULL, vt, user_cur, ud);
+}
+
+/*** @type connection */
+/***
+Prepares a statement for execution with parameters.
+
+The statement is prepared once and can then be executed many times, with
+parameters given as placeholders `?`, by position. Names are not supported:
+Firebird knows the placeholder `?` only. The text must hold one statement,
+of the kinds @{connection:execute} takes.
+
+The statement stays valid over commits and rollbacks. With autocommit on it
+is prepared in a short transaction of its own; with autocommit off in the
+transaction of the connection, which it starts if there is none.
+
+The server must know the type of each parameter from its place in the
+statement: `SELECT ?` fails, `SELECT CAST(? AS INTEGER)` works.
+
+@function prepare
+@tparam string sql the SQL statement
+@treturn[1] statement the prepared statement
+@treturn[2] nil
+@treturn[2] string error message, e.g. for a syntax error or a parameter of
+unknown type
+@usage
+local stmt = assert(conn:prepare("INSERT INTO emp (id, name) VALUES (?, ?)"))
+assert(stmt:execute(1, "Smith"))
+assert(stmt:execute{ 2, "Jones" })
+stmt:close()
+@see statement
+*/
+/*
+** Prepares an SQL statement.
+** Returns the statement object.
+*/
+static int conn_prepare (lua_State *L) {
+	conn_data *conn = getconnection(L,1);
+	const char *statement = luaL_checkstring(L, 2);
+	stmt_data *stmt;
+	tx_data *tx = NULL;
+	int res;
+
+	/* the userdata and the table of values are made before anything is
+	   allocated; the userdata gets its metatable when it is filled */
+	stmt = (stmt_data *)LUASQL_NEWUD(L, sizeof(stmt_data));
+	stmt->closed = 1;
+	stmt->conn = conn;
+	stmt->cur = NULL;
+	lua_newtable(L);
+	stmt->values = luaL_ref(L, LUA_REGISTRYINDEX);
+
+	/* the transaction: with autocommit on a new one, which ends at once;
+	   else the one of the connection. A prepare does no work in it: a
+	   transaction that a commit or rollback only retained ends with its
+	   last cursor all the same. */
+	if (conn->autocommit == 0 && conn->tx != NULL)
+		tx = conn->tx;
+	else {
+		if ((res = tx_start(L, conn, &tx)) != 0) {
+			luaL_unref(L, LUA_REGISTRYINDEX, stmt->values);
+			return res;
+		}
+		if (conn->autocommit == 0)
+			conn->tx = tx;
+	}
+
+	if ((res = prep_statement(L, conn, tx, statement, &stmt->prep)) != 0) {
+		tx_abort(conn, tx);
+		luaL_unref(L, LUA_REGISTRYINDEX, stmt->values);
+		return res;
+	}
+
+	if (tx != conn->tx && !tx_end(conn, tx, 1, conn->env->status_vector)) {
+		prep_free(&stmt->prep);
+		luaL_unref(L, LUA_REGISTRYINDEX, stmt->values);
+		return return_db_error(L, conn->env->status_vector);
+	}
+
+	/* the statement keeps the connection */
+	lua_registerobj(L, 1, conn);
+	++conn->lock;
+	++conn->stmts;
+
+	stmt->closed = 0;
+	luasql_setmeta (L, LUASQL_STATEMENT_FIREBIRD);
+	return 1;
+}
+
+/*** @type statement */
+/***
+Executes the statement.
+
+It is called in one of three forms:
+
+- `stmt:execute()` runs with the values given last.
+- `stmt:execute(params)` with one table changes the values of the positions
+  in it, a list for the positions 1, 2, ...; positions not in the table keep
+  their values. Names raise an error.
+- `stmt:execute(v1, v2, ...)` sets all values by position; `nil` is NULL.
+  Their number must be the number of placeholders, else the result is `nil`
+  and a message.
+
+Each value is a plain Lua value or a pair `{value, type}` with a constant of
+@{type}; `type.null` is NULL. A single typed value therefore goes into a
+table: `stmt:execute{ {"2026-11-08", T.date} }`. The values are checked
+before any of them is taken over. A placeholder without a value, since the
+prepare or the last @{statement:reset}, gives `nil` and
+`LuaSQL: parameter N has no value`.
+
+The statement runs in a transaction as @{connection:execute} does. Only one
+cursor of a statement can be open at a time: close it, or fetch its last
+row, before the next execute.
+
+@function execute
+@param[opt] ... a table of parameters, or the parameters themselves
+@treturn[1] cursor a cursor for a query or a statement with output
+@treturn[2] integer the number of rows changed, for any other statement
+@treturn[3] nil
+@treturn[3] string error message, e.g. for a position that the statement
+does not have, a wrong number of variable arguments, a date or time not in
+the form of @{type}, or an error of Firebird such as a value it cannot
+convert to the type of the parameter
+@raise if a cursor of the statement is open, or if a parameter is not
+valid: names, mixed keys, a Lua type that cannot be bound (e.g. a function),
+a table that is not a pair, an unknown type constant, or a value that does
+not match its type
+@usage
+local stmt = assert(conn:prepare("SELECT name FROM emp WHERE id = ?"))
+local cur = assert(stmt:execute(7))
+print(cur:fetch())
+cur:close()
+cur = assert(stmt:execute{ 8 })
+print(cur:fetch())
+cur:close()
+stmt:close()
+*/
+/*
+** Executes a prepared statement, with parameters if given.
+*/
+static int stmt_execute (lua_State *L) {
+	stmt_data *stmt = getstatement(L, 1);
+	conn_data *conn = stmt->conn;
+	/* stmt:execute() runs with the values given last; one table is a
+	   table of parameters; anything else are variable arguments, by
+	   position (stmt:execute(nil) gives NULL to the first) */
+	int nargs = lua_gettop(L) - 1;
+	int is_table, res, ud, vt;
+	cur_data *user_cur;
+	tx_data *tx = NULL;
+
+	if (stmt->cur != NULL)
+		return luaL_error(L, LUASQL_PREFIX "cannot execute: cursor still open");
+
+	/* check the parameters; raises an error if one is invalid, before
+	   anything is taken over */
+	is_table = check_params(L, 2, nargs);
+
+	lua_rawgeti(L, LUA_REGISTRYINDEX, stmt->values);
+	vt = lua_gettop(L);
+	if (nargs > 0 && (res = set_values(L, vt, param_count(&stmt->prep), 2,
+									   nargs, is_table)) != 0)
+		return res;
+
+	/* the userdata of a cursor, see conn_execute */
+	user_cur = (cur_data*)LUASQL_NEWUD(L, sizeof(cur_data));
+	ud = lua_gettop(L);
+
+	if ((res = tx_get(L, conn, &tx)) != 0)
+		return res;
+	return run_statement(L, conn, tx, &stmt->prep, stmt, vt, user_cur, ud);
+}
+
+/*** @type statement */
+/***
+Forgets the values of all parameters.
+
+Afterwards a placeholder has no value until it is given one again, and an
+execute gives `nil` and `LuaSQL: parameter N has no value`.
+
+@function reset
+@treturn boolean `true`
+@raise if a cursor of the statement is open
+*/
+/*
+** Forgets the values of the statement.
+*/
+static int stmt_reset (lua_State *L) {
+	stmt_data *stmt = getstatement(L, 1);
+
+	if (stmt->cur != NULL)
+		return luaL_error(L, LUASQL_PREFIX "cannot reset statement with open cursor");
+	lua_newtable(L);
+	lua_rawseti(L, LUA_REGISTRYINDEX, stmt->values);
+	lua_pushboolean(L, 1);
+	return 1;
+}
+
+/*
+** Shuts down a statement: closes its open cursor (only at the end of Lua,
+** when the statement is finalized before its cursor), drops the handle
+** and frees its data. A failure of the client library is ignored, the
+** statement is closed all the same. If the connection is already closed,
+** the client has freed the statement with the attachment.
+*/
+static void stmt_shut(lua_State *L, stmt_data *stmt)
+{
+	conn_data *conn = stmt->conn;
+
+	if (stmt->cur != NULL)
+		cur_shut(L, stmt->cur, NULL);
+	if (conn->closed)
+		stmt->prep.handle = 0;
+	prep_free(&stmt->prep);
+	luaL_unref(L, LUA_REGISTRYINDEX, stmt->values);
+	stmt->values = LUA_NOREF;
+	stmt->closed = 1;
+
+	--conn->stmts;
+	--conn->lock;
+	/* check if connection can be unregistered */
+	if (conn->lock == 0)
+		lua_unregisterobj(L, conn);
+}
+
+/*** @type statement */
+/***
+Closes the statement.
+
+Returns `false` while a cursor of the statement is open, as `close` of a
+connection with open statements does. The garbage collector and a
+to-be-closed variable call it as well.
+
+@function close
+@treturn[1] boolean `true`
+@treturn[2] boolean `false`
+@treturn[2] string error message, if a cursor is open or the statement is
+already closed
+*/
+/*
+** Closes the statement.
+*/
+static int stmt_close (lua_State *L) {
+	stmt_data *stmt = (stmt_data *)luaL_checkudata(L, 1, LUASQL_STATEMENT_FIREBIRD);
+
+	if (stmt->closed) {
+		lua_pushboolean(L, 0);
+		lua_pushstring(L, "statement is already closed");
+		return 2;
+	}
+	if (stmt->cur != NULL) {
+		lua_pushboolean(L, 0);
+		lua_pushstring(L, LUASQL_PREFIX "cannot close statement with open cursor");
+		return 2;
+	}
+	stmt_shut(L, stmt);
+	lua_pushboolean(L, 1);
+	return 1;
+}
+
+/*
+** GCs a statement object. Its open cursor keeps it, so a statement is
+** collected before its cursor only at the end of Lua.
+*/
+static int stmt_gc (lua_State *L) {
+	stmt_data *stmt = (stmt_data *)luaL_checkudata(L, 1, LUASQL_STATEMENT_FIREBIRD);
+
+	if (!(stmt->closed))
+		stmt_shut(L, stmt);
+	return 0;
 }
 
 /*
@@ -900,6 +1848,21 @@ static int conn_end_tx(lua_State *L, conn_data *conn, int commit)
 	return 0;
 }
 
+/*** @type connection */
+/***
+Commits the current transaction.
+
+With autocommit off, it ends the transaction of the connection; the next
+statement starts a new one. While cursors of the transaction are open, the
+commit only retains it: the changes are committed, the cursors stay
+readable, and the transaction ends with its last cursor, unless a statement
+or a fetch runs in it before. With autocommit on there is nothing to commit,
+and the result is `true`.
+@function commit
+@treturn[1] boolean `true`
+@treturn[2] boolean `false`
+@treturn[2] string error message
+*/
 /*
 ** Commits the current transaction
 ** Lua Returns:
@@ -916,6 +1879,18 @@ static int conn_commit(lua_State *L) {
 	return 1;
 }
 
+/*** @type connection */
+/***
+Rolls back the current transaction.
+
+It works as @{connection:commit}, with a rollback: while cursors of the
+transaction are open, the rollback only retains it. After a lost connection
+the client clears the error, and the result is `true`.
+@function rollback
+@treturn[1] boolean `true`
+@treturn[2] boolean `false`
+@treturn[2] string error message
+*/
 /*
 ** Rolls back the current transaction
 ** Lua Returns:
@@ -932,6 +1907,24 @@ static int conn_rollback(lua_State *L) {
 	return 1;
 }
 
+/*** @type connection */
+/***
+Turns autocommit on or off.
+
+A new connection is in autocommit mode: every statement runs in a
+transaction of its own, which is committed when the statement ends, for a
+query when its cursor is closed. With autocommit off, the first statement
+starts a transaction (`SNAPSHOT`), which stays open until
+@{connection:commit} or @{connection:rollback}. Turning autocommit on rolls
+back that transaction; while cursors of it are open, it ends with its last
+cursor, committed.
+
+@function setautocommit
+@tparam boolean on `true` to turn autocommit on, `false` to turn it off
+@treturn[1] boolean `true`
+@treturn[2] boolean `false`
+@treturn[2] string error message, if the rollback fails
+*/
 /*
 ** Sets the autocommit state of the connection
 ** Lua Returns:
@@ -999,6 +1992,23 @@ static void conn_shut(lua_State *L, conn_data *conn)
 		lua_unregisterobj(L, conn->env);
 }
 
+/*** @type connection */
+/***
+Closes the connection.
+
+An open transaction of the connection (autocommit off) is rolled back, so
+only committed changes remain. Fails while cursors or statements of the
+connection are open. The garbage collector and a to-be-closed variable call
+it as well; a to-be-closed variable ignores the failure, so close cursors
+and statements before the end of the block. An error of the client library,
+e.g. after a lost connection, is ignored, and the connection is closed.
+
+@function close
+@treturn[1] boolean `true`
+@treturn[2] boolean `false` if the connection is already closed or has open
+cursors or statements
+@treturn[2] string error message
+*/
 /*
 ** Closes a connection.
 ** Lua Returns:
@@ -1016,9 +2026,16 @@ static int conn_close (lua_State *L) {
 	}
 
 	/* are all related cursors closed? */
-	if(conn->lock > 0) {
+	if(conn->lock > conn->stmts) {
 		lua_pushboolean(L, 0);
 		lua_pushstring(L, LUASQL_PREFIX "there are still open cursors");
+		return 2;
+	}
+
+	/* and all statements? */
+	if(conn->stmts > 0) {
+		lua_pushboolean(L, 0);
+		lua_pushstring(L, LUASQL_PREFIX "there are still open statements");
 		return 2;
 	}
 
@@ -1039,6 +2056,17 @@ static int conn_gc (lua_State *L) {
 	return 0;
 }
 
+/*** @type connection */
+/***
+Escapes a string for a literal of SQL.
+
+Every `'` is doubled, so that the string can be put between quotes in an SQL
+text. Parameters need no escaping and are the better way.
+@function escape
+@tparam string s the string
+@treturn string the escaped string
+@usage conn:execute("INSERT INTO t VALUES ('" .. conn:escape("O'Brien") .. "')")
+*/
 /*
 ** Escapes a given string so that it can't break out of it's delimiting quotes
 */
@@ -1212,6 +2240,43 @@ static int push_column(lua_State *L, int i, cur_data *cur, isc_tr_handle *tr) {
 	return 0;
 }
 
+/*** @type cursor */
+/***
+Returns the next row.
+
+Without arguments it returns the values of the columns, in their order. With
+a table it stores them there: with the column numbers as keys (mode `"n"`,
+the default), the column names (`"a"`) or both (`"na"`), and returns the
+table. NULL is `nil`.
+
+A value comes back by the type of its column: `SMALLINT`, `INTEGER` and
+`BIGINT` as integers, `FLOAT` and `DOUBLE PRECISION` as floats, `BOOLEAN` as
+a boolean, `CHAR`, `VARCHAR` and `BLOB` as strings. `NUMERIC` and `DECIMAL`
+with a scale come as exact text, e.g. `"12.30"`; `DATE`, `TIME` and
+`TIMESTAMP` as text in ISO form, e.g. `"2026-11-15 12:34:56.0000"`; other
+types, e.g. `INT128`, `DECFLOAT` and the types `WITH TIME ZONE`, as text
+written by the server.
+
+The first row was read at the execute. After the last row the cursor is
+closed and `fetch` returns `nil`; an empty result closes it at the first
+call. With autocommit on, its transaction is committed then, and an error of
+that commit is the result of this `fetch`.
+
+@function fetch
+@tparam[opt] table row table to store the values in
+@tparam[opt="n"] string mode `"n"`, `"a"` or `"na"`, see above
+@return[1] the values of the columns, or the table
+@treturn[2] nil after the last row
+@treturn[3] nil
+@treturn[3] string error message, e.g. for an error of the server in a row,
+or for a column of type `ARRAY`
+@usage
+local row = cur:fetch({}, "a")
+while row do
+  print(row.ID, row.NAME)
+  row = cur:fetch(row, "a")
+end
+*/
 /*
 ** Returns a row of data from the query
 ** Lua Returns:
@@ -1263,12 +2328,19 @@ static int cur_fetch (lua_State *L) {
 		return cur->out_sqlda->sqld;
 	}
 
-	/* a fetch can do work in the transaction (EXECUTE BLOCK, procedures):
-	   a transaction that a commit or rollback only retained stays with
-	   the connection then */
-	cur->tx->idle_end = 0;
+	if (cur->pending != 0) {
+		/* the first fetch was done at the execute */
+		fetch_stat = (cur->pending == 1) ? 0 : 100L;
+		cur->pending = 0;
+	} else {
+		/* a fetch can do work in the transaction (EXECUTE BLOCK,
+		   procedures): a transaction that a commit or rollback only
+		   retained stays with the connection then */
+		cur->tx->idle_end = 0;
+		fetch_stat = isc_dsql_fetch(cur->env->status_vector, &cur->stmt, 1, cur->out_sqlda);
+	}
 
-	if ((fetch_stat = isc_dsql_fetch(cur->env->status_vector, &cur->stmt, 1, cur->out_sqlda)) == 0) {
+	if (fetch_stat == 0) {
 		if (lua_istable (L, 2)) {
 			/* remove the option string */
 			lua_settop(L, 2);
@@ -1325,6 +2397,15 @@ static int cur_fetch (lua_State *L) {
 	return 1;
 }
 
+/*** @type cursor */
+/***
+Returns the names of the columns.
+
+The name of a column is its alias (`AS`), else the name the server chooses,
+in upper case unless it was quoted, e.g. `"ID"`.
+@function getcolnames
+@treturn table list of the names, in the order of the columns
+*/
 /*
 ** Returns a table of column names from the query
 ** Lua Returns:
@@ -1347,6 +2428,16 @@ static int cur_colnames (lua_State *L) {
 	return 1;
 }
 
+/*** @type cursor */
+/***
+Returns the types of the columns.
+
+A type is named by the Lua value it gives: `"integer"`, `"number"`,
+`"string"` (also for dates, times, `NUMERIC` with a scale and types read as
+text), `"boolean"`, or `"unknown"` for `ARRAY`.
+@function getcoltypes
+@treturn table list of the type names, in the order of the columns
+*/
 /*
 ** Returns a table of column types from the query
 ** Lua Returns:
@@ -1395,6 +2486,20 @@ static int cur_coltypes (lua_State *L) {
 	return 1;
 }
 
+/*** @type cursor */
+/***
+Closes the cursor before its last row.
+
+A cursor of a statement gives the statement free for the next execute; the
+values of the parameters stay. With autocommit on, the transaction of the
+cursor is committed. The garbage collector and a to-be-closed variable call
+it as well; a cursor left to the garbage collector keeps its transaction
+open until it is collected.
+@function close
+@treturn[1] boolean `true`
+@treturn[2] boolean `false` if the cursor is already closed
+@treturn[2] string error message
+*/
 /*
 ** Closes a cursor object
 ** Lua Returns:
@@ -1469,6 +2574,28 @@ static int get_db_dialect(conn_data *conn)
 	return SQL_DIALECT_CURRENT;
 }
 
+/*** @type environment */
+/***
+Opens a connection to a database.
+
+The source is the connection string of Firebird, e.g.
+`"localhost:C:/data/test.fdb"`, `"dbhost/3050:/data/test.fdb"` or
+`"dbhost:alias"` with an alias of `databases.conf` on the server. The user
+name and the password are read as UTF-8. A new connection is in autocommit
+mode, and its statements use the SQL dialect of the database.
+
+@function connect
+@tparam string source the database
+@tparam[opt] string user the user name
+@tparam[opt] string password the password
+@treturn[1] connection the new connection
+@treturn[2] nil
+@treturn[2] string error message, e.g. for a wrong password or a database
+that cannot be found
+@usage
+local conn = assert(env:connect("localhost:C:/data/test.fdb", "LUATEST",
+                                os.getenv("FIREBIRD_TEST_PASSWORD")))
+*/
 /*
 ** Creates and returns a connection object
 ** Lua Input: source, user, pass
@@ -1496,7 +2623,7 @@ static int env_connect (lua_State *L) {
 	conn.tx_list = NULL;
 	conn.lock = 0;
 	conn.autocommit = 1;
-	conn.cursor_count = 0;
+	conn.stmts = 0;
 	conn.dialect = SQL_DIALECT_CURRENT;
 
 	/* the dpb has 256 bytes: 1 byte version, 2 + user name, 2 + password,
@@ -1569,6 +2696,18 @@ static int env_connect (lua_State *L) {
 	return 1;
 }
 
+/*** @type environment */
+/***
+Closes the environment.
+
+Fails while connections of the environment are open. The garbage collector
+and a to-be-closed variable call it as well.
+@function close
+@treturn[1] boolean `true`
+@treturn[2] boolean `false` if the environment is already closed or has open
+connections
+@treturn[2] string error message
+*/
 /*
 ** Closes an environment object
 ** Lua Returns:
@@ -1634,6 +2773,7 @@ static void create_metatables (lua_State *L) {
 		{"__close", conn_close},
 		{"close", conn_close},
 		{"execute", conn_execute},
+		{"prepare", conn_prepare},
 		{"commit", conn_commit},
 		{"rollback", conn_rollback},
 		{"setautocommit", conn_setautocommit},
@@ -1649,10 +2789,19 @@ static void create_metatables (lua_State *L) {
 		{"getcolnames", cur_colnames},
 		{NULL, NULL},
 	};
+	struct luaL_Reg statement_methods[] = {
+		{"__gc", stmt_gc},
+		{"__close", stmt_close},
+		{"close", stmt_close},
+		{"execute", stmt_execute},
+		{"reset", stmt_reset},
+		{NULL, NULL},
+	};
 	luasql_createmeta (L, LUASQL_ENVIRONMENT_FIREBIRD, environment_methods);
 	luasql_createmeta (L, LUASQL_CONNECTION_FIREBIRD, connection_methods);
 	luasql_createmeta (L, LUASQL_CURSOR_FIREBIRD, cursor_methods);
-	lua_pop (L, 3);
+	luasql_createmeta (L, LUASQL_STATEMENT_FIREBIRD, statement_methods);
+	lua_pop (L, 4);
 }
 
 /*
@@ -1669,6 +2818,7 @@ LUASQL_API int luaopen_luasql_firebird (lua_State *L) {
 	lua_newtable (L);
 	luaL_setfuncs (L, driver, 0);
 	luasql_set_info (L);
+	luasql_set_types (L);
 	version[0] = '\0';
 	isc_get_client_version(version);
 	lua_pushliteral (L, "_CLIENTVERSION");

@@ -45,8 +45,9 @@
 --   errorRollback   failing insert, rollback
 -- Each phase checks the number of rows at its end; the open
 -- transactions of the test session are an extra server counter
--- (backend.transactionCounter). A precheck makes sure the counter sees
--- an open transaction; otherwise the phases fail as invalid.
+-- (backend.transactionCounter), unless it is one of the server counters
+-- already. A precheck makes sure the counter sees an open transaction;
+-- otherwise the phases fail as invalid.
 --
 -- Skipped if the driver has no prepare() or the backend has no
 -- transaction table.
@@ -660,12 +661,17 @@ function transactions.run(ctx)
       return nil, "unknown tier: " .. tostring(ctx.tier)
    end
 
-   -- The open transactions of the test session as extra counter.
+   -- The open transactions of the test session as extra counter, unless
+   -- it is one of the server counters already (Firebird).
    local counters = {}
+   local listed = false
    for _, counter in ipairs(backend.serverCounters or {}) do
       counters[#counters + 1] = counter
+      listed = listed or counter == backend.transactionCounter
    end
-   counters[#counters + 1] = backend.transactionCounter
+   if not listed then
+      counters[#counters + 1] = backend.transactionCounter
+   end
 
    local txCtx = {
       backend = backend,

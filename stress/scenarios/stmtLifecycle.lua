@@ -19,6 +19,11 @@
 --                 to the GC; with the statement still open, the server
 --                 counters must be as after a cursor read to its end
 --                 (with SQLite: no lock left on the file)
+--   manualReuse   with autocommit off: one statement, its cursor read to
+--                 its end, closed after one row or left to the GC in
+--                 turn; a commit or a rollback every 10th iteration,
+--                 never with an open cursor; the statement must stay
+--                 valid over them
 --   gcClose       prepare, execute, drop both; only the GC closes them
 --   clobRead      one statement, temporary CLOBs of changing length and
 --                 NULL in turn
@@ -59,6 +64,14 @@ local gcEvery = 10
 -- Phase closeRelease compares the server counters with its baseline
 -- every this many iterations (a check takes a few queries).
 local releaseCheckEvery = 25
+
+-- Phase manualReuse ends the transaction every this many iterations,
+-- with a commit and a rollback in turn.
+local manualEndEvery = 10
+
+-- Rows of the cursors of phases partialFetch, closeRelease and
+-- manualReuse (backend.multiRowBindQuery).
+local multiRows = 10
 
 -- Non-ASCII text for string binds: a-umlaut, o-umlaut, u-umlaut, euro.
 local utf8Text = "\u{E4}\u{F6}\u{FC}\u{20AC}"
@@ -235,7 +248,7 @@ local function noParamsStep(ctx, i, stmt)
 end
 
 local function partialFetchStep(ctx, _, stmt)
-   local cur = execute(stmt, { { 10, ctx.types.int } })
+   local cur = execute(stmt, { { multiRows, ctx.types.int } })
    local row, err = cur:fetch({})
    check(row, err, "fetch")
    -- The cursor is still open here, so close() has to succeed.
@@ -281,7 +294,7 @@ end
 -- cannot show this, finish closes the statement first.
 local function setupCloseRelease(ctx)
    local stmt = prepareMultiRowQuery(ctx)
-   local cur = execute(stmt, { { 10, ctx.types.int } })
+   local cur = execute(stmt, { { multiRows, ctx.types.int } })
    local row = cur:fetch({})
    while row ~= nil do
       row = cur:fetch({})
@@ -292,7 +305,7 @@ end
 
 -- Opens a cursor of the statement, reads one row and drops it.
 local function dropCursor(ctx, stmt)
-   local cur = execute(stmt, { { 10, ctx.types.int } })
+   local cur = execute(stmt, { { multiRows, ctx.types.int } })
    check(cur:fetch({}), nil, "fetch")
 end
 
@@ -302,7 +315,7 @@ local function closeReleaseStep(ctx, i, shared)
       dbutil.scrubStack()
       collectgarbage("collect")
    else
-      local cur = execute(shared.stmt, { { 10, ctx.types.int } })
+      local cur = execute(shared.stmt, { { multiRows, ctx.types.int } })
       check(cur:fetch({}), nil, "fetch")
       local ok, err = cur:close()
       check(ok, err, "close cursor")
@@ -322,6 +335,66 @@ end
 
 local function finishCloseRelease(_, shared)
    closeStatement(shared.stmt)
+end
+
+-- Phase manualReuse: the statement is prepared with autocommit off, so
+-- that a DBMS that prepares in the transaction of the connection
+-- (Firebird) starts it there.
+local function setupManualReuse(ctx)
+   local ok, err = ctx.testConn:setautocommit(false)
+   check(ok, err, "setautocommit(false)")
+   return prepareMultiRowQuery(ctx)
+end
+
+local function manualReuseStep(ctx, i, stmt)
+   local conn = ctx.testConn
+   local kind = i % 3
+   if kind == 0 then
+      local cur = execute(stmt, { { multiRows, ctx.types.int } })
+      local rows = 0
+      local row, err = cur:fetch({})
+      while row ~= nil do
+         rows = rows + 1
+         row, err = cur:fetch({})
+      end
+      if err ~= nil then
+         error("fetch: " .. tostring(err), 0)
+      end
+      if rows ~= multiRows then
+         error(string.format("expected %d rows, got %d", multiRows, rows), 0)
+      end
+   elseif kind == 1 then
+      local cur = execute(stmt, { { multiRows, ctx.types.int } })
+      check(cur:fetch({}), nil, "fetch")
+      local ok, err = cur:close()
+      check(ok, err, "close cursor")
+   else
+      dropCursor(ctx, stmt)
+      dbutil.scrubStack()
+      collectgarbage("collect")
+   end
+   if i % manualEndEvery == 0 then
+      local ok, err
+      if (i // manualEndEvery) % 2 == 0 then
+         ok, err = conn:commit()
+         check(ok, err, "commit")
+      else
+         ok, err = conn:rollback()
+         check(ok, err, "rollback")
+      end
+   end
+end
+
+-- Closes the statement and ends the transaction, also after a failed
+-- step (then the step error is what counts).
+local function finishManualReuse(ctx, stmt)
+   local conn = ctx.testConn
+   local closed, closeErr = stmt:close()
+   local committed, commitErr = conn:commit()
+   local ok, err = conn:setautocommit(true)
+   check(closed, closeErr, "close statement")
+   check(committed, commitErr, "commit")
+   check(ok, err, "setautocommit(true)")
 end
 
 local function gcCloseStep(ctx, i)
@@ -445,6 +518,8 @@ local phaseList = {
      step = rebindStringStep, finish = finishStatement },
    { name = "closeRelease", setup = setupCloseRelease,
      step = closeReleaseStep, finish = finishCloseRelease },
+   { name = "manualReuse", setup = setupManualReuse,
+     step = manualReuseStep, finish = finishManualReuse },
    { name = "gcClose", step = gcCloseStep },
    { name = "clobRead", precheck = dbutil.checkTempLobs,
      setup = prepareClobQuery, step = clobReadStep,

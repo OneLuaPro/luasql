@@ -11,11 +11,13 @@
 -- all) and ends without closing anything. With <id>, the second
 -- connection has autocommit off and has inserted the row <id> into the
 -- table of connectionLoss (backend.lossInsert) before its cursor, without
--- a commit. At its end Lua closes its
--- state and runs the finalizers of all these objects, in an order that
--- no program chooses. Exit code 0 if the end is reached and Lua closes
--- cleanly; a crash in a finalizer gives another exit code. An error
--- before the end goes to stderr, with exit code 2.
+-- a commit. With prepare(), each connection also keeps a prepared
+-- statement with a partly fetched cursor and one without a cursor; on
+-- the second connection they run in its open transaction. At its end
+-- Lua closes its state and runs the finalizers of all these objects,
+-- in an order that no program chooses. Exit code 0 if the end is
+-- reached and Lua closes cleanly; a crash in a finalizer gives another
+-- exit code. An error before the end goes to stderr, with exit code 2.
 
 local dbms, path, cpath, id = arg[1], arg[2], arg[3], tonumber(arg[4])
 if not (dbms and path and cpath) then
@@ -96,4 +98,25 @@ if id then
    end
 end
 held[#held + 1] = execute(second.conn, backend.multiRowQuery)
+-- Prepared statements, one with a partly fetched cursor and one without,
+-- on both connections.
+if first.conn.prepare then
+   for _, conn in ipairs({ first.conn, second.conn }) do
+      for _, withCursor in ipairs({ true, false }) do
+         local stmt, prepareErr = conn:prepare(backend.multiRowQuery)
+         if not stmt then
+            fail("prepare: " .. tostring(prepareErr))
+         end
+         held[#held + 1] = stmt
+         if withCursor then
+            local cur, execErr = stmt:execute()
+            if not cur then
+               fail("execute: " .. tostring(execErr))
+            end
+            fetch(cur)
+            held[#held + 1] = cur
+         end
+      end
+   end
+end
 -- The end of the script: Lua closes its state and runs the finalizers.

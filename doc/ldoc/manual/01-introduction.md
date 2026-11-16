@@ -8,8 +8,9 @@ the results row by row. This is the documentation of LuaSQL for
 project.
 
 So far it covers the Oracle driver `luasql.oci8`, the SQLite driver
-`luasql.sqlite3` and the DuckDB driver `luasql.duckdb`, which have been
-reworked for OneLuaPro and tested in depth. The other drivers follow the same API; their documentation will be
+`luasql.sqlite3`, the DuckDB driver `luasql.duckdb` and the Firebird driver
+`luasql.firebird`, which have been reworked for OneLuaPro and tested in
+depth. The other drivers follow the same API; their documentation will be
 added here.
 
 ## Objects
@@ -18,7 +19,7 @@ Every driver works with the same four kinds of objects:
 
 <table>
 <tr><th>Object</th><th>Created by</th><th>Purpose</th></tr>
-<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code></td><td>holds the client library of the driver; opens connections</td></tr>
+<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code>, <code>driver.firebird()</code></td><td>holds the client library of the driver; opens connections</td></tr>
 <tr><td>connection</td><td><code>env:connect(...)</code></td><td>a session on the database server; runs statements and controls transactions</td></tr>
 <tr><td>cursor</td><td><code>conn:execute(...)</code>, <code>stmt:execute(...)</code></td><td>the rows of a query, read one by one</td></tr>
 <tr><td>statement</td><td><code>conn:prepare(...)</code></td><td>a prepared statement, executed many times with parameters</td></tr>
@@ -61,6 +62,12 @@ env:close()
 after the last row. With a table as first argument it stores the row in the
 table instead: `cur:fetch({}, "a")` uses the column names as keys,
 `cur:fetch({}, "n")` (the default) the column numbers.
+
+The case of column names, in `cur:fetch({}, "a")` and in
+`cur:getcolnames()`, depends on the driver and the database: e.g.
+Firebird gives unquoted names in upper case (`ID`), `luasql.oci8` in lower
+case (`id`). Portable code uses quoted aliases (`SELECT id AS "id" ...`)
+or compares names without regard to case.
 
 ## Errors
 
@@ -207,8 +214,6 @@ code without an error message come first.
   scale of 0 they are integers as before.
 - **firebird: the number of rows a statement has changed is an integer**
   (`1`); LuaSQL returns a float (`1.0`).
-- **firebird: statements use the SQL dialect of the database**; the third
-  argument of `conn:execute`, which is the dialect in LuaSQL, is ignored.
 - **firebird: the driver does not set the size of the page cache** (LuaSQL
   asks for 90 pages with every connection, which a server in the mode Classic
   or SuperClassic follows): the configuration of the server decides.
@@ -295,11 +300,19 @@ code without an error message come first.
   `SELECT ... FOR UPDATE` or `WITH LOCK`** are accepted; LuaSQL returns
   `unsupported SQL statement`. `COMMIT`, `ROLLBACK` and `SET TRANSACTION` by
   SQL are still refused: the driver holds the transactions.
+- **firebird: statements use the SQL dialect of the database**, and
+  `conn:execute(sql, ...)` binds further arguments as parameters: a program
+  that passes the dialect as third argument, as in LuaSQL, gets `nil` and
+  `LuaSQL: statement has 0 parameters, 1 given`.
+- **firebird: the first row of a query is read by the execute**: an error
+  in it (e.g. a division by zero) is the result of `conn:execute`; with
+  LuaSQL it comes from the first `fetch`. Cursors get no name; LuaSQL names
+  each one, which costs a call to the server per query.
 
 **Extensions**
 
-- Prepared statements for oci8, sqlite3 and duckdb: `conn:prepare` and
-  statement objects (upstream pull request
+- Prepared statements for oci8, sqlite3, duckdb and firebird:
+  `conn:prepare` and statement objects (upstream pull request
   [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
 - `luasql.type` with the pairs `{value, type}`, `T.null` (a special value),
   `T.binary`, fixed forms for dates and times, `{T.null, type}`.
@@ -314,8 +327,10 @@ code without an error message come first.
 - The additions of duckdb in the @{05-duckdb.md|DuckDB topic}: parameters
   (also `conn:execute(sql, ...)`), `luasql.type`, names of parameters
   without `$`, the extensions built into OneLuaPro.
-- `luasql._CLIENTVERSION` of firebird: the version of the Firebird client
-  library.
+- The additions of firebird in the @{06-firebird.md|Firebird topic}:
+  prepared statements, parameters (also `conn:execute(sql, ...)`),
+  `luasql.type`, long values as temporary `BLOB`s, and
+  `luasql._CLIENTVERSION`, the version of the Firebird client library.
 
 ## Where to Go Next
 
@@ -327,6 +342,8 @@ code without an error message come first.
   transactions and the behavior of SQLite worth knowing.
 - @{05-duckdb.md|DuckDB}: connecting, data types, the built-in extensions,
   transactions and the behavior of DuckDB worth knowing.
-- The reference of the modules @{luasql.oci8}, @{luasql.sqlite3} and
-  @{luasql.duckdb} with every function.
+- @{06-firebird.md|Firebird}: connecting, the character set, data types,
+  transactions and the behavior of Firebird worth knowing.
+- The reference of the modules @{luasql.oci8}, @{luasql.sqlite3},
+  @{luasql.duckdb} and @{luasql.firebird} with every function.
 - The examples, ready to run against your own database.

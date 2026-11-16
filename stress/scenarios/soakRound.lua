@@ -87,7 +87,10 @@ function soakRound.prepare(worker)
    worker.offsetStmt = prepare(backend.offsetBindQuery)
    worker.clobStmt = prepare(backend.clobQuery)
    worker.blobStmt = prepare(backend.blobQuery)
-   worker.jsonStmt = prepare(backend.jsonQuery)
+   -- A DBMS without JSON functions (Firebird 5) has no jsonQuery.
+   if backend.jsonQuery then
+      worker.jsonStmt = prepare(backend.jsonQuery)
+   end
    worker.insertStmt = prepare(backend.soakInsert)
    worker.updateStmt = prepare(backend.soakUpdate)
    worker.deleteStmt = prepare(backend.soakDelete)
@@ -144,11 +147,13 @@ function soakRound.run(worker, i)
          { "AB", types.string }, { length, types.int },
          { "AB", types.string } })), "BLOB query")
       expect(blob == string.rep("\xAB", length), "BLOB query: wrong value")
-      local json = single(check("JSON query", worker.jsonStmt:execute({
-         { "x", types.string }, { length, types.int },
-         { "x", types.string } })), "JSON query")
-      expect(json == '{"t":"' .. string.rep("x", length) .. '"}',
-             "JSON query: wrong value")
+      if worker.jsonStmt then
+         local json = single(check("JSON query", worker.jsonStmt:execute({
+            { "x", types.string }, { length, types.int },
+            { "x", types.string } })), "JSON query")
+         expect(json == '{"t":"' .. string.rep("x", length) .. '"}',
+                "JSON query: wrong value")
+      end
    end
 
    -- Date and time types.

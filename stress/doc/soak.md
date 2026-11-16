@@ -13,7 +13,7 @@ Each worker (the test connection and each thread) has its own range of ids, work
 | query                   | every round           | a query with 3 rows through `conn:execute`, fetched to the end and closed                                                                 | the rows or their sum are wrong, or a value is not an integer |
 | prepared query          | every round           | the same through a prepared statement with two parameters; `stmt:reset()` before it every 10th round                                       | as above                                                      |
 | CLOB                    | every round           | a temporary CLOB (Character Large Object) of 100 to 149 characters, made on the server                                                    | a wrong value                                                 |
-| BLOB, JSON              | every 5th round       | a temporary BLOB (Binary Large Object) and a JSON value of the same lengths                                                              | a wrong value                                                 |
+| BLOB, JSON              | every 5th round       | a temporary BLOB (Binary Large Object) and a JSON value of the same lengths; no JSON without `backend.jsonQuery` (Firebird)              | a wrong value                                                 |
 | date and time           | every round           | four date and time values of the DBMS in one row (`backend.soakTypesQuery`)                                                               | a value is missing                                            |
 | DML                     | every round           | insert, update and delete of one row (DML, Data Manipulation Language) through prepared statements; commit in even, rollback in odd rounds                                  | a call fails, or the update does not report 1 row             |
 | invalid statement       | every round           | a statement that cannot be parsed                                                                                                         | it does not fail                                              |
@@ -132,4 +132,4 @@ A run of 4 hours (`lua stress.lua duckdb soak --csv soak240-duckdb.csv`) on Wind
 
 ## Firebird
 
-Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`).
+The rounds run with two lanes, each on ids of its own. Firebird 5 has no JSON functions: the rounds read no JSON value (`backend.jsonQuery` is missing). The date and time query reads `LOCALTIMESTAMP`, `CURRENT_TIMESTAMP` (with time zone), `CURRENT_DATE` and `LOCALTIME`. The server counters are `statements` and `transactions` of the test attachment, as in the other scenarios.

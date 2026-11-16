@@ -9,7 +9,9 @@
 --   fetchExecute   all rows through conn:execute, checked one by one
 --   fetchPrepared  the same through a prepared statement
 --   fetchReuse     the same, reusing one result table with "na": a NULL
---                  must overwrite the value of the row before
+--                  must overwrite the value of the row before; the named
+--                  key is in upper case where backend.columnNameCase is
+--                  "upper" (Firebird)
 --   bigRollback    as many rows in one transaction, then rollback
 -- and with a tenth of the rows:
 --   lobInsert      rows with a CLOB of 4000 characters
@@ -50,7 +52,15 @@
 -- message must say so (backend.rolledBackHint).
 -- A DBMS without tablespaces limits the size of the database for the
 -- test connection instead (backend.fullSetup and backend.fullReset).
--- Value case, independent of the tablespace:
+-- Value cases, independent of the tablespace:
+--   lobAfterError   a text of 40000 characters with multi-byte UTF-8
+--                   (more than a driver may bind as plain text, e.g.
+--                   32767 bytes in Firebird) into the LOB table: a
+--                   duplicate key fails after the value went to the
+--                   server, the same statement works on with another
+--                   key; with autocommit off such a row is gone after
+--                   rollback(); read back and compared (needs
+--                   backend.volLobSelectOne and backend.volLobDelete)
 --   maxLength       the longest value the DBMS takes
 --                   (backend.maxValueLength) as text and as binary data,
 --                   and one byte more, which gives nil and a message;
@@ -292,14 +302,15 @@ end
 
 -- Fetches into the same table with numeric and named keys: a NULL must
 -- remove the value of the row before, under both keys.
-local function fetchReuseStep(_, i, shared)
+local function fetchReuseStep(ctx, i, shared)
    local row, err = shared.cur:fetch(shared.row, "na")
    expect(row ~= nil, string.format("row %d: %s", i,
                                     tostring(err or "end of result")))
    expect(row == shared.row, "fetch returned another table")
    checkRow(row, i)
-   expect(row.s == row[3], string.format("row %d: named key s is %s", i,
-                                         describe(row.s)))
+   local key = ctx.backend.columnNameCase == "upper" and "S" or "s"
+   expect(row[key] == row[3], string.format("row %d: named key %s is %s", i,
+                                            key, describe(row[key])))
    shared.rows = i
 end
 
@@ -774,7 +785,66 @@ local function maxLength(ctx)
    end
 end
 
+-- Text of case lobAfterError: 40000 characters, 60000 bytes.
+local longText = string.rep("\u{E4}b", 20000)
+
+-- A long text into the LOB table: the insert of a duplicate key fails
+-- after the value went to the server, the statement works on, and with
+-- autocommit off a rolled back row is gone. Rows -1 to -3, deleted at
+-- the end.
+local function lobAfterError(ctx)
+   local backend = ctx.backend
+   local types = ctx.types
+   local conn = ctx.testConn
+   local insert = prepare(conn, backend.volLobInsert)
+   local select = prepare(conn, backend.volLobSelectOne)
+   local delete = prepare(conn, backend.volLobDelete)
+   local function read(id)
+      local cur, err = select:execute({ { id, types.int } })
+      check(cur, err, "select")
+      local row = cur:fetch({})
+      cur:close()
+      return row and row[1]
+   end
+   local function insertRow(id)
+      return insert:execute({ { id, types.int },
+                              { longText, types.string } })
+   end
+   local ok, err = pcall(function()
+      check(insertRow(-1), nil, "insert row -1")
+      local result, insertErr = insertRow(-1)
+      expect(result == nil and type(insertErr) == "string",
+             "duplicate key: expected nil and a message, got "
+                .. tostring(result))
+      check(insertRow(-2), nil, "insert row -2 after the error")
+      expect(read(-1) == longText, "row -1 read back wrong")
+      expect(read(-2) == longText, "row -2 read back wrong")
+      setAutocommit(conn, false)
+      check(insertRow(-3), nil, "insert row -3")
+      result, insertErr = insertRow(-3)
+      expect(result == nil and type(insertErr) == "string",
+             "duplicate key with autocommit off: expected nil and a"
+                .. " message, got " .. tostring(result))
+      rollback(conn)
+      expect(read(-3) == nil, "row -3 stays after rollback()")
+      setAutocommit(conn, true)
+   end)
+   pcall(rollback, conn)
+   pcall(setAutocommit, conn, true)
+   for _, id in ipairs({ -1, -2, -3 }) do
+      pcall(delete.execute, delete, { { id, types.int } })
+   end
+   closeStatement(insert)
+   closeStatement(select)
+   closeStatement(delete)
+   if not ok then
+      error(err, 0)
+   end
+end
+
 local valueCaseList = {
+   { name = "lobAfterError", run = lobAfterError,
+     needs = { "volLobSelectOne", "volLobDelete" } },
    { name = "maxLength", run = maxLength,
      needs = { "maxValueLength", "valueLengthQuery" } },
 }
@@ -887,11 +957,17 @@ function volume.run(ctx)
       return nil, "unknown tier: " .. tostring(ctx.tier)
    end
 
+   -- The open transactions as an extra counter, unless it is one of the
+   -- server counters already (Firebird).
    local counters = {}
+   local listed = false
    for _, counter in ipairs(backend.serverCounters or {}) do
       counters[#counters + 1] = counter
+      listed = listed or counter == backend.transactionCounter
    end
-   counters[#counters + 1] = backend.transactionCounter
+   if not listed then
+      counters[#counters + 1] = backend.transactionCounter
+   end
 
    local volCtx = {
       backend = backend,

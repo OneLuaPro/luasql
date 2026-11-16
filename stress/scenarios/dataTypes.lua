@@ -55,7 +55,14 @@
 --
 -- Some cases read with fetch modes other than fetch({}): "a" (named
 -- keys), "na" (both, every column is read twice) and "multi" (fetch()
--- without a table, values as return values).
+-- without a table, values as return values). The named keys are the
+-- column names as the DBMS describes them: in upper case where
+-- backend.columnNameCase is "upper" (Firebird); the case of names is
+-- not part of the LuaSQL API.
+--
+-- Placeholders are :1, :2, ... (Oracle), with backend.paramPrefix e.g.
+-- $1, $2, ...; a DBMS with positions only gives the one placeholder in
+-- backend.positionalPlaceholder (e.g. ? in Firebird).
 --
 -- Skipped if the driver has no prepare() or the backend has no test
 -- table.
@@ -784,8 +791,18 @@ local function writeValue(ctx, id, case)
    return executeStatement(ctx, sql, params)
 end
 
+-- The key of column name in a row fetched with names: the name in upper
+-- case where the DBMS describes unquoted names so
+-- (backend.columnNameCase).
+local function columnKey(ctx, name)
+   if ctx.backend.columnNameCase == "upper" then
+      return name:upper()
+   end
+   return name
+end
+
 -- Fetches the only row of a cursor with the given fetch mode (nil for
--- fetch({})); name is the column name for the named modes.
+-- fetch({})); name is the key of the column for the named modes.
 -- Returns true and the value, or nil and an error message.
 local function fetchValue(cur, fetchMode, name)
    if fetchMode == "multi" then
@@ -848,7 +865,7 @@ end
 local function readValue(ctx, id, expression, fetchMode)
    local sql = string.format(ctx.backend.typesSelect, expression)
    return queryValue(ctx, sql, { { id, ctx.types.int } }, fetchMode,
-                     expression)
+                     columnKey(ctx, expression))
 end
 
 -- Runs a ROWID case: inserts row id, reads its ROWID and finds the row
@@ -975,10 +992,12 @@ end
 local function runRowsCase(ctx, id, case)
    local backend = ctx.backend
    local int = ctx.types.int
-   -- Placeholders :2, :3, ...; with backend.paramPrefix e.g. $2, $3.
+   -- Placeholders :2, :3, ...; with backend.paramPrefix e.g. $2, $3;
+   -- with backend.positionalPlaceholder that one for each.
    local placeholders = {}
    for k = 1, #case.columns do
-      placeholders[k] = (backend.paramPrefix or ":") .. (k + 1)
+      placeholders[k] = backend.positionalPlaceholder
+         or (backend.paramPrefix or ":") .. (k + 1)
    end
    local columnList = table.concat(case.columns, ", ")
    local insert = string.format(backend.typesInsertColumns, columnList,
@@ -1014,7 +1033,8 @@ local function runRowsCase(ctx, id, case)
          problem = "more rows than written"
          break
       end
-      for c, name in ipairs(case.columns) do
+      for c, column in ipairs(case.columns) do
+         local name = columnKey(ctx, column)
          local value = mode == "a" and row[name] or row[c]
          local expected = cells[c][2]
          if mode == "na" and row[c] ~= row[name] then
@@ -1023,7 +1043,7 @@ local function runRowsCase(ctx, id, case)
                describe(row[name]))
          elseif not compare(ctx.numberMode, value, expected) then
             local limit = (case.limitCells or {})[count]
-            limit = limit and limit[name]
+            limit = limit and limit[column]
             if limit ~= nil and compare(ctx.numberMode, value, limit) then
                limited = true
             else

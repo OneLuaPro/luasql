@@ -613,6 +613,21 @@ local function dropped_statements()
                                          .. "FROM rdb$relations"))
          left:fetch()
       end
+      -- prepared statements, closed and left to the garbage collector
+      local st = assert(con:prepare("SELECT rdb$relation_id FROM "
+                                    .. "rdb$relations WHERE "
+                                    .. "rdb$relation_id > ?"))
+      cur = assert(st:execute(0))
+      cur:fetch()
+      cur:close()
+      st:close()
+      assert(con:prepare("SELECT ? FROM rdb$database") == nil)
+      do
+         local left = assert(con:prepare("SELECT rdb$relation_id FROM "
+                                         .. "rdb$relations WHERE "
+                                         .. "rdb$relation_id > ?"))
+         assert(left:execute(1)):fetch()
+      end
       collectgarbage()
    end
    collectgarbage()
@@ -633,7 +648,8 @@ local function dropped_statements()
    con:close()
 end
 
--- A3: many cursors closed before their end
+-- A3: many cursors closed before their end (the driver gave each a name
+-- once; it names none now)
 local function cursor_names()
    local con = ctx.con()
    local ok, err = true, nil
@@ -804,22 +820,27 @@ local luasql = require "luasql.firebird"
 local env = assert(luasql.firebird())
 local con = assert(env:connect(os.getenv("FIREBIRD_TEST_SOURCE"),
    os.getenv("FIREBIRD_TEST_USER"), os.getenv("FIREBIRD_TEST_PASSWORD")))
--- autocommit on: a cursor that has changed a row, never fetched
+-- autocommit on: a cursor that has changed a row, never fetched, also of
+-- a prepared statement
 local written = assert(con:execute(
    "UPDATE luasql_exit SET val = 1 WHERE id = 1 RETURNING id"))
+local stmt = assert(con:prepare(
+   "UPDATE luasql_exit SET val = ? WHERE id = 3 RETURNING id"))
+local written2 = assert(stmt:execute(10))
 -- autocommit off: a pending row and an open cursor
 assert(con:setautocommit(false))
 assert(con:execute("INSERT INTO luasql_exit VALUES (2, 2)"))
 local reading = assert(con:execute("SELECT id FROM luasql_exit"))
 assert(reading:fetch())
 -- all objects stay open to the end of Lua
-KEEP = { env, con, written, reading }
+KEEP = { env, con, written, stmt, written2, reading }
 ]])
    f:close()
 
    pcall(run, con, "DROP TABLE luasql_exit")
    run(con, "CREATE TABLE luasql_exit (id INTEGER, val INTEGER)")
    run(con, "INSERT INTO luasql_exit VALUES (1, 0)")
+   run(con, "INSERT INTO luasql_exit VALUES (3, 0)")
    local before = attachments(con)
    local command = string.format('"%s" "%s"', lua, file)
    if windows then
@@ -833,7 +854,9 @@ KEEP = { env, con, written, reading }
    local x = rows(con, "SELECT id, val FROM luasql_exit ORDER BY id")
    check("the cursor of autocommit on is committed",
          x[1] ~= nil and x[1].val == 1, x[1] and x[1].val)
-   check("the transaction of autocommit off is rolled back", #x == 1, #x)
+   check("so is the cursor of the statement",
+         x[2] ~= nil and x[2].id == 3 and x[2].val == 10, x[2] and x[2].val)
+   check("the transaction of autocommit off is rolled back", #x == 2, #x)
    check("no attachment is left", attachments(con) == before,
          attachments(con))
    run(con, "DROP TABLE luasql_exit")
@@ -865,18 +888,31 @@ local function kill()
    local con = connect()
    local id = attachment_id(con)
    con:setautocommit(false)
-   local cur = assert(con:execute("SELECT rdb$relation_id "
-                                  .. "FROM rdb$relations"))
+   -- more rows than the client fetches at once
+   local cur = assert(con:execute("SELECT a.rdb$relation_id "
+                                  .. "FROM rdb$relations a, rdb$relations b, "
+                                  .. "rdb$relations c"))
+   local stmt = assert(con:prepare("SELECT 1 FROM rdb$database WHERE 1 = ?"))
    run(admin, string.format([[
 EXECUTE BLOCK AS
 BEGIN
    IN AUTONOMOUS TRANSACTION DO
       DELETE FROM MON$ATTACHMENTS WHERE MON$ATTACHMENT_ID = %d;
 END]], id))
+   -- the rows the client has already fetched come first
    local v, err = cur:fetch()
+   local fetched = 0
+   while v ~= nil and fetched < 1000000 do
+      fetched = fetched + 1
+      v, err = cur:fetch()
+   end
    check("fetch after the kill: nil, msg", v == nil and err ~= nil, v)
-   info("fetch: " .. tostring(err))
+   info("fetch: " .. tostring(err) .. " (after " .. fetched .. " rows)")
    check("cur:close after the kill: true", cur:close() == true)
+   v, err = stmt:execute(1)
+   check("stmt:execute after the kill: nil, msg", v == nil and err ~= nil,
+         v)
+   check("stmt:close after the kill: true", stmt:close() == true)
    v, err = con:execute("SELECT 1 FROM rdb$database")
    check("execute after the kill: nil, msg", v == nil and err ~= nil, v)
    local ok, msg = con:commit()
@@ -891,6 +927,365 @@ END]], id))
    check("execute on the closed connection raises",
          not ok and has(msg, "LuaSQL: connection is closed"), msg)
    admin:close()
+end
+
+-- the parameters of prepared statements: Lua values and pairs of
+-- luasql.type, and what the server makes of them
+local function bind_types()
+   local con = ctx.con()
+   local T = luasql.type
+   pcall(run, con, "DROP TABLE luasql_bind")
+   run(con, [[
+CREATE TABLE luasql_bind (
+   id INTEGER NOT NULL PRIMARY KEY,
+   i INTEGER, b BIGINT, n NUMERIC(10,2), d DOUBLE PRECISION,
+   v VARCHAR(100) CHARACTER SET UTF8, c CHAR(5) CHARACTER SET UTF8,
+   bl BOOLEAN, dt DATE, tm TIME, ts TIMESTAMP,
+   o VARCHAR(10) CHARACTER SET OCTETS,
+   bt BLOB SUB_TYPE TEXT CHARACTER SET UTF8, bb BLOB SUB_TYPE BINARY,
+   i128 INT128, df DECFLOAT(16))]])
+   local ins = assert(con:prepare([[
+INSERT INTO luasql_bind (id, i, b, n, d, v, c, bl, dt, tm, ts, o, bt, bb,
+                         i128, df)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)]]))
+   local function get(id)
+      return rows(con, "SELECT * FROM luasql_bind WHERE id = " .. id)[1]
+   end
+   local bytes = {}
+   for k = 0, 255 do bytes[#bytes + 1] = string.char(k) end
+   local binary = table.concat(bytes)
+
+   local n, err = ins:execute(1, 42, 9007199254740993, "12.34", 1.5,
+                              "\195\164\195\182\195\188\226\130\172", "ab",
+                              true, { "2026-11-15", T.date },
+                              { "13:14:15.1234567", T.time },
+                              { "2026-11-15 13:14:15.5", T.timestamp },
+                              { "\0\1\255", T.binary }, "hello",
+                              { binary, T.binary }, 1 << 62, "1.5")
+   check("insert with plain values and pairs", n == 1, err)
+   local x = get(1) or {}
+   check("INTEGER, BIGINT exact", x.i == 42 and x.b == 9007199254740993,
+         tostring(x.i) .. " " .. tostring(x.b))
+   check("NUMERIC from text", x.n == "12.34", x.n)
+   check("DOUBLE", x.d == 1.5, x.d)
+   check("UTF-8 text", x.v == "\195\164\195\182\195\188\226\130\172", x.v)
+   check("CHAR(5)", x.c == "ab   ", x.c)
+   check("BOOLEAN", x.bl == true, x.bl)
+   check("T.date", x.dt == "2026-11-15", x.dt)
+   check("T.time, four digits of the fraction", x.tm == "13:14:15.1234",
+         x.tm)
+   check("T.timestamp", x.ts == "2026-11-15 13:14:15.5000", x.ts)
+   check("T.binary into OCTETS", x.o == "\0\1\255", x.o and #x.o)
+   check("short text into a BLOB", x.bt == "hello", x.bt)
+   check("T.binary into a BLOB", x.bb == binary, x.bb and #x.bb)
+   check("INT128 from an integer", x.i128 == "4611686018427387904", x.i128)
+   check("DECFLOAT from text", x.df == "1.5", x.df)
+
+   -- NULL in all forms; the server converts
+   n, err = ins:execute(2, nil, T.null, { T.null, T.int }, 0 / 0, "",
+                        nil, nil, "15.11.2026", nil, nil, nil, nil, nil,
+                        nil, nil)
+   check("NULL, NaN, '' and a date as text", n == 1, err)
+   x = get(2) or {}
+   check("nil, T.null and {T.null, T.int} are NULL",
+         x.i == nil and x.b == nil and x.n == nil)
+   check("NaN goes into a DOUBLE", x.d ~= x.d, x.d)
+   check("'' is not NULL", x.v == "", x.v)
+   check("the server converts '15.11.2026'", x.dt == "2026-11-15", x.dt)
+   n, err = ins:execute{ 3, 12.345, [4] = 12.345, [5] = 1 / 0, [7] = 7,
+                         [9] = "today" }
+   check("a table sets only its positions", n == 1, err)
+   x = get(3) or {}
+   check("a DOUBLE into INTEGER and NUMERIC rounds",
+         x.i == 12 and x.n == "12.35", tostring(x.i) .. " " .. tostring(x.n))
+   check("inf into a DOUBLE", x.d == math.huge, x.d)
+   check("an integer into a CHAR", x.c == "7    ", x.c)
+   check("the other values stay from the last execute",
+         x.v == "" and x.b == nil, x.v)
+   info("'today': " .. tostring(x.dt))
+
+   -- values that the server does not take
+   local function fails(label, pattern, ...)
+      local r, e = ins:execute(...)
+      check(label .. ": nil, msg", r == nil and (pattern == nil
+                                                    or has(e, pattern)), e)
+      info(label .. ": " .. tostring(e))
+   end
+   ins:reset()
+   local rest = { nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+                  nil, nil, nil }
+   fails("a boolean into INTEGER", nil, 4, true, table.unpack(rest, 1, 14))
+   fails("binary data into UTF8 text", "Malformed", 4, nil, nil, nil, nil,
+         { "\255", T.binary }, table.unpack(rest, 1, 10))
+   fails("text that is not UTF-8", "Malformed", 4, nil, nil, nil, nil,
+         "\255", table.unpack(rest, 1, 10))
+   fails("text longer than the column", "truncation", 4, nil, nil, nil, nil,
+         string.rep("x", 101), table.unpack(rest, 1, 10))
+   fails("an invalid date as text", nil, 4, nil, nil, nil, nil, nil, nil,
+         nil, "2026-02-30", table.unpack(rest, 1, 7))
+   fails("an invalid T.date", "LuaSQL: invalid T.date", 4, nil, nil, nil,
+         nil, nil, nil, nil, { "2026-02-30", T.date },
+         table.unpack(rest, 1, 7))
+   check("no row 4", get(4) == nil)
+   ins:close()
+
+   -- the server must know the type of a parameter
+   local r, e = con:prepare("SELECT ? AS v FROM rdb$database")
+   check("SELECT ?: nil, msg at prepare", r == nil and e ~= nil, r)
+   info("SELECT ?: " .. tostring(e))
+   local cur = assert(con:execute(
+      "SELECT CAST(? AS INTEGER) AS v FROM rdb$database", "5"))
+   check("SELECT CAST(? AS INTEGER)", cur:fetch() == 5)
+   cur:close()
+   local q = assert(con:prepare(
+      "SELECT 1 AS v FROM rdb$database WHERE ? IS NULL"))
+   cur = assert(q:execute(T.null))
+   check("? IS NULL with NULL", cur:fetch() == 1)
+   cur:close()
+   cur = assert(q:execute(1))
+   check("? IS NULL with 1", cur:fetch() == nil)
+   q:close()
+end
+
+-- values over 32767 bytes go into a temporary BLOB, in both modes
+local function long_values()
+   local con = connect()
+   local T = luasql.type
+   pcall(run, con, "DROP TABLE luasql_long")
+   run(con, "CREATE TABLE luasql_long (id INTEGER, "
+          .. "bt BLOB SUB_TYPE TEXT CHARACTER SET UTF8, "
+          .. "bb BLOB SUB_TYPE BINARY, v VARCHAR(8191) CHARACTER SET UTF8)")
+   local text = string.rep("\195\164bc", 25000)    -- 100000 bytes
+   local bytes = {}
+   for k = 1, 100000 do bytes[k] = string.char(k % 256) end
+   local binary = table.concat(bytes)
+   local ins = assert(con:prepare(
+      "INSERT INTO luasql_long (id, bt, bb) VALUES (?, ?, ?)"))
+   for _, manual in ipairs{ false, true } do
+      assert(con:setautocommit(not manual))
+      local id = manual and 2 or 1
+      local n, err = ins:execute(id, text, { binary, T.binary })
+      check((manual and "manual" or "autocommit")
+               .. ": 100000 bytes of text and of binary data", n == 1, err)
+      if manual then assert(con:commit()) end
+      local x = rows(con, "SELECT bt, bb FROM luasql_long WHERE id = "
+                        .. id)[1] or {}
+      check("read back the same", x.bt == text and x.bb == binary,
+            (x.bt and #x.bt or "nil") .. " " .. (x.bb and #x.bb or "nil"))
+   end
+   assert(con:setautocommit(true))
+   ins:close()
+   local r, e = con:execute("INSERT INTO luasql_long (id, v) VALUES (3, ?)",
+                            string.rep("x", 40000))
+   check("40000 bytes into a VARCHAR: nil, msg", r == nil, r)
+   info("40000 bytes into a VARCHAR: " .. tostring(e))
+   local n = con:execute("INSERT INTO luasql_long (id, v) VALUES (3, ?)",
+                         string.rep("\195\164", 8191))
+   check("8191 characters of 2 bytes into VARCHAR(8191)", n == 1, n)
+   run(con, "DROP TABLE luasql_long")
+   con:close()
+end
+
+-- prepared statements: values kept by the driver, counts, cursors of a
+-- statement, transactions
+local function prepared()
+   local con = connect()
+   local watch = ctx.con()
+   local id = attachment_id(con)
+   local before = statements(watch, id)
+   pcall(run, con, "DROP TABLE luasql_prep")
+   run(con, "CREATE TABLE luasql_prep (id INTEGER, name VARCHAR(20))")
+
+   -- many executes in one transaction
+   local ins = assert(con:prepare(
+      "INSERT INTO luasql_prep (id, name) VALUES (?, ?)"))
+   check("prepare in autocommit leaves no transaction",
+         transactions_of(watch, id) == 0)
+   assert(con:setautocommit(false))
+   for k = 1, 1000 do
+      assert(ins:execute(k, "n" .. k))
+   end
+   assert(con:commit())
+   check("1000 rows", tonumber(rows(watch, "SELECT COUNT(*) AS n "
+                                       .. "FROM luasql_prep")[1].n) == 1000)
+   check("the statement stays valid after a commit", ins:execute() == 1)
+   assert(con:rollback())
+   check("and after a rollback", ins:execute{ [1] = 2000 } == 1)
+   assert(con:commit())
+   check("the values stay", tonumber(rows(watch, "SELECT COUNT(*) AS n "
+      .. "FROM luasql_prep WHERE id = 2000 AND name = 'n1000'")[1].n) == 1)
+   assert(con:setautocommit(true))
+   local q = assert(con:prepare("SELECT 1 AS v FROM rdb$database"))
+   check("autocommit: no transaction after prepare",
+         transactions_of(watch, id) == 0)
+   q:close()
+   assert(con:setautocommit(false))
+   q = assert(con:prepare("SELECT 1 AS v FROM rdb$database"))
+   check("manual: prepare starts the transaction",
+         transactions_of(watch, id) == 1)
+   assert(con:rollback())
+   assert(con:setautocommit(true))
+   q:close()
+
+   -- counts, positions, names
+   local r, e = ins:execute(1)
+   check("one of two: nil, msg", r == nil and e ==
+            "LuaSQL: statement has 2 parameters, 1 given", e)
+   r, e = ins:execute{ [3] = 1 }
+   check("position 3: nil, msg", r == nil and e ==
+            "LuaSQL: statement has 2 parameters, no position 3", e)
+   local ok, msg = pcall(ins.execute, ins, { id = 1 })
+   check("names raise", not ok and has(msg, "named parameters"), msg)
+   check("reset", ins:reset() == true)
+   r, e = ins:execute()
+   check("no value after reset", r == nil
+            and e == "LuaSQL: parameter 1 has no value", e)
+   r, e = ins:execute{ 1 }
+   check("parameter 2 has no value", r == nil
+            and e == "LuaSQL: parameter 2 has no value", e)
+   ins:close()
+
+   -- conn:execute with parameters
+   check("conn:execute with arguments",
+         con:execute("UPDATE luasql_prep SET name = ? WHERE id = ?",
+                     "x", 1) == 1)
+   check("conn:execute with a table",
+         con:execute("UPDATE luasql_prep SET name = ? WHERE id = ?",
+                     { "y", 1 }) == 1)
+   r, e = con:execute("UPDATE luasql_prep SET name = ? WHERE id = 1")
+   check("a placeholder without an argument: nil, msg", r == nil
+            and e == "LuaSQL: statement has 1 parameter, 0 given", e)
+   r, e = con:execute("SELECT 1 FROM rdb$database", 3)
+   check("the dialect of LuaSQL as third argument: nil, msg", r == nil
+            and e == "LuaSQL: statement has 0 parameters, 1 given", e)
+
+   -- the cursors of a statement
+   local sel = assert(con:prepare(
+      "SELECT id FROM luasql_prep WHERE id <= ? ORDER BY id"))
+   local cur = assert(sel:execute(3))
+   ok, msg = pcall(sel.execute, sel, 2)
+   check("execute with an open cursor raises",
+         not ok and has(msg, "cursor still open"), msg)
+   ok, msg = pcall(sel.reset, sel)
+   check("reset with an open cursor raises", not ok, msg)
+   ok, msg = sel:close()
+   check("close with an open cursor: false, msg",
+         ok == false and has(msg, "open cursor"), msg)
+   ok, msg = con:close()
+   check("conn:close with an open cursor: false, msg", ok == false, msg)
+   check("three rows", cur:fetch() == 1 and cur:fetch() == 2
+            and cur:fetch() == 3 and cur:fetch() == nil)
+   cur = assert(sel:execute())
+   check("execute after the last row", cur:fetch() == 1)
+   cur:close()
+   do
+      local left = assert(sel:execute(2))
+      left:fetch()
+   end
+   collectgarbage()
+   collectgarbage()
+   cur = assert(sel:execute(1))
+   check("execute after the cursor was collected",
+         cur:fetch() == 1 and cur:fetch() == nil)
+   ok, msg = con:close()
+   check("conn:close with an open statement: false, msg", ok == false
+            and msg == "LuaSQL: there are still open statements", msg)
+   sel:close()
+
+   -- the first row is read at the execute
+   local div = assert(con:prepare(
+      "SELECT 1 / (id - CAST(? AS INTEGER)) AS v FROM luasql_prep "
+         .. "WHERE id = 1"))
+   r, e = div:execute(1)
+   check("an error in the first row: nil, msg at the execute",
+         r == nil and e ~= nil, r)
+   info("first row: " .. tostring(e))
+   cur = assert(div:execute(2))
+   -- the quotient comes as text (probe B3), not as an integer
+   local q1 = cur:fetch()
+   check("the statement runs again", tonumber(q1) == -1, q1)
+   info("type of the quotient: " .. cur:getcoltypes()[1])
+   cur:close()
+   div:close()
+
+   -- one row of output
+   local ret = assert(con:prepare(
+      "INSERT INTO luasql_prep (id, name) VALUES (?, ?) RETURNING id, name"))
+   cur = assert(ret:execute(5000, "r"))
+   local a, b = cur:fetch()
+   check("RETURNING with parameters", a == 5000 and b == "r", a)
+   ok = pcall(ret.execute, ret, 5001, "s")
+   check("a second execute while its row is not fetched raises", not ok)
+   check("end of the row", cur:fetch() == nil)
+   cur = assert(ret:execute(5001, "s"))
+   check("then it runs again", cur:fetch() == 5001)
+   cur:close()
+   ret:close()
+   local blk = assert(con:prepare([[
+EXECUTE BLOCK (x INTEGER = ?) RETURNS (y INTEGER) AS
+BEGIN
+   y = :x * 2; SUSPEND;
+   y = :x * 3; SUSPEND;
+END]]))
+   cur = assert(blk:execute(7))
+   check("EXECUTE BLOCK with a parameter", cur:fetch() == 14
+            and cur:fetch() == 21 and cur:fetch() == nil)
+   blk:close()
+
+   -- statements left to the garbage collector
+   for k = 1, 20 do
+      local s = assert(con:prepare("SELECT id FROM luasql_prep "
+                                   .. "WHERE id = ?"))
+      if k % 2 == 0 then assert(s:execute(k)):fetch() end
+   end
+   collectgarbage()
+   collectgarbage()
+   run(con, "DROP TABLE luasql_prep")
+   local after = statements(watch, id)
+   check("no statement is left on the server", after == before,
+         string.format("before %d, after %d", before, after))
+   check("conn:close", con:close() == true)
+end
+
+-- the cost of a statement: prepared, and with conn:execute (on Windows
+-- os.clock() is the time since the start of the process)
+local function timing()
+   local con = connect()
+   local N = 2000
+   local function measure(label, f)
+      local t0 = os.clock()
+      for _ = 1, N do f() end
+      info(string.format("%s: %.0f us", label,
+                         (os.clock() - t0) / N * 1e6))
+   end
+   local sel = assert(con:prepare("SELECT 1 AS v FROM rdb$database"))
+   assert(con:setautocommit(false))
+   measure("prepared SELECT, one transaction", function()
+      local cur = sel:execute()
+      cur:fetch()
+      cur:close()
+   end)
+   assert(con:commit())
+   assert(con:setautocommit(true))
+   measure("prepared SELECT, autocommit", function()
+      local cur = sel:execute()
+      cur:fetch()
+      cur:close()
+   end)
+   sel:close()
+   measure("conn:execute SELECT, autocommit", function()
+      local cur = con:execute("SELECT 1 AS v FROM rdb$database")
+      cur:fetch()
+      cur:close()
+   end)
+   measure("conn:execute SELECT with a parameter, autocommit", function()
+      local cur = con:execute(
+         "SELECT 1 AS v FROM rdb$database WHERE 1 = ?", 1)
+      cur:fetch()
+      cur:close()
+   end)
+   check("measured", true)
+   con:close()
 end
 
 local scenarios = {
@@ -912,6 +1307,10 @@ local scenarios = {
    { "exec_procedure",     exec_procedure },
    { "exit_open",          exit_open },
    { "blob",               blob },
+   { "bind_types",         bind_types },
+   { "long_values",        long_values },
+   { "prepared",           prepared },
+   { "timing",             timing },
    { "kill",               kill },
 }
 
@@ -949,7 +1348,8 @@ if not args.keep and ctx.main then
    print("\n== Cleanup ==")
    for _, t in ipairs{ "luasql_test", "luasql_types", "luasql_drop",
                        "luasql_array", "luasql_returning", "luasql_values",
-                       "luasql_ddl", "luasql_exit" } do
+                       "luasql_ddl", "luasql_exit", "luasql_bind",
+                       "luasql_long", "luasql_prep" } do
       local exists = tonumber(rows(ctx.main, string.format(
          "SELECT COUNT(*) AS n FROM rdb$relations "
             .. "WHERE rdb$relation_name = '%s'", t:upper()))[1].n)

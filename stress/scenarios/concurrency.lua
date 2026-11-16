@@ -33,6 +33,10 @@
 --                        about a second, no hang; the wait may be set
 --                        on B first (backend.concLockWaitSetup, e.g. a
 --                        busy timeout)
+--                        Both are a limit without a call if the driver
+--                        waits for locks without a limit
+--                        (concurrencyLimits.noLockTimeout, Firebird):
+--                        in one thread they would hang
 --   lockReleasedOnClose  closing A releases its lock
 --   lockReleasedOnGc     so does collecting A
 --   walReader            on a database of its own in WAL mode
@@ -323,7 +327,16 @@ end
 -- (concurrencyLimits.databaseLock) does not let B lock another row. A
 -- DBMS that ends the transaction of B at the conflict
 -- (concurrencyLimits.conflictAborts) needs a rollback of B first.
+-- The reason if the driver has no NOWAIT and no lock timeout
+-- (concurrencyLimits.noLockTimeout), else nil.
+local function noLockTimeout(ctx)
+   return (ctx.backend.concurrencyLimits or {}).noLockTimeout
+end
+
 local function lockNowaitCase(ctx)
+   if noLockTimeout(ctx) then
+      return "limit", noLockTimeout(ctx)
+   end
    local a, b = openTracked(ctx), openTracked(ctx)
    check(a:setautocommit(false))
    check(b:setautocommit(false))
@@ -352,6 +365,9 @@ end
 -- With backend.concLockWaitSetup (%d: milliseconds) B sets its wait
 -- time first, e.g. a busy timeout; B must then wait about that long.
 local function lockWaitTimeoutCase(ctx)
+   if noLockTimeout(ctx) then
+      return "limit", noLockTimeout(ctx)
+   end
    local a, b = openTracked(ctx), openTracked(ctx)
    local setup = ctx.backend.concLockWaitSetup
    if setup then

@@ -7,6 +7,7 @@ This file describes the scenario for every DBMS. The cases, with what each one c
 - [`dataTypes-oracle.md`](dataTypes-oracle.md): all cases with Oracle;
 - [`dataTypes-sqlite3.md`](dataTypes-sqlite3.md): what differs with SQLite.
 - [`dataTypes-duckdb.md`](dataTypes-duckdb.md): what differs with DuckDB.
+- [`dataTypes-firebird.md`](dataTypes-firebird.md): what differs with Firebird.
 
 For every case the scenario writes one row, reads it back with `cur:fetch` and checks:
 
@@ -29,7 +30,9 @@ The scenario is skipped if the driver has no `conn:prepare` or the backend has n
 
 In exact mode (`numbers = "exact"`, the mode of the run) an integral value in the integer range must come back as a Lua integer, any other number as the correctly rounded float. In float mode every number must be a float within a relative deviation of 1e-14; if it is close but not exact, the case is a limit. Binary floating point columns hold IEEE values that the client library does not convert; their cases must be exact in every mode.
 
-Some cases read with other fetch modes than `fetch({})`: `"a"` (named keys), `"na"` (numeric and named keys, both must give the same value) and `"multi"` (`fetch()` without a table, values as return values).
+Some cases read with other fetch modes than `fetch({})`: `"a"` (named keys), `"na"` (numeric and named keys, both must give the same value) and `"multi"` (`fetch()` without a table, values as return values). The named keys are the column names as the DBMS describes them: in upper case where `backend.columnNameCase` is `"upper"` (Firebird). The case of names is not part of the LuaSQL API.
+
+The placeholders are `:1`, `:2`, ... (Oracle), with `backend.paramPrefix` e.g. `$1`, `$2`, ...; a DBMS with positions only gives its one placeholder in `backend.positionalPlaceholder` (`?` in Firebird).
 
 ## Columns
 
@@ -62,4 +65,4 @@ Where LuaSQL promises nothing, e.g. for the text form of a date read back, the e
 
 ## Firebird
 
-Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`). There is no `dataTypes-firebird.md` yet.
+The cases with Firebird, its columns, literals and limits are listed in [`dataTypes-firebird.md`](dataTypes-firebird.md).

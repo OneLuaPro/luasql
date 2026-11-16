@@ -21,6 +21,12 @@
 --                       the client buffer before the error; skipped if
 --                       the driver has no option prefetch
 --   killWithStmt        kill, then execute a prepared statement
+--   killStmtCursor      with autocommit on and off in turn: a prepared
+--                       statement with an open cursor over many rows,
+--                       and one without a cursor; kill, fetch until the
+--                       error, close the cursor, execute both
+--                       statements (they must fail), close them and the
+--                       connection
 --   killInTransaction   autocommit off, insert, kill, commit: commit
 --                       fails and the row is not on the server
 --   killThenGc          kill, drop connection and cursor without
@@ -49,7 +55,10 @@
 --                  what the client keeps for an open cursor of a lost
 --                  connection must be freed. Two of four iterations
 --                  run with autocommit off, so the cursor reads in a
---                  transaction of the connection
+--                  transaction of the connection; with prepare(), every
+--                  third cursor over many rows comes from a prepared
+--                  statement, which is executed after the kill (it
+--                  must fail) and closed
 --
 -- Sessions are counted without those in status KILLED
 -- (backend.liveSessionCountQuery): Oracle removes a killed session from
@@ -217,14 +226,19 @@ local function killFetchLoopStep(ctx, i)
    if i % 4 >= 2 then
       check(conn:setautocommit(false), nil, "setautocommit(false)")
    end
-   local cur, limit, expectedRow
+   local stmt, cur, limit, expectedRow
    if i % 2 == 0 and ctx.backend.clobRowsLiteral then
       cur = check(conn:execute(string.format(ctx.backend.clobRowsLiteral,
                                              lobRowSize, lobRowCount)))
       limit = lobRowCount
       expectedRow = function(k) return string.rep("x", k * lobRowSize) end
    else
-      cur = check(conn:execute(ctx.backend.manyRowsQuery))
+      if i % 3 == 0 and conn.prepare ~= nil then
+         stmt = check(conn:prepare(ctx.backend.manyRowsQuery))
+         cur = check(stmt:execute())
+      else
+         cur = check(conn:execute(ctx.backend.manyRowsQuery))
+      end
       limit = ctx.backend.manyRowsCount
       expectedRow = function(k) return k end
    end
@@ -235,6 +249,12 @@ local function killFetchLoopStep(ctx, i)
    fetchUntilLost(ctx, cur, rowsBeforeKill + 1, limit, expectedRow)
    -- The failed fetch may have closed the cursor already.
    pcall(cur.close, cur)
+   if stmt then
+      local again, err = stmt:execute()
+      expectLost(ctx, "execute of the statement after the kill", nil,
+                 again, err)
+      closeObject(stmt, "statement")
+   end
    closeObject(conn, "connection")
 end
 
@@ -308,6 +328,42 @@ local function killWithStmtCase(ctx)
    expectLost(ctx, "execute after the kill", nil, cur, err)
    closeObject(stmt, "statement")
    closeObject(conn, "connection")
+end
+
+-- A statement with an open cursor and one without, in both modes of
+-- autocommit: after the kill the cursor gives the rows already on the
+-- client, then the error; both statements fail at their execute and
+-- close cleanly.
+local function killStmtCursorCase(ctx)
+   local backend = ctx.backend
+   local int = ctx.types.int
+   local base = sessionCount(ctx)
+   for _, autocommit in ipairs({ true, false }) do
+      local mode = autocommit and "autocommit on" or "autocommit off"
+      local conn = open(ctx)
+      check(conn:setautocommit(autocommit), nil, "setautocommit")
+      local reader = check(conn:prepare(backend.manyRowsQuery))
+      local number = check(conn:prepare(backend.bindNumberQuery))
+      local cur = check(reader:execute())
+      for k = 1, rowsBeforeKill do
+         check(cur:fetch({}), nil, "fetch row " .. k)
+      end
+      kill(ctx, conn)
+      fetchUntilLost(ctx, cur, rowsBeforeKill + 1, backend.manyRowsCount,
+                     function(k) return k end)
+      -- The failed fetch may have closed the cursor already.
+      pcall(cur.close, cur)
+      local again, err = reader:execute()
+      expectLost(ctx, mode .. ": execute of the reader after the kill", nil,
+                 again, err)
+      again, err = number:execute({ { 1, int } })
+      expectLost(ctx, mode .. ": execute of the other statement after the"
+                 .. " kill", nil, again, err)
+      closeObject(reader, "statement")
+      closeObject(number, "statement")
+      closeObject(conn, "connection")
+   end
+   expectSessions(ctx, base, "after closing")
 end
 
 local function killInTransactionCase(ctx)
@@ -425,6 +481,7 @@ local caseList = {
    { name = "killLobPrefetch1000", run = killDuringLobFetchCase,
      needs = "clobRowsLiteral", prefetch = 1000 },
    { name = "killWithStmt", run = killWithStmtCase, usesPrepare = true },
+   { name = "killStmtCursor", run = killStmtCursorCase, usesPrepare = true },
    { name = "killInTransaction", run = killInTransactionCase },
    { name = "killThenGc", run = killThenGcCase },
    { name = "killThenReconnect", run = killThenReconnectCase },

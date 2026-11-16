@@ -55,6 +55,11 @@
 -- connections hold on the file. With backend.threadsLockSetup the lanes
 -- of lockWait set their wait time for locks first (a busy timeout).
 --
+-- A case that fails with the error of backend.threadsLimits[<case>]
+-- (a Lua pattern in field error) is a limit with its reason: e.g. in
+-- Firebird with SNAPSHOT a transaction that waited for a row lock
+-- cannot change the row after the holder committed.
+--
 -- Skipped without Lanes, without ctx.laneSpec or without the queries
 -- of the backend; lockWait and deadlock are skipped without the
 -- threads table. Cases that count sessions or kill one need the admin
@@ -715,6 +720,11 @@ local function runCases(ctx)
          local ok, status, message = pcall(case.run, ctx)
          if not ok then
             status, message = "fail", status
+         end
+         local limit = (ctx.backend.threadsLimits or {})[case.name]
+         if status == "fail" and limit
+            and tostring(message):find(limit.error) then
+            status, message = "limit", limit.reason
          end
          local warning = cleanUp(ctx)
          if status == nil then

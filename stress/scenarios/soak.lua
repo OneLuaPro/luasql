@@ -114,13 +114,16 @@ local function adminValue(ctx, sql, what)
 end
 
 -- The server counters of the test session (backend.serverCounters and
--- the open transactions), each { label, query } or { label, read }.
+-- the open transactions, unless that is one of them already, as with
+-- Firebird), each { label, query } or { label, read }.
 local function counterList(backend)
    local list = {}
+   local listed = false
    for _, counter in ipairs(backend.serverCounters or {}) do
       list[#list + 1] = counter
+      listed = listed or counter == backend.transactionCounter
    end
-   if backend.transactionCounter then
+   if backend.transactionCounter and not listed then
       list[#list + 1] = backend.transactionCounter
    end
    return list
@@ -388,7 +391,7 @@ function soak.run(ctx)
    for _, key in ipairs({ "soakTableCreate", "soakTableDrop", "soakInsert",
                           "soakUpdate", "soakDelete", "soakTypesQuery",
                           "offsetQuery", "offsetBindQuery", "clobQuery",
-                          "blobQuery", "jsonQuery", "invalidQuery",
+                          "blobQuery", "invalidQuery",
                           "fetchErrorQuery", "multiRowQuery" }) do
       if backend[key] == nil then
          report.print("  ", "skipped: backend has no " .. key, "skip")

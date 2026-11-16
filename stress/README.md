@@ -542,7 +542,7 @@ Tested with DuckDB 1.5.6, linked statically into the `luasql.duckdb` of OneLuaPr
 
 ### Firebird
 
-Tested with Firebird 5.0.4 (SuperServer) on Windows 10 and the `luasql.firebird` of OneLuaPro, which contains the client of Firebird 6. Tier smoke takes about 40 seconds, tier nightly about 1¼ hours, of it about 20 minutes for the 40 000 logons of `connectionLifecycle`. `luasql.firebird` has no `conn:prepare` and no driver options yet; they come with the bind API of the driver. Until then the suite tests what goes through `conn:execute`: scenarios `cursorLifecycle`, `errorPaths`, `connectionLifecycle` and `connectionLoss`; the others are skipped.
+Tested with Firebird 5.0.4 (SuperServer) on Windows 10 and the `luasql.firebird` of OneLuaPro, which contains the client of Firebird 6. Tier smoke takes about 2½ minutes, tier nightly about 2 hours, of it about 20 minutes for the 40 000 logons of `connectionLifecycle`. `luasql.firebird` has prepared statements since its bind API (task `bindapi-firebird`), and no driver options yet. The suite tests all scenarios but `prefetch` and `warnings`.
 
 **Monitoring tables:** what a connection holds on the server shows in the monitoring tables (`MON$ATTACHMENTS`, `MON$STATEMENTS`, `MON$TRANSACTIONS`). Within one transaction they show the state of their first query; `COMMIT RETAIN` does not change that. The backend reads them in an autonomous transaction, a new one at each query: `EXECUTE BLOCK RETURNS (n BIGINT) AS BEGIN IN AUTONOMOUS TRANSACTION DO SELECT COUNT(*) FROM ... INTO :n; SUSPEND; END`. With autocommit on, the plain query would be fresh as well; the autonomous block keeps the measurement independent of the transactions of the driver that it measures. The kill of an attachment is such a block as well; it takes effect at once.
 
@@ -550,10 +550,18 @@ Tested with Firebird 5.0.4 (SuperServer) on Windows 10 and the `luasql.firebird`
 
 **Transactions:** with autocommit on, the mode of a new connection, `luasql.firebird` runs every statement in a transaction of its own, which ends with the statement or, for a query, with its cursor. With autocommit off the connection has one `SNAPSHOT` transaction from its first statement to `conn:commit()` or `conn:rollback()`; while cursors of it are open, these only retain it, and the cursors read on (phase `commitCursor` of `cursorLifecycle`). The tables of the scenarios are created with plain DDL; a row that another connection may have committed is counted in an autonomous transaction.
 
+**Parameters:** the only placeholder is `?`, by position; names are not supported. The server must know the type of each placeholder from its place in the statement (`SELECT ? FROM rdb$database` fails at the prepare with `Data type unknown`), so the backend casts a placeholder that stands alone (`CAST(? AS BIGINT)`); `luasql.firebird` binds a value in a type of its own, and the server converts it. A column of a query has one type: `DOUBLE PRECISION` gives an integer back as a float of the same value, but not exactly above 2^53 (`backend.bindIntegerQuery`). A timestamp keeps 4 digits of a second (`backend.timestampDigits`); `luasql.firebird` cuts off the others, and a string with 6 digits gives a conversion error of the server. A boolean bound into a `VARCHAR` is `TRUE` or `FALSE`.
+
+**Names of columns:** Firebird describes unquoted names in upper case, and `luasql.firebird` gives them so (`getcolnames`, `fetch` with names): `SELECT id, s ...` gives `ID` and `S`. The scenarios look them up so (`backend.columnNameCase = "upper"`). The case of names is not part of the LuaSQL API; `luasql.oci8` writes them in lower case, `luasql.sqlite3` and `luasql.duckdb` as written in the SQL.
+
 **Known limitations**, reported as "limit":
 
 | Limit | Scenario, case | Reason |
 | ---- | ---- | ---- |
+| `enableAutocommit` | `transactions`, `enableAutocommit` | `conn:setautocommit(true)` rolls back an open transaction (`luasql.firebird`, as `luasql.oci8`, `luasql.sqlite3` and `luasql.duckdb`). |
+| types | `dataTypes`, 27 cases | Column `n` is `DOUBLE PRECISION` (integers above 2^53, 1e200), `TIMESTAMP` with 4 digits of a second (also in column `d`, which is a `TIMESTAMP`), no years before Christ, `luasql.type.time` bound as `TIME`, no `BOOLEAN` in numbers, the length of `VARCHAR(n)` in characters, text of a number to `DOUBLE PRECISION` not always correctly rounded; the list is in [`doc/dataTypes-firebird.md`](doc/dataTypes-firebird.md). |
+| `noLockTimeout` | `concurrency`, `lockNowait` and `lockWaitTimeout` | `luasql.firebird` waits for locks without a limit (default of Firebird); `NOWAIT` and a lock timeout need an option (topic 12). In one thread the cases would hang, so they run no call. |
+| `conflictAfterCommit` | `threads`, `parallelWriters` and `lockWait` | With `SNAPSHOT`, the isolation of `luasql.firebird`, a transaction that waited for a row lock cannot change or lock the row once the holder has committed (`update conflicts with concurrent update`); it goes on only if the holder rolls back. |
 | `endAfterKill` | `connectionLoss`, `killThenAutocommit` | After a kill, `conn:setautocommit(true)`, `conn:rollback()` and `conn:commit()` return `true`, once the commit with open work has failed: the client of Firebird takes the transaction of a lost connection as rolled back, and without an open transaction the driver does not call the server. |
 
 **Behavior worth knowing**, checked but not reported as limit:
@@ -564,7 +572,7 @@ Tested with Firebird 5.0.4 (SuperServer) on Windows 10 and the `luasql.firebird`
 - `clobRows` of `cursorLifecycle` lets the process grow at first and then not any more: in smoke +7504 KB in the first round and a trend of 0 in the second, in nightly +10796 KB with a trend of 0. `blobRows`, which reads the same amounts right after it, grows by 0. This is the heap settling in, as with Oracle (see [Phases](#phases) in the Annex), not a leak.
 - An `EXECUTE BLOCK` without `SUSPEND` gives no row; the backend uses queries and `EXECUTE BLOCK` with `SUSPEND` wherever it needs a row.
 
-**Not covered with Firebird yet:** everything that needs `conn:prepare` (scenarios `stmtLifecycle`, `params`, `concurrency`, `threads`, `dataTypes`, `transactions`, `volume`, `soak` and single phases and cases of the others), `prefetch` (no driver options), `warnings` (no warnings of this kind) and `badColumnType` of `errorPaths` (the error of the unsupported type `ARRAY` comes at the fetch).
+**Not covered with Firebird yet:** in `dataTypes` the national character set, time zones, intervals, row ids and JSON (see [`doc/dataTypes-firebird.md`](doc/dataTypes-firebird.md)); in `volume` the cases with a full tablespace (no tablespaces of a limited size); `prefetch` (no driver options), `warnings` (no warnings of this kind), `jsonRead` of `stmtLifecycle` and the JSON values of `soak` (no JSON functions in Firebird 5), the named parameters of `params` and `badColumnType` of `errorPaths` (the error of the unsupported type `ARRAY` comes at the fetch).
 
 ### ODBC
 

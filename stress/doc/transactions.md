@@ -34,7 +34,7 @@ Each case runs once. Every case starts with autocommit on, no open transaction a
 
 Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 
-The phases run with autocommit off and one prepared insert. Besides the usual server counters they count the open transactions of the test session (`open tx`, `backend.transactionCounter`; it counts a transaction only once it has changed data). Before each phase a precheck opens a transaction and checks that this counter sees it; otherwise the phase fails as invalid, because "open tx 0 → 0" would test nothing. Without the admin connection the precheck and the server counters are left out.
+The phases run with autocommit off and one prepared insert. Besides the usual server counters they count the open transactions of the test session (`open tx`, `backend.transactionCounter`; it counts a transaction only once it has changed data); where this counter is one of the server counters already (Firebird), it is not added a second time. Before each phase a precheck opens a transaction and checks that this counter sees it; otherwise the phase fails as invalid, because "open tx 0 → 0" would test nothing. Without the admin connection the precheck and the server counters are left out.
 
 | Phase            | Each iteration                                                                                                                          | Fails when                                                                                                                                         |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -59,4 +59,6 @@ The cases `closeOpen`, `gcOpen` and `closeVariable` matter because Oracle commit
 
 ## Firebird
 
-Skipped: `luasql.firebird` has no `conn:prepare` yet; it comes with the bind API of the driver (task `bindapi-firebird`).
+The table is `luastress_tx (id INTEGER PRIMARY KEY, v VARCHAR(100))`, created with plain DDL and dropped by an `EXECUTE BLOCK` that looks into `RDB$RELATIONS` first. "Another session" is the admin connection (`SYSDBA`) in autocommit mode: each of its queries runs in a transaction of its own and sees what is committed; Firebird 5 has no schemas, so it reads the table by its name. The counter of open transactions is the server counter `transactions` (`MON$TRANSACTIONS` of the test attachment, in an autonomous transaction); it sees a transaction from its first statement, also one that has only read.
+
+`enableAutocommit` is a limit: `setautocommit(true)` rolls back the open transaction (decision D6 of `core-firebird`, as in `luasql.oci8`, `luasql.sqlite3` and `luasql.duckdb`). A failed statement undoes only itself (`errorKeepsWork` passes). DDL is part of the transaction, a rollback undoes it: `ddlCommits` passes. `savepoint` runs with `SAVEPOINT` and `ROLLBACK TO SAVEPOINT`, which `luasql.firebird` accepts by SQL. `plsqlAutocommit` runs an `EXECUTE BLOCK` with an `INSERT`, the PSQL (procedural SQL) of Firebird. `commit()` and `rollback()` in autocommit mode return `true`. Row counts are integers.
