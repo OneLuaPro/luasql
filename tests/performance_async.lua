@@ -76,19 +76,22 @@ if driver_name == "postgres" and conn.send_query and conn.get_result then
     
     start_time = os.clock()
     for i = 1, ITERATIONS, ASYNC_BATCH do
+        -- libpq takes one query at a time: send the batch as one query
+        -- of several statements, then read all its results (one per
+        -- statement) until get_result returns nil
+        local batch = {}
         for j = 0, ASYNC_BATCH - 1 do
             if (i+j) <= ITERATIONS then
-                conn:send_query(string.format("INSERT INTO perf_test VALUES (%d, 'async_value_%d')", i+j, i+j))
+                batch[#batch + 1] = string.format("INSERT INTO perf_test VALUES (%d, 'async_value_%d')", i+j, i+j)
             end
         end
-        for j = 0, ASYNC_BATCH - 1 do
-            if (i+j) <= ITERATIONS then
-                local res = conn:get_result()
-                while res do
-                    if type(res) == "userdata" then res:close() end
-                    res = conn:get_result()
-                end
-            end
+        assert(conn:send_query(table.concat(batch, "; ")))
+        while conn:poll() do end
+        local res, err = conn:get_result()
+        while res ~= nil or err ~= nil do
+            assert(res, err)
+            if type(res) == "userdata" then res:close() end
+            res, err = conn:get_result()
         end
     end
     end_time = os.clock()

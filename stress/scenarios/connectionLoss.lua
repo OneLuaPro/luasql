@@ -60,6 +60,11 @@
 --                  statement, which is executed after the kill (it
 --                  must fail) and closed
 --
+-- A driver that reads the whole result of a query at the execute
+-- (backend.resultOnClient, e.g. luasql.postgres) gives all rows of an
+-- open cursor after the kill: the cursor must then end normally (fetch
+-- gives nil without a message) instead of with the error.
+--
 -- Sessions are counted without those in status KILLED
 -- (backend.liveSessionCountQuery): Oracle removes a killed session from
 -- v$session only after a few seconds, independent of the client.
@@ -173,16 +178,28 @@ end
 -- Fetches from cur after the kill until an error comes; rows first ..
 -- limit are left. Rows already on the client may still arrive, but
 -- each must be the right one (row k is expectedRow(k)); a normal end of
--- the result is wrong.
+-- the result is wrong, unless the whole result is on the client
+-- (backend.resultOnClient): then all rows must come, and the end.
 local function fetchUntilLost(ctx, cur, first, limit, expectedRow)
+   local onClient = ctx.backend.resultOnClient
    for k = first, limit do
       local row, err = cur:fetch({})
       if row == nil then
+         expect(not onClient, string.format("fetch after the kill: row %d"
+                   .. " of a result on the client did not come: %s", k,
+                   tostring(err)))
          expectLost(ctx, "fetch after the kill", nil, row, err)
          return
       end
       expect(row[1] == expectedRow(k), string.format("fetch after the"
                 .. " kill: row %d has a wrong value", k))
+   end
+   if onClient then
+      local row, err = cur:fetch({})
+      expect(row == nil and err == nil, "fetch after the kill: expected"
+             .. " the end of the result after its last row, got "
+             .. tostring(row) .. ", " .. tostring(err))
+      return
    end
    error("fetch after the kill: all rows arrived", 0)
 end

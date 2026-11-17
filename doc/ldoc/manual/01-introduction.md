@@ -217,6 +217,34 @@ code without an error message come first.
 - **firebird: the driver does not set the size of the page cache** (LuaSQL
   asks for 90 pages with every connection, which a server in the mode Classic
   or SuperClassic follows): the configuration of the server decides.
+- **postgres: values are read by their type**: `boolean` as a boolean,
+  `smallint`, `integer`, `bigint` and `oid` as integers, `real` and `double
+  precision` as floats (also `NaN` and the infinities), `bytea` as a string
+  of its bytes; LuaSQL returns every value as text (`"42"`, `"t"`,
+  `"\x00ff"`). `numeric`, dates, times and the other types stay text, so
+  `12.30` in a `numeric` column is still the string `"12.30"`.
+- **postgres: `conn:commit()` returns `false` and a message when PostgreSQL
+  rolls back instead**, because an error has aborted the transaction; LuaSQL
+  returns `true`, while the changes are lost.
+- **postgres: with autocommit off, a transaction begins with the next
+  statement**, also after a `COMMIT` or `ROLLBACK` by SQL;
+  `setautocommit(false)`, `commit` and `rollback` begin none. LuaSQL begins
+  one at once with these three functions, so after a `COMMIT` or `ROLLBACK`
+  by SQL the following statements are committed at once and cannot be rolled
+  back.
+- **postgres: `conn:commit()` and `conn:rollback()` with autocommit on
+  return `true`**, and they end a transaction begun by SQL (`BEGIN`); LuaSQL
+  returns `false` and only sends `COMMIT` or `ROLLBACK`.
+- **postgres: text is always UTF-8.** The driver sets `client_encoding` to
+  UTF8, also for a database in another encoding or with `PGCLIENTENCODING`
+  set; LuaSQL uses the default of libpq, the encoding of the database.
+- **postgres: dates and times are text in ISO form** (`2026-11-16`,
+  `2026-11-16 12:30:00.5`): the driver sets `DateStyle` to ISO if the server
+  reports another one (the order of day and month for input stays); LuaSQL
+  returns them in the form of the server's `DateStyle`, e.g. `16.11.2026`
+  with `German`.
+- **postgres: the number of rows a statement has changed and `cur:numrows()`
+  are integers** (`1`); LuaSQL returns floats (`1.0`).
 
 **Other changes**
 
@@ -308,6 +336,47 @@ code without an error message come first.
   in it (e.g. a division by zero) is the result of `conn:execute`; with
   LuaSQL it comes from the first `fetch`. Cursors get no name; LuaSQL names
   each one, which costs a call to the server per query.
+- **postgres: `conn:close()` with open cursors and `env:close()` with open
+  connections** return `false` and a message, and a to-be-closed connection
+  or environment with open objects stays open, as with `close`; LuaSQL
+  closes them all the same. `conn:close()` with an open transaction leaves
+  it to the server, which rolls it back, as in LuaSQL.
+- **postgres: transactions:**
+    - `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)`
+      return `false` and a message if the server fails them; LuaSQL ignores
+      the failure. If `setautocommit(true)` cannot roll back, autocommit
+      stays off.
+    - After a lost connection, `conn:rollback()` and
+      `conn:setautocommit(true)` return `true` (the server rolls back the
+      transaction of a lost connection), `conn:commit()` returns `false` and
+      a message.
+- **postgres: an SQL text without a statement** (`""`, `";"`) returns 0;
+  LuaSQL returns `nil` and a message without the error.
+- **postgres: `COPY ... FROM STDIN` and `COPY ... TO STDOUT`** return `nil`
+  and `LuaSQL: COPY FROM STDIN is not supported` (or `TO STDOUT`); the
+  driver ends the COPY, so the connection stays usable. LuaSQL returns `nil`
+  and a message without the error.
+- **postgres: `cur:getcoltypes()`** needs no query for the built-in types;
+  the names of other types are read with one query per cursor and kept by
+  the connection. In a transaction aborted by an error it returns `nil` and
+  a message for a type not known yet; LuaSQL runs one query per column and
+  gives `"undefined"` then. A `varchar` without a length is `"varchar"`;
+  LuaSQL gives `"varchar (-5)"`.
+- **postgres: messages of the server** end without the line end of libpq.
+- **postgres: asynchronous queries** (`send_query`, `poll`, `get_result`,
+  `getfd`):
+    - The connection stays in the blocking mode of libpq; LuaSQL switches it
+      to the non-blocking mode at the connect and back and forth with
+      `execute` and `send_query`.
+    - `send_query` returns `true`; LuaSQL returns `true` and the state of
+      the sending.
+    - While a query of `send_query` has results that were not read with
+      `get_result` (until it returns `nil`), `execute` and `send_query`
+      raise an error, and `commit`, `rollback` and `setautocommit(true)`
+      return `false` and a message; with LuaSQL libpq refuses the second
+      `send_query`, and `execute` waits for the results and drops them.
+    - With autocommit off `send_query` begins a transaction, as `execute`
+      does.
 
 **Extensions**
 
@@ -331,6 +400,8 @@ code without an error message come first.
   prepared statements, parameters (also `conn:execute(sql, ...)`),
   `luasql.type`, long values as temporary `BLOB`s, and
   `luasql._CLIENTVERSION`, the version of the Firebird client library.
+- The additions of postgres: `luasql._CLIENTVERSION`, the version of
+  libpq loaded (e.g. `"18.7"`); LuaSQL means to set it but never does.
 
 ## Where to Go Next
 

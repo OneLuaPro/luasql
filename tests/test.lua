@@ -947,8 +947,8 @@ end
 datasource = arg[2] or DEFAULT_TEST_DATABASE or "luasql-test"
 username = arg[3] or DEFAULT_USERNAME or nil
 password = arg[4] or DEFAULT_PASSWORD or nil
-host = arg[5] or "localhost"
-port = arg[6] or nil
+host = arg[5] or DEFAULT_HOST or "localhost"
+port = arg[6] or DEFAULT_PORT or nil
 
 -- Complete set of tests
 tests = {

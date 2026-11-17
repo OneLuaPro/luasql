@@ -21,6 +21,7 @@ The [upstream documentation](https://lunarmodules.github.io/luasql/) describes t
 | SQLite driver           | `luasql.sqlite3` reworked: prepared statements, typed parameters, the functions of sqlean, transactions and fixes; see [below](#sqlite-driver-luasqlsqlite3) |
 | DuckDB driver           | `luasql.duckdb` reworked: prepared statements, typed parameters, values read by their type, one database per file in the process, transactions and fixes; DuckDB with its extensions built in; see [below](#duckdb-driver-luasqlduckdb) |
 | Firebird driver         | `luasql.firebird` reworked: prepared statements, typed parameters, a crash after a failed query, statements left on the server, the error convention, transactions (autocommit with a transaction per statement), text in UTF-8, exact `NUMERIC`, `RETURNING`; see [Differences](#differences-from-lunarmodulesluasql) |
+| PostgreSQL driver       | `luasql.postgres` reworked: values read by their type, the error convention, transactions (a commit after an error reports the loss), text in UTF-8, dates in ISO form, a working asynchronous API, `luasql._CLIENTVERSION`; see [Differences](#differences-from-lunarmodulesluasql) |
 | Stress test suite       | [`stress/`](stress/README.md): a long-running test of driver robustness, implemented for Oracle so far; see [below](#stress-test-suite) |
 
 The guiding rule for the Oracle driver: *the driver uses OCI (Oracle Call Interface) correctly, it does not try to improve OCI.* It covers the OCI features well, but stays inside the frame of the LuaSQL API; additions are kept where another LuaSQL driver already offers the same, so that the drivers behave alike. Where Oracle or OCI behaves differently from what a user might expect, the driver does not hide it; such behavior is documented as a known limitation.
@@ -53,10 +54,17 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **firebird: `NUMERIC` and `DECIMAL` with a scale are exact text** (`"12.30"`); LuaSQL returns the integer without its scale (`1230`). With a scale of 0 they are integers as before.
 - **firebird: the number of rows a statement has changed is an integer** (`1`); LuaSQL returns a float (`1.0`).
 - **firebird: the driver does not set the size of the page cache** (LuaSQL asks for 90 pages with every connection, which a server in the mode Classic or SuperClassic follows): the configuration of the server decides.
+- **postgres: values are read by their type**: `boolean` as a boolean, `smallint`, `integer`, `bigint` and `oid` as integers, `real` and `double precision` as floats (also `NaN` and the infinities), `bytea` as a string of its bytes; LuaSQL returns every value as text (`"42"`, `"t"`, `"\x00ff"`). `numeric`, dates, times and the other types stay text, so `12.30` in a `numeric` column is still the string `"12.30"`.
+- **postgres: `conn:commit()` returns `false` and a message when PostgreSQL rolls back instead**, because an error has aborted the transaction; LuaSQL returns `true`, while the changes are lost.
+- **postgres: with autocommit off, a transaction begins with the next statement**, also after a `COMMIT` or `ROLLBACK` by SQL; `setautocommit(false)`, `commit` and `rollback` begin none. LuaSQL begins one at once with these three functions, so after a `COMMIT` or `ROLLBACK` by SQL the following statements are committed at once and cannot be rolled back.
+- **postgres: `conn:commit()` and `conn:rollback()` with autocommit on return `true`**, and they end a transaction begun by SQL (`BEGIN`); LuaSQL returns `false` and only sends `COMMIT` or `ROLLBACK`.
+- **postgres: text is always UTF-8.** The driver sets `client_encoding` to UTF8, also for a database in another encoding or with `PGCLIENTENCODING` set; LuaSQL uses the default of libpq, the encoding of the database.
+- **postgres: dates and times are text in ISO form** (`2026-11-16`, `2026-11-16 12:30:00.5`): the driver sets `DateStyle` to ISO if the server reports another one (the order of day and month for input stays); LuaSQL returns them in the form of the server's `DateStyle`, e.g. `16.11.2026` with `German`.
+- **postgres: the number of rows a statement has changed and `cur:numrows()` are integers** (`1`); LuaSQL returns floats (`1.0`).
 
 **Other changes**
 
-- **Errors** follow the section "Error handling" of the LuaSQL manual in all drivers documented here (so far oci8, sqlite3, duckdb and firebird):
+- **Errors** follow the section "Error handling" of the LuaSQL manual in all drivers documented here (so far oci8, sqlite3, duckdb, firebird and postgres):
   - A wrong use of the API raises an error: a closed object, an argument of the wrong type, an unknown option or value of `setoption`/`getoption`, an invalid parameter, `execute` or `reset` while the cursor of the statement is open.
   - A failure in the database or the client library returns `nil` and a message.
   - `commit`, `rollback` and `setautocommit` return `false` and a message on failure (LuaSQL: partly `nil`); code that tests for `nil` misses it.
@@ -88,6 +96,19 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **firebird: `SAVEPOINT`, `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT` and `SELECT ... FOR UPDATE` or `WITH LOCK`** are accepted; LuaSQL returns `unsupported SQL statement`. `COMMIT`, `ROLLBACK` and `SET TRANSACTION` by SQL are still refused: the driver holds the transactions.
 - **firebird: statements use the SQL dialect of the database**, and `conn:execute(sql, ...)` binds further arguments as parameters: a program that passes the dialect as third argument, as in LuaSQL, gets `nil` and `LuaSQL: statement has 0 parameters, 1 given`.
 - **firebird: the first row of a query is read by the execute**: an error in it (e.g. a division by zero) is the result of `conn:execute`; with LuaSQL it comes from the first `fetch`. Cursors get no name; LuaSQL names each one, which costs a call to the server per query.
+- **postgres: `conn:close()` with open cursors and `env:close()` with open connections** return `false` and a message, and a to-be-closed connection or environment with open objects stays open, as with `close`; LuaSQL closes them all the same. `conn:close()` with an open transaction leaves it to the server, which rolls it back, as in LuaSQL.
+- **postgres: transactions:**
+  - `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)` return `false` and a message if the server fails them; LuaSQL ignores the failure. If `setautocommit(true)` cannot roll back, autocommit stays off.
+  - After a lost connection, `conn:rollback()` and `conn:setautocommit(true)` return `true` (the server rolls back the transaction of a lost connection), `conn:commit()` returns `false` and a message.
+- **postgres: an SQL text without a statement** (`""`, `";"`) returns 0; LuaSQL returns `nil` and a message without the error.
+- **postgres: `COPY ... FROM STDIN` and `COPY ... TO STDOUT`** return `nil` and `LuaSQL: COPY FROM STDIN is not supported` (or `TO STDOUT`); the driver ends the COPY, so the connection stays usable. LuaSQL returns `nil` and a message without the error.
+- **postgres: `cur:getcoltypes()`** needs no query for the built-in types; the names of other types are read with one query per cursor and kept by the connection. In a transaction aborted by an error it returns `nil` and a message for a type not known yet; LuaSQL runs one query per column and gives `"undefined"` then. A `varchar` without a length is `"varchar"`; LuaSQL gives `"varchar (-5)"`.
+- **postgres: messages of the server** end without the line end of libpq.
+- **postgres: asynchronous queries** (`send_query`, `poll`, `get_result`, `getfd`):
+  - The connection stays in the blocking mode of libpq; LuaSQL switches it to the non-blocking mode at the connect and back and forth with `execute` and `send_query`.
+  - `send_query` returns `true`; LuaSQL returns `true` and the state of the sending.
+  - While a query of `send_query` has results that were not read with `get_result` (until it returns `nil`), `execute` and `send_query` raise an error, and `commit`, `rollback` and `setautocommit(true)` return `false` and a message; with LuaSQL libpq refuses the second `send_query`, and `execute` waits for the results and drops them.
+  - With autocommit off `send_query` begins a transaction, as `execute` does.
 
 **Extensions**
 
@@ -98,6 +119,7 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - The additions of sqlite3 described [below](#sqlite-driver-luasqlsqlite3): the functions of sqlean on every connection, names of parameters without a prefix (`id` for `:id`) and `?NNN` as a name, dates and times checked against the calendar.
 - The additions of duckdb described [below](#duckdb-driver-luasqlduckdb): parameters (also `conn:execute(sql, ...)`), `luasql.type`, names of parameters without `$`, `":memory:name"`, the extensions built into OneLuaPro.
 - The additions of firebird: prepared statements, parameters (also `conn:execute(sql, ...)`), `luasql.type`, long values as temporary `BLOB`s, and `luasql._CLIENTVERSION`, the version of the Firebird client library; see the topic Firebird of the manual (`doc/ldoc/manual/06-firebird.md`).
+- The additions of postgres: `luasql._CLIENTVERSION`, the version of libpq loaded (e.g. `"18.7"`); LuaSQL means to set it but never does.
 
 ## Oracle Driver `luasql.oci8`
 
@@ -218,9 +240,9 @@ Tested with DuckDB 1.5.6 and Lua 5.5 on Windows, built with DuckDB and its exten
 
 ## Testing
 
-- `tests/test.lua` is the test bench of upstream LuaSQL, e.g. `lua test.lua oci8 <source> <user> <password>` in `tests/`; for firebird, `lua test.lua firebird` takes the connection from the variables `FIREBIRD_TEST_*` of `checks/firebird.lua`.
+- `tests/test.lua` is the test bench of upstream LuaSQL, e.g. `lua test.lua oci8 <source> <user> <password>` in `tests/`; for firebird and postgres, `lua test.lua firebird` and `lua test.lua postgres` take the connection from the variables `FIREBIRD_TEST_*` and `POSTGRES_TEST_*` of `checks/`.
 - [`stress/`](stress/README.md) holds the stress test suite.
-- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD`, `lua checks/sqlite3.lua [<database file>]`, `lua checks/duckdb.lua [<database file>]` or `lua checks/firebird.lua` with the connection in `FIREBIRD_TEST_SOURCE`, `FIREBIRD_TEST_USER` and `FIREBIRD_TEST_PASSWORD`; so far for `luasql.oci8`, `luasql.sqlite3`, `luasql.duckdb` and `luasql.firebird`. `checks/bench_oci8.lua` measures short queries and large results, e.g. to compare values of the option `prefetch` (`-p`).
+- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD`, `lua checks/sqlite3.lua [<database file>]`, `lua checks/duckdb.lua [<database file>]`, `lua checks/firebird.lua` with the connection in `FIREBIRD_TEST_SOURCE`, `FIREBIRD_TEST_USER` and `FIREBIRD_TEST_PASSWORD`, or `lua checks/postgres.lua` with the connection in `POSTGRES_TEST_HOST`, `POSTGRES_TEST_PORT`, `POSTGRES_TEST_NAME`, `POSTGRES_TEST_USER` and `POSTGRES_TEST_PASSWORD`; so far for `luasql.oci8`, `luasql.sqlite3`, `luasql.duckdb`, `luasql.firebird` and `luasql.postgres`. `checks/bench_oci8.lua` measures short queries and large results, e.g. to compare values of the option `prefetch` (`-p`).
 
 ### Stress Test Suite
 
