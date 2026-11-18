@@ -22,6 +22,8 @@ Each worker (the test connection and each thread) has its own range of ids, work
 | second connection       | every 100th round     | opens another connection, runs a query and closes it                                                                                      | a call fails                                                  |
 | warning                 | every 100th round     | the statement with a compile error from scenario [`warnings`](warnings.md), if the backend has it, test connection only (DDL, Data Definition Language: one worker is enough) | it returns an error                                    |
 
+Where an error aborts the transaction (`backend.transactionLimits.errorAborts`, DuckDB and PostgreSQL), the round rolls back after the invalid statement and after the failing fetch, as a program would; nothing of the round is lost, its DML is committed or rolled back before.
+
 ## Samples and result
 
 A sample is taken every 30 seconds (in tier `smoke` every 10 seconds) after a full garbage collection:
@@ -133,3 +135,31 @@ A run of 4 hours (`lua stress.lua duckdb soak --csv soak240-duckdb.csv`) on Wind
 ## Firebird
 
 The rounds run with two lanes, each on ids of its own. Firebird 5 has no JSON functions: the rounds read no JSON value (`backend.jsonQuery` is missing). The date and time query reads `LOCALTIMESTAMP`, `CURRENT_TIMESTAMP` (with time zone), `CURRENT_DATE` and `LOCALTIME`. The server counters are `statements` and `transactions` of the test attachment, as in the other scenarios.
+
+## PostgreSQL
+
+The scenario runs with lanes: each worker changes rows of its own ids only. The table has the types `integer` and `varchar`; the date and time query reads `localtimestamp`, `current_timestamp`, `current_date`, `localtime` and `interval '36 hours'`. The JSON value is built with `to_json`, as in [`stmtLifecycle`](stmtLifecycle.md). The errors of a round abort its transaction in PostgreSQL, so the round rolls back after the invalid statement and after the failing fetch (`backend.transactionLimits.errorAborts`); the failing fetch fails at the execute, as `luasql.postgres` reads the whole result there. The warning step is left out (see [`warnings`](warnings.md)), and there is no series `pga`. The server counters are `open tx` and `prepared` of the test session: it works with autocommit off and keeps the seven prepared statements of the round, so a sample shows `open tx 1` and `prepared 7`; both must stay the same.
+
+A smoke run on Windows looks like this:
+
+```
+scenario soak:
+  1 min, a sample every 10 s, 2 lanes, memory as private bytes
+  rounds          21887 on the test connection (364.8/s), 43327 in 2 lanes, 1 min
+  private bytes   start 4604 KB, end 5188 KB (no leak verdict in tier smoke)
+  lua             start 480 KB, end 481 KB (no leak verdict in tier smoke)
+  counters        open tx 1 -> 1, prepared 7 -> 7
+  sessions        2 -> 2
+  passed
+```
+
+### Reference result
+
+A run of 4 hours (`lua stress.lua postgres soak --csv soak240-postgres.csv`) on Windows 10, with the server in the same VM, 481 samples:
+
+| Series                     | Result                                                                                                                                                          |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| rounds                     | 4.79 million on the test connection (332 per second), 9.52 million in the 2 lanes                                                                               |
+| private bytes              | 5064 KB at the start, 5572 KB after the warm-up of 24 minutes, 5784 KB at the end; slope +28 KB per hour (limit 512). Between 5568 and 5640 KB up to minute 40, then a step of 136 KB to 5708 KB and from there steps of 4 to 12 KB, the last one after 3 hours 50 minutes; in the last 2 hours +60 KB. |
+| Lua heap                   | 632 KB from the first sample after 30 seconds to the end; slope 0                                                                                               |
+| counters                   | open tx 1 and prepared 7, the same from the start to the end (see above); sessions 2                                                                            |

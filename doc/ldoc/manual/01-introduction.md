@@ -8,9 +8,9 @@ the results row by row. This is the documentation of LuaSQL for
 project.
 
 So far it covers the Oracle driver `luasql.oci8`, the SQLite driver
-`luasql.sqlite3`, the DuckDB driver `luasql.duckdb` and the Firebird driver
-`luasql.firebird`, which have been reworked for OneLuaPro and tested in
-depth. The other drivers follow the same API; their documentation will be
+`luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver
+`luasql.firebird` and the PostgreSQL driver `luasql.postgres`, which have
+been reworked for OneLuaPro and tested in depth. The other drivers follow the same API; their documentation will be
 added here.
 
 ## Objects
@@ -19,7 +19,7 @@ Every driver works with the same four kinds of objects:
 
 <table>
 <tr><th>Object</th><th>Created by</th><th>Purpose</th></tr>
-<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code>, <code>driver.firebird()</code></td><td>holds the client library of the driver; opens connections</td></tr>
+<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code>, <code>driver.firebird()</code>, <code>driver.postgres()</code></td><td>holds the client library of the driver; opens connections</td></tr>
 <tr><td>connection</td><td><code>env:connect(...)</code></td><td>a session on the database server; runs statements and controls transactions</td></tr>
 <tr><td>cursor</td><td><code>conn:execute(...)</code>, <code>stmt:execute(...)</code></td><td>the rows of a query, read one by one</td></tr>
 <tr><td>statement</td><td><code>conn:prepare(...)</code></td><td>a prepared statement, executed many times with parameters</td></tr>
@@ -65,8 +65,8 @@ table instead: `cur:fetch({}, "a")` uses the column names as keys,
 
 The case of column names, in `cur:fetch({}, "a")` and in
 `cur:getcolnames()`, depends on the driver and the database: e.g.
-Firebird gives unquoted names in upper case (`ID`), `luasql.oci8` in lower
-case (`id`). Portable code uses quoted aliases (`SELECT id AS "id" ...`)
+Firebird gives unquoted names in upper case (`ID`), `luasql.oci8` and
+PostgreSQL in lower case (`id`). Portable code uses quoted aliases (`SELECT id AS "id" ...`)
 or compares names without regard to case.
 
 ## Errors
@@ -377,10 +377,13 @@ code without an error message come first.
       `send_query`, and `execute` waits for the results and drops them.
     - With autocommit off `send_query` begins a transaction, as `execute`
       does.
+- **postgres: `conn:execute(sql, ...)` binds further arguments as
+  parameters**; LuaSQL ignores them. With parameters the text holds one
+  statement.
 
 **Extensions**
 
-- Prepared statements for oci8, sqlite3, duckdb and firebird:
+- Prepared statements for oci8, sqlite3, duckdb, firebird and postgres:
   `conn:prepare` and statement objects (upstream pull request
   [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
 - `luasql.type` with the pairs `{value, type}`, `T.null` (a special value),
@@ -400,8 +403,10 @@ code without an error message come first.
   prepared statements, parameters (also `conn:execute(sql, ...)`),
   `luasql.type`, long values as temporary `BLOB`s, and
   `luasql._CLIENTVERSION`, the version of the Firebird client library.
-- The additions of postgres: `luasql._CLIENTVERSION`, the version of
-  libpq loaded (e.g. `"18.7"`); LuaSQL means to set it but never does.
+- The additions of postgres in the @{07-postgres.md|PostgreSQL topic}:
+  prepared statements, parameters (also `conn:execute(sql, ...)`),
+  `luasql.type`, and `luasql._CLIENTVERSION`, the version of libpq loaded
+  (e.g. `"18.7"`; LuaSQL means to set it but never does).
 
 ## Where to Go Next
 
@@ -415,6 +420,10 @@ code without an error message come first.
   transactions and the behavior of DuckDB worth knowing.
 - @{06-firebird.md|Firebird}: connecting, the character set, data types,
   transactions and the behavior of Firebird worth knowing.
+- @{07-postgres.md|PostgreSQL}: connecting, the character set, data types,
+  parameters, transactions, asynchronous queries and the behavior of
+  PostgreSQL worth knowing.
 - The reference of the modules @{luasql.oci8}, @{luasql.sqlite3},
-  @{luasql.duckdb} and @{luasql.firebird} with every function.
+  @{luasql.duckdb}, @{luasql.firebird} and @{luasql.postgres} with every
+  function.
 - The examples, ready to run against your own database.

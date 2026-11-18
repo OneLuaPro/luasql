@@ -111,6 +111,17 @@ function soakRound.finish(worker)
    check("autocommit on", conn:setautocommit(true))
 end
 
+-- A DBMS whose errors abort the transaction
+-- (backend.transactionLimits.errorAborts, e.g. PostgreSQL) rejects every
+-- statement after an error until a rollback; the round then rolls back
+-- after each error, as a program would. Nothing of the round is lost:
+-- its DML is committed or rolled back before the errors.
+local function afterError(conn, backend)
+   if (backend.transactionLimits or {}).errorAborts then
+      check("rollback after the error", conn:rollback())
+   end
+end
+
 -- Opens a cursor, reads a row and drops it without closing.
 local function dropCursor(conn, backend)
    local cur = check("query for the GC", conn:execute(backend.multiRowQuery))
@@ -183,6 +194,7 @@ function soakRound.run(worker, i)
    local bad, badErr = conn:execute(backend.invalidQuery)
    expect(bad == nil and type(badErr) == "string",
           "invalid statement did not fail")
+   afterError(conn, backend)
    cur = conn:execute(backend.fetchErrorQuery)
    if cur then
       local rows = 0
@@ -194,6 +206,7 @@ function soakRound.run(worker, i)
       expect(err ~= nil, "failing fetch did not fail")
       pcall(cur.close, cur)
    end
+   afterError(conn, backend)
 
    -- A cursor left to the GC, collected right away so open_cursors is
    -- never reached.

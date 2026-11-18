@@ -94,3 +94,7 @@ The insert path of the driver is checked all the same by phases whose table does
 ## Firebird
 
 The tables have the types `INTEGER`, `DOUBLE PRECISION`, `VARCHAR` in UTF8 and BLOBs (`luastress_vollob` with a text BLOB in UTF8); `luastress_volbin` is a global temporary table whose rows go at each commit (`ON COMMIT DELETE ROWS`), so the database does not grow. Values above 32 767 bytes, in `binaryInsert` and `lobAfterError`, go into a temporary BLOB that `luasql.firebird` writes in the transaction of the execute. `fetchReuse` reads the named key `S`: Firebird describes unquoted names in upper case. Firebird has no tablespaces of a limited size, so the cases with a full tablespace are skipped, and `maxLength` as well.
+
+## PostgreSQL
+
+The tables have the types `integer`, `double precision` and `varchar`; `luastress_vollob` has a `text` column, PostgreSQL has no LOB type of its own. `luastress_volbin` is a temporary table of the test session whose rows go at each commit (`ON COMMIT DELETE ROWS`), with a `bytea` column. `luasql.postgres` reads the whole result of a query at the execute, so the fetch phases hold all rows of a query in the process for a moment; the memory must still not grow from round to round. The tablespaces of PostgreSQL have no size limit of their own, so the cases with a full tablespace are skipped, and `maxLength` as well.

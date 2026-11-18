@@ -2,13 +2,13 @@
 
 The LuaSQL stress test suite exercises a LuaSQL driver under load: it opens and closes connections, cursors and prepared statements hundreds of thousands of times, provokes errors, kills sessions, uses the driver from several threads at once and runs for hours. It checks that the driver never crashes, never leaks memory, cursors, temporary LOBs (Large Objects) or sessions, never loses or changes data and never leaves a session blocked. Behavior of the client library or the DBMS (Database Management System) that a user might not expect is reported as a known limitation with its reason, without failing the run.
 
-The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3`, the DuckDB driver `luasql.duckdb` and the Firebird driver `luasql.firebird` are implemented:
+The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver `luasql.firebird` and the PostgreSQL driver `luasql.postgres` are implemented:
 
 | Driver            | DBMS                    | Status    |
 | ----------------- | ----------------------- | --------- |
 | `luasql.oci8`     | Oracle                  | available |
 | `luasql.sqlite3`  | SQLite                  | available |
-| `luasql.postgres` | PostgreSQL              | planned   |
+| `luasql.postgres` | PostgreSQL              | available |
 | `luasql.mysql`    | MariaDB/MySQL           | planned   |
 | `luasql.duckdb`   | DuckDB                  | available |
 | `luasql.firebird` | Firebird                | available |
@@ -32,7 +32,7 @@ The suite needs only plain Lua and two common modules; further modules are optio
 
 ## Preparing a Run
 
-Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite, DuckDB and Firebird are available; instructions for the other DBMS will follow when their backends are implemented.
+Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite, DuckDB, Firebird and PostgreSQL are available; instructions for the other DBMS will follow when their backends are implemented.
 
 ### Oracle
 
@@ -230,6 +230,74 @@ QUIT;
 A user of Firebird belongs to the server, not to a database: it exists for all databases of the server. To remove the test environment again: `DROP USER LUATEST;` and `DROP DATABASE;` while connected to the test database.
 
 
+### PostgreSQL
+
+**Driver and client library:** `luasql.postgres` uses libpq, the client library of PostgreSQL. The `luasql.postgres` of OneLuaPro contains libpq 18.7, linked statically, and needs no further DLL. A `luasql.postgres` linked against `libpq.dll` needs it and the DLLs it loads where the loader finds them, i.e. in the `PATH` or next to the driver module. The suite was tested with a PostgreSQL 18.7 server.
+
+**Connection data:** as with Oracle, everything comes from environment variables; a missing one stops the run with its name.
+
+| Variable                  | Meaning                                         | Required     |
+| ------------------------- | ----------------------------------------------- | ------------ |
+| `POSTGRES_TEST_HOST`      | host name of the server, e.g. `localhost`       | yes          |
+| `POSTGRES_TEST_PORT`      | port of the server, e.g. 5432                   | yes          |
+| `POSTGRES_TEST_NAME`      | the test database, e.g. `luatest`               | yes          |
+| `POSTGRES_TEST_USER`      | test user, e.g. `luatest`                       | yes          |
+| `POSTGRES_TEST_PASSWORD`  | password of the test user                       | yes          |
+| `POSTGRES_ADMIN_USER`     | admin user, a superuser, e.g. `postgres`        | both or none |
+| `POSTGRES_ADMIN_PASSWORD` | password of the admin user                      | both or none |
+
+In Windows command prompt (CMD):
+
+```CMD
+set POSTGRES_TEST_HOST=localhost
+set POSTGRES_TEST_PORT=5432
+set POSTGRES_TEST_NAME=luatest
+set POSTGRES_TEST_USER=luatest
+set "POSTGRES_TEST_PASSWORD=..."
+set POSTGRES_ADMIN_USER=postgres
+set "POSTGRES_ADMIN_PASSWORD=..."
+```
+
+In bash (Linux, macOS):
+
+```bash
+export POSTGRES_TEST_HOST=localhost
+export POSTGRES_TEST_PORT=5432
+export POSTGRES_TEST_NAME=luatest
+export POSTGRES_TEST_USER=luatest
+read -rsp "Test passwd: " POSTGRES_TEST_PASSWORD && echo && export POSTGRES_TEST_PASSWORD
+export POSTGRES_ADMIN_USER=postgres
+read -rsp "Admin passwd: " POSTGRES_ADMIN_PASSWORD && echo && export POSTGRES_ADMIN_PASSWORD
+```
+
+The variables of the test connection are the same as those of the functional test `checks/postgres.lua`, and both can use the same database: the suite creates and drops only tables whose names start with `luastress`, the functional test those starting with `luasql`. No other run may use the database at the same time. The admin connection uses host, port and database of the test connection. Without the admin variables the suite still runs, but skips the server counters, the session counts and scenario `connectionLoss`; the preparation step is skipped as well, so the phases that need its helper tables (`executeError` of `errorPaths`, `connDml` of `params`) fail. Run with the admin connection.
+
+**Rights of the database users:**
+
+- Test user: the owner of the test database. Since PostgreSQL 15 only the owner of a database may create tables in its schema `public`; the run creates its tables there.
+- Admin user: a superuser, e.g. `postgres`: it sees the state of the sessions of other users in `pg_stat_activity`, ends them with `pg_terminate_backend` and creates the helper tables of the preparation step for the test user.
+
+**Language of the messages:** the suite recognizes errors of the server by their English text. The test database must therefore give its messages in English: `lc_messages = 'C'`, set for the database. libpq gives its own messages in English.
+
+**Setting up the database and the user:** with `psql`, as the admin user; `psql` asks for the password (no password on the command line):
+
+```CMD
+psql -h localhost -p 5432 -U postgres -d postgres
+```
+
+Run the following commands; `\password` asks for the new password of the test user twice:
+
+```sql
+CREATE ROLE luatest LOGIN;
+\password luatest
+CREATE DATABASE luatest OWNER luatest ENCODING 'UTF8' TEMPLATE template0;
+ALTER DATABASE luatest SET lc_messages = 'C';
+\q
+```
+
+The setting of `lc_messages` applies to new connections. A role of PostgreSQL belongs to the server, not to a database. To remove the test environment again: `DROP DATABASE luatest;` and `DROP ROLE luatest;`.
+
+
 ## Running
 
 The suite is started with the DBMS and a tier. It can be called from any directory with the path to `stress.lua`, e.g. `lua C:\misc\luasql\stress\stress.lua oracle smoke`; it finds its modules next to `stress.lua`. A relative path given to `--csv` is relative to the current directory.
@@ -282,6 +350,7 @@ Scenarios with slow steps use fewer iterations, e.g. one logon per iteration; ea
 | Quick check of the SQLite driver                           | `lua stress.lua sqlite3 smoke`                              |
 | Quick check of the DuckDB driver                           | `lua stress.lua duckdb smoke`                               |
 | Quick check of the Firebird driver                         | `lua stress.lua firebird smoke`                             |
+| Quick check of the PostgreSQL driver                       | `lua stress.lua postgres smoke`                             |
 | Output without colors                                      | `set NO_COLOR=1` before the run                             |
 
 
@@ -339,6 +408,18 @@ Exit codes: 0 all scenarios passed (limits do not count), 1 a scenario or the cl
 - **`I/O error during "CreateFile (open)"`**: the test database does not exist; `FIREBIRD_TEST_NAME` is a path on the server.
 - **A run or a scenario hangs.** Firebird waits for a lock without a time limit, the default of the driver: a connection left open by another program, e.g. an `isql` session that changed a table of the run without a commit, makes DDL of the run wait. End that session.
 - **A run was aborted.** Its tables stay in the database; each scenario drops its own tables first.
+
+
+### PostgreSQL
+
+- **`password authentication failed`** (or its translation) before the first scenario: user or password of the test or admin connection. The server gives this message in its own language, before the settings of the test database apply.
+- **`Connection refused`**: host or port, or the server does not run.
+- **`database "..." does not exist`** (or its translation): `POSTGRES_TEST_NAME`.
+- **`permission denied for schema public`**: the test user does not own the test database, see [Preparing a Run](#preparing-a-run).
+- **Many `FAILED` with messages in another language**, e.g. in `errorPaths` and `params`: the test database does not give English messages. Set `ALTER DATABASE luatest SET lc_messages = 'C';` as a superuser, see [Preparing a Run](#preparing-a-run).
+- **`relation "luastress_err" does not exist`** or **`relation "luastress_dml" does not exist`**: the run had no admin connection, so the preparation step did not create the helper tables.
+- **A run or a scenario hangs.** PostgreSQL waits for a lock without a time limit (`lock_timeout` 0, the default): a session of another program, e.g. a `psql` window that changed a table of the run in an open transaction, makes the run wait. End that session.
+- **A run was aborted.** Its tables stay in the database; the next run drops them in the preparation step.
 
 
 ## Scenarios
@@ -475,7 +556,39 @@ Tested with SQLite 3.53.4 and the `luasql.sqlite3` of OneLuaPro, on Linux and Wi
 
 ### PostgreSQL
 
-No information yet; not implemented.
+Tested with PostgreSQL 18.7 on Windows 10, server and client in the same VM (VMware Fusion on a MacBook Pro), and the `luasql.postgres` of OneLuaPro, which contains libpq 18.7. Tier smoke takes about 2 minutes, tier nightly about 1 hour, tier soak 4 hours (see [`doc/soak.md`](doc/soak.md) for the reference result). `luasql.postgres` has prepared statements since its bind API (task `bindapi-postgres`), and no driver options. The suite tests all scenarios but `prefetch` and `warnings`.
+
+**The whole result on the client:** `luasql.postgres` reads the whole result of a query at the execute (`PQexec`, `PQexecPrepared`). An error in any row of a result comes at the execute, not at a fetch; a cursor reads on after `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)` (`backend.cursorsSurviveEnd`) and after a lost connection: after a kill, an open cursor gives all its rows and ends normally (`backend.resultOnClient`, see [`doc/connectionLoss.md`](doc/connectionLoss.md)). The server keeps no cursor for it, and PostgreSQL has no temporary LOBs: the values of the LOB phases are text and `bytea` of the result.
+
+**What a connection holds:** the server counters are `open tx`, the state of the test session in `pg_stat_activity` (`idle in transaction`, also `idle in transaction (aborted)`), read on the admin connection, and `prepared`, the rows of `pg_prepared_statements`, which shows the statements of the own session only and is therefore read on the test connection itself. A statement that the driver does not drop on the server stays there; `conn:execute` with parameters uses the unnamed statement, which is not counted. With autocommit on no transaction is open between statements, so `open tx` must be 0 before every phase. A cursor that is not freed shows in the memory of the process only. Sessions are the rows of `pg_stat_activity` of the test user with the application name `luastress`, which every connection of the suite carries in its connection string: a `psql` window of the test user does not count. A session that ends leaves `pg_stat_activity` a moment after the client has gone, so the count waits 0.1 seconds first; the kill (`pg_terminate_backend` with a timeout) waits until the session has ended.
+
+**Transactions:** the isolation is `READ COMMITTED`. An error in a statement aborts the transaction: every further statement fails with `current transaction is aborted` until the rollback, and `conn:commit()` rolls back and gives `false` and a message. This is also so for a lock that is not free (`FOR UPDATE NOWAIT`) and for the victim of a deadlock. The rounds of scenario `soak` therefore roll back after their deliberate errors (see [`doc/soak.md`](doc/soak.md)). DDL is part of the transaction, and so is `SET`: a rollback undoes it, so the scenarios change settings such as `lock_timeout` with autocommit on.
+
+**Parameters:** the placeholders are `$1`, `$2`, ..., by position only; names are not supported. `luasql.postgres` prepares without types and sends every value as text, except `luasql.type.binary`, which goes as bytes in the binary format; the server takes the type each parameter needs at its place. A parameter alone in the select list is text, so the queries of the backend cast their parameters (`$1::bigint`). A boolean bound into text is `true` or `false`. A string with a zero byte gives `nil` and a message of the driver: text in PostgreSQL cannot hold one.
+
+**Messages:** the server gives its messages in the language of `lc_messages`, which must be English for the test database (see [Preparing a Run](#preparing-a-run)). A connect that the server refuses, for an unknown user or database, gets the message in the language of the server, before the settings of the database apply; the cases of `connectionLifecycle` look for the names only.
+
+**Known limitations**, reported as "limit":
+
+| Limit | Scenario, case | Reason |
+| ---- | ---- | ---- |
+| `endAfterKill` | `connectionLoss`, `killThenAutocommit` | After a kill, `conn:rollback()` and `conn:setautocommit(true)` return `true`, once the commit with open work has failed, as `luasql.postgres` documents: the server rolls back the transaction of a lost connection. |
+| `conflictAborts` | `concurrency`, `lockNowait` | An error aborts the transaction in PostgreSQL, also a lock that is not free: every further statement fails until it is rolled back. |
+| `deadlock` | `threads`, `deadlock` | The deadlock error aborts the transaction of the victim: its first update is no longer readable, every statement fails until the rollback. |
+| `enableAutocommit` | `transactions`, `enableAutocommit` | `conn:setautocommit(true)` rolls back an open transaction (`luasql.postgres`, as `luasql.oci8`, `luasql.sqlite3`, `luasql.duckdb` and `luasql.firebird`). |
+| `errorAborts` | `transactions`, `errorKeepsWork` | An error in a statement aborts the whole transaction: every further statement fails, `commit()` rolls back and gives `false`. |
+| types | `dataTypes`, 50 cases | Column `n` is `double precision` (integers above 2^53, 1e200), timestamps without the zeros at the end of the fraction and with time zone in the time zone of the session, years before Christ written as `0044 ... BC` and not accepted by `luasql.postgres`, `luasql.type.time` not taken as a timestamp, no booleans in numbers, the length of `varchar(n)` and `char(n)` in characters, no zero byte in text, no length limit of `bytea`, duplicate keys in `json`; the list is in [`doc/dataTypes-postgres.md`](doc/dataTypes-postgres.md). |
+
+**Behavior worth knowing**, checked but not reported as limit:
+
+- A killed session gives `server closed the connection unexpectedly` at the next call, then `no connection to the server`; a session killed during a call gives `terminating connection due to administrator command`. `close` of its cursor and connection returns `true`.
+- `SET TIME ZONE '+02:00'` takes the text as a POSIX zone, whose sign is the other way round: it is UTC−2. The scenario `dataTypes` sets an offset in the form `<+02:00>-02:00`.
+- `json` keeps the text as written, duplicate keys included; `jsonb` would rewrite it.
+- `killFetchLoop` of `connectionLoss` reads a result of 100 000 rows into the client in each of its 1000 iterations, so the memory of the process moves a lot: in four runs of tier nightly the trend was +844, −285, −142 and +1097 KB; in the last run the second round, which the scenario starts after a trend above the limit, had a trend of 0. `killLoop` without the rows had a trend of 0 in all four runs.
+- PostgreSQL detects a deadlock after `deadlock_timeout` (1 second by default) and makes the session that waited first the victim.
+- Locks wait without a time limit (`lock_timeout` 0, the default): a session that a program forgets in an open transaction can make other sessions wait forever.
+
+**Not covered with PostgreSQL yet:** `prefetch` (no driver options), `warnings` (no warnings of this kind, see [`doc/warnings.md`](doc/warnings.md)), the named parameters of `params`, `badColumnType` of `errorPaths` (`luasql.postgres` reads every type), the cases of `volume` with a full tablespace and `maxLength` (the tablespaces of PostgreSQL have no size limit of their own), the WAL cases of `concurrency` (SQLite only) and the cases of `dataTypes` for intervals, row ids, hex text in binary columns and unsupported types (see [`doc/dataTypes-postgres.md`](doc/dataTypes-postgres.md)).
 
 ### MariaDB/MySQL
 

@@ -234,6 +234,23 @@ SELECT 1::int2 AS i2, -2::int4 AS i4, 9223372036854775807::int8 AS i8,
    is("int8 as integer (min)", r.i8min, math.mininteger, "integer")
    is("oid as integer", r.o, 4294967295, "integer")
    is("float4 as float", r.f4, 1.5, "float")
+   -- a real is read as the float32 the server holds, not as the double
+   -- nearest to its text
+   local function f32(x)
+      return (string.unpack("<f", string.pack("<f", x)))
+   end
+   local reals = rows(con, "SELECT 0.1::real AS a, 16777217::real AS b, "
+                      .. "3.4028235e38::real AS c, 1.1754944e-38::real AS d, "
+                      .. "(-0.3)::real AS e")[1]
+   for _, k in ipairs{ "a", "b", "c", "d", "e" } do
+      local x = ({ a = 0.1, b = 16777217, c = 3.4028235e38,
+                   d = 1.1754944e-38, e = -0.3 })[k]
+      is("real " .. tostring(x) .. " as its float32 value", reals[k],
+         f32(x), "float")
+   end
+   local same = rows(con, "SELECT 0.1::real::float8 = $$" .. f32(0.1)
+                     .. "$$::float8 AS same")[1]
+   check("(the server holds that value)", same.same == true, same.same)
    is("float8 1 as float", r.f8, 1.0, "float")
    is("float8 0.1", r.f8b, 0.1, "float")
    check("NaN", r.nan ~= r.nan, r.nan)
@@ -648,6 +665,379 @@ local function async()
    b:close()
 end
 
+-- the first row of a prepared query
+local function first(stmt, ...)
+   local cur, err = stmt:execute(...)
+   if cur == nil or type(cur) ~= "userdata" then return cur, err end
+   local row = { cur:fetch() }
+   cur:close()
+   return table.unpack(row)
+end
+
+-- the type of a value, also integer or float
+local function kind(v)
+   return math.type(v) or type(v)
+end
+
+-- values of all types bound and read back
+local function bind_types()
+   local con = ctx.con()
+   local T = luasql.type
+   pcall(run, con, "DROP TABLE luasql_bind")
+   run(con, "CREATE TABLE luasql_bind (k text PRIMARY KEY, i int4, "
+          .. "i8 int8, f float8, n numeric(12,4), t text, b boolean, "
+          .. "d date, ts timestamp, tm time, tz timestamptz, x bytea)")
+   local function put(col, k, ...)
+      local stmt = assert(con:prepare("INSERT INTO luasql_bind (k, " .. col
+                                      .. ") VALUES ($1, $2)"))
+      local r, err = stmt:execute(k, ...)
+      stmt:close()
+      return r, err
+   end
+   local function get(col, k)
+      return value(con, "SELECT " .. col .. " FROM luasql_bind WHERE k = '"
+                      .. k .. "'")
+   end
+   local function roundtrip(label, col, k, v, expected, mtype)
+      local r, err = put(col, k, v)
+      local got = get(col, k)
+      local ok = r == 1 and got == expected
+      if mtype then ok = ok and math.type(got) == mtype end
+      check(label, ok, r == 1 and (tostring(got) .. " (" .. kind(got) .. ")")
+               or err)
+   end
+
+   roundtrip("integer into int4", "i", "i1", 42, 42, "integer")
+   roundtrip("maxinteger into int8", "i8", "i2", math.maxinteger,
+             math.maxinteger, "integer")
+   roundtrip("float 42.0 into int4 (sent as 42)", "i", "i3", 42.0, 42)
+   local r, err = put("i", "i4", 1.5)
+   check("float 1.5 into int4: nil, msg (the server)", r == nil
+            and has(err, "LuaSQL: error executing statement"), r)
+   roundtrip("string '7' into int4", "i", "i5", "7", 7)
+   r, err = put("i", "i6", true)
+   check("boolean into int4: nil, msg (the server)", r == nil, r)
+   roundtrip("{3.0, T.int} into int4", "i", "i7", { 3.0, T.int }, 3)
+   roundtrip("float 0.1 into float8, exact", "f", "f1", 0.1, 0.1, "float")
+   roundtrip("float 1/3 into float8, exact", "f", "f2", 1 / 3, 1 / 3)
+   roundtrip("float 1e300 into float8", "f", "f3", 1e300, 1e300)
+   roundtrip("-math.huge into float8", "f", "f4", -math.huge, -math.huge)
+   put("f", "f5", 0 / 0)
+   local nan = get("f", "f5")
+   check("NaN into float8", nan ~= nan, nan)
+   roundtrip("{5, T.number} into float8", "f", "f6", { 5, T.number }, 5.0,
+             "float")
+   roundtrip("integer into float8", "f", "f7", 5, 5.0, "float")
+   roundtrip("float 0.1 into numeric(12,4)", "n", "n1", 0.1, "0.1000")
+   roundtrip("string '12.5' into numeric(12,4)", "n", "n2", "12.5",
+             "12.5000")
+   roundtrip("true into boolean", "b", "b1", true, true)
+   roundtrip("false into boolean", "b", "b2", false, false)
+   roundtrip("true into text: 'true'", "t", "t1", true, "true")
+   roundtrip("integer into text", "t", "t2", 42, "42")
+   roundtrip("float into text", "t", "t3", 0.5, "0.5")
+   roundtrip("UTF-8 text", "t", "t4", "Ä€ü", "Ä€ü")
+   roundtrip("an empty string is not NULL", "t", "t5", "", "")
+   r, err = put("t", "t6", "a\0b")
+   check("a zero byte in a string: nil, msg of the driver", r == nil
+            and has(err, "parameter 2 contains a zero byte"), err)
+   r, err = put("t", "t7", "\255\254")
+   check("invalid UTF-8: nil, msg (the server)", r == nil, r)
+   roundtrip("T.date", "d", "d1", { "2026-11-16", T.date }, "2026-11-16")
+   roundtrip("T.date with a time into date: the time is dropped", "d",
+             "d2", { "2026-11-16 12:30:00", T.date }, "2026-11-16")
+   r, err = put("d", "d3", { "2026-02-30", T.date })
+   check("T.date 2026-02-30: nil, msg of the driver", r == nil
+            and has(err, "invalid T.date value"), err)
+   r, err = put("d", "d4", { "0000-01-01", T.date })
+   check("T.date year 0000: nil, msg (the server)", r == nil
+            and has(err, "error executing statement"), err)
+   roundtrip("a date as a plain string", "d", "d5", "2026-11-16",
+             "2026-11-16")
+   roundtrip("T.timestamp", "ts", "s1",
+             { "2026-11-16 12:30:00.123456", T.timestamp },
+             "2026-11-16 12:30:00.123456")
+   roundtrip("T.timestamp with 7 digits: rounded to microseconds", "ts",
+             "s2", { "2026-11-16 12:30:00.1234567", T.timestamp },
+             "2026-11-16 12:30:00.123457")
+   roundtrip("T.date into timestamp", "ts", "s3", { "2026-11-16", T.date },
+             "2026-11-16 00:00:00")
+   roundtrip("T.time", "tm", "m1", { "12:30:00.5", T.time }, "12:30:00.5")
+   r, err = put("ts", "s4", { "12:30:00", T.time })
+   check("T.time into timestamp: nil, msg (the server)", r == nil, r)
+   r, err = put("tz", "z1", { "2026-11-16 12:30:00", T.timestamp })
+   local tz = get("tz", "z1")
+   check("T.timestamp into timestamptz takes the session time zone",
+         r == 1 and tostring(tz):match("^2026%-11%-16 %d%d:30:00[+-]") ~= nil,
+         tz)
+   local all = {}
+   for i = 0, 255 do all[#all + 1] = string.char(i) end
+   all = table.concat(all)
+   roundtrip("T.binary of all bytes into bytea", "x", "x1",
+             { all, T.binary }, all)
+   roundtrip("an empty T.binary is not NULL", "x", "x2", { "", T.binary }, "")
+   roundtrip("a plain string into bytea is read as bytea text", "x", "x3",
+             "\\x00ff", "\0\255")
+   roundtrip("T.binary into text (valid UTF-8)", "t", "t8",
+             { "abc", T.binary }, "abc")
+   r, err = put("t", "t9", { "a\0b", T.binary })
+   check("T.binary with a zero byte into text: nil, msg (the server)",
+         r == nil, r)
+   roundtrip("T.binary of 4 bytes into int4 is read as a binary integer",
+             "i", "i8", { "\0\0\0\42", T.binary }, 42)
+   roundtrip("T.null", "t", "u1", T.null, nil)
+   roundtrip("{T.null, T.binary}", "x", "u2", { T.null, T.binary }, nil)
+   roundtrip("{T.null, T.int}", "i", "u3", { T.null, T.int }, nil)
+   r = con:execute("INSERT INTO luasql_bind (k, t) VALUES ($1, $2)", "u4",
+                   nil)
+   check("nil as a variable argument is NULL",
+         r == 1 and get("t", "u4") == nil, r)
+   local long = string.rep("x", 100000)
+   roundtrip("a text of 100000 bytes", "t", "l1", long, long)
+
+   -- floats do not depend on the decimal point of the C locale
+   local old = os.setlocale(nil, "numeric")
+   local comma = os.setlocale("German", "numeric")
+      or os.setlocale("de_DE.UTF-8", "numeric")
+      or os.setlocale("de_DE", "numeric")
+   if comma and string.format("%.1f", 0.5) == "0,5" then
+      roundtrip("0.5 into float8 with a decimal comma in the locale", "f",
+                "c1", 0.5, 0.5, "float")
+      roundtrip("0.5 into text with a decimal comma in the locale", "t",
+                "c2", 0.5, "0.5")
+      local r = rows(con, "SELECT 0.5::float8 AS a, 0.1::real AS b")[1]
+      check("float8 and real read with a decimal comma in the locale",
+            r.a == 0.5 and r.b == (string.unpack("<f", string.pack("<f", 0.1))),
+            tostring(r.a) .. " " .. tostring(r.b))
+      os.setlocale(old, "numeric")
+   else
+      if comma then os.setlocale(old, "numeric") end
+      info("no locale with a decimal comma: not checked")
+   end
+end
+
+-- rules of the calls: counts, names, forms
+local function bind_rules()
+   local con = ctx.con()
+   local T = luasql.type
+   local stmt = assert(con:prepare("SELECT $1::int + $2::int"))
+   local r, err = stmt:execute(1)
+   check("variable arguments, too few: nil, msg", r == nil
+            and has(err, "LuaSQL: statement has 2 parameters, 1 given"), err)
+   r, err = stmt:execute(1, 2, 3)
+   check("variable arguments, too many: nil, msg", r == nil
+            and has(err, "LuaSQL: statement has 2 parameters, 3 given"), err)
+   r, err = stmt:execute{ [3] = 1 }
+   check("a position the statement does not have: nil, msg", r == nil
+            and has(err, "no position 3"), err)
+   local ok
+   ok, err = pcall(stmt.execute, stmt, { a = 1 })
+   check("named keys raise", not ok
+            and has(err, "named parameters are not supported"), err)
+   ok, err = pcall(stmt.execute, stmt, { 1, a = 2 })
+   check("mixed keys raise", not ok and has(err, "cannot mix"), err)
+   ok, err = pcall(stmt.execute, stmt, print, 1)
+   check("a function as a parameter raises", not ok
+            and has(err, "cannot be bound"), err)
+   ok, err = pcall(stmt.execute, stmt, { { 1, 2, 3 } })
+   check("a table that is not a pair raises", not ok, err)
+   ok, err = pcall(stmt.execute, stmt, { { "x", T.int } })
+   check("a value that does not match its type raises", not ok, err)
+   stmt:close()
+
+   stmt = assert(con:prepare("SELECT $1::int + $1::int"))
+   check("$1 twice is one parameter", first(stmt, 5) == 10)
+   stmt:close()
+   stmt = assert(con:prepare("SELECT $1"))
+   r = first(stmt, 42)
+   check("SELECT $1 is text: an integer comes back as a string",
+         r == "42", tostring(r) .. " (" .. kind(r) .. ")")
+   stmt:close()
+   r, err = con:prepare("SELECT $1 + $2")
+   check("$1 + $2 without a cast: nil, msg at the prepare", r == nil
+            and has(err, "LuaSQL: error preparing statement"), err)
+   r = con:prepare("SELECT $1 IS NULL")
+   check("$1 IS NULL without a cast: nil, msg at the prepare", r == nil)
+   r = con:prepare("INSERT INTO luasql_bind (i, t) VALUES ($1, $1)")
+   check("one parameter for an int4 and a text column: nil, msg",
+         r == nil)
+   r, err = con:prepare("SELEC 1")
+   check("a syntax error: nil, msg at the prepare", r == nil
+            and has(err, "LuaSQL: error preparing statement"), err)
+
+   -- conn:execute with parameters
+   local c = assert(con:execute("SELECT $1::int * 2", 21))
+   check("conn:execute with a variable argument", c:fetch() == 42)
+   c:close()
+   c = assert(con:execute("SELECT $1::int * 2", { 21 }))
+   check("conn:execute with a table", c:fetch() == 42)
+   c:close()
+   c = assert(con:execute("SELECT 3", {}))
+   check("conn:execute with an empty table", c:fetch() == 3)
+   c:close()
+   r, err = con:execute("SELECT $1::int + $2::int", 1)
+   check("conn:execute with too few values: nil, msg (the server)",
+         r == nil and err ~= nil, r)
+   r, err = con:execute("SELECT $1::int, $2::int", { [2] = 1 })
+   check("conn:execute with a position missing: nil, msg", r == nil
+            and has(err, "parameter 1 has no value"), err)
+   r, err = con:execute("SELECT $1::int; SELECT 2", 1)
+   check("conn:execute with parameters takes one statement only",
+         r == nil and err ~= nil, r)
+   ok, err = pcall(con.execute, con, "SELECT $1", { id = 1 })
+   check("conn:execute with names raises", not ok, err)
+
+   -- an empty statement
+   stmt = assert(con:prepare(""))
+   r = stmt:execute()
+   check("a prepared empty statement returns 0", r == 0, r)
+   stmt:close()
+end
+
+-- the values stay with the statement
+local function bind_values()
+   local con = ctx.con()
+   local T = luasql.type
+   local stmt = assert(con:prepare("SELECT $1::int, $2::text"))
+   local a, b = first(stmt, 1, "a")
+   check("variable arguments set all", a == 1 and b == "a")
+   a, b = first(stmt, { [2] = "b" })
+   check("a table changes only its positions", a == 1 and b == "b")
+   a, b = first(stmt)
+   check("execute() runs with the values given last", a == 1
+            and b == "b")
+   check("reset: true", stmt:reset() == true)
+   local r, err = stmt:execute()
+   check("after reset a placeholder has no value: nil, msg", r == nil
+            and has(err, "LuaSQL: parameter 1 has no value"), err)
+   r, err = stmt:execute{ 5 }
+   check("a table without position 2 after reset: nil, msg", r == nil
+            and has(err, "LuaSQL: parameter 2 has no value"), err)
+   a, b = first(stmt, { [2] = "c" })
+   check("the value given before stays", a == 5 and b == "c")
+   r, err = stmt:execute{ 7, { "2026-02-30", T.date } }
+   check("an invalid value: nil, msg", r == nil, r)
+   a, b = first(stmt)
+   check("and nothing of that call is taken over", a == 5 and b == "c")
+
+   -- one open cursor per statement
+   local cur = assert(stmt:execute())
+   local ok
+   ok, err = pcall(stmt.execute, stmt)
+   check("execute with an open cursor raises", not ok
+            and has(err, "cursor still open"), err)
+   ok, err = pcall(stmt.reset, stmt)
+   check("reset with an open cursor raises", not ok
+            and has(err, "open cursor"), err)
+   ok, err = stmt:close()
+   check("close with an open cursor: false, msg", ok == false
+            and has(err, "open cursor"), err)
+   check("after the last row the cursor is closed",
+         cur:fetch() == 5 and cur:fetch() == nil)
+   check("and the statement executes again", first(stmt) == 5)
+   check("close: true", stmt:close() == true)
+   ok, err = stmt:close()
+   check("close again: false, msg", ok == false and err ~= nil, ok)
+   ok, err = pcall(stmt.execute, stmt)
+   check("execute on a closed statement raises", not ok
+            and has(err, "LuaSQL: statement is closed"), err)
+end
+
+-- statements and transactions, closing
+local function statements()
+   local a, b = connect(), connect()
+   local pid = value(a, "SELECT pg_backend_pid()")
+   local function prepared()
+      return value(a, "SELECT count(*) FROM pg_prepared_statements")
+   end
+   local base = prepared()
+   run(a, "DELETE FROM luasql_test WHERE id >= 500")
+   local ins = assert(a:prepare("INSERT INTO luasql_test VALUES ($1, $2, 0)"))
+   check("the statement is prepared on the server", prepared() == base + 1)
+   a:setautocommit(false)
+   local sel = assert(a:prepare("SELECT count(*) FROM luasql_test "
+                                .. "WHERE id >= 500"))
+   check("prepare with autocommit off begins no transaction",
+         state(b, pid) == "idle", state(b, pid))
+   check("execute begins it", ins:execute(501, "x") == 1
+            and state(b, pid) == "idle in transaction", state(b, pid))
+   check("commit: true", a:commit() == true)
+   check("the statement runs after the commit",
+         ins:execute(502, "x") == 1)
+   check("rollback: true", a:rollback() == true)
+   check("and after the rollback", first(sel) == 1)
+   a:commit()
+
+   -- an aborted transaction
+   ins:execute(503, "x")
+   a:execute("SELECT 1/0")
+   local r, err = ins:execute(504, "x")
+   check("execute in an aborted transaction: nil, msg", r == nil
+            and err ~= nil, r)
+   r, err = a:prepare("SELECT 1")
+   check("prepare in an aborted transaction: nil, msg", r == nil
+            and err ~= nil, r)
+   check("close in an aborted transaction: true", sel:close() == true)
+   local ok, msg = a:commit()
+   check("commit of the aborted transaction: false, msg", ok == false
+            and msg ~= nil, ok)
+   check("a statement prepared before the error still runs",
+         ins:execute(505, "x") == 1)
+   a:commit()
+   local major = tonumber(tostring(luasql._CLIENTVERSION):match("^(%d+)"))
+   if major and major >= 17 then
+      check("the statement closed in the aborted transaction is gone",
+            prepared() == base + 1, prepared())
+   else
+      info("libpq before 17: DEALLOCATE in an aborted transaction fails, "
+           .. "the statement stays until the end of the connection")
+   end
+   a:setautocommit(true)
+
+   -- a result type that changes after the prepare
+   pcall(run, a, "DROP TABLE luasql_ddl")
+   run(a, "CREATE TABLE luasql_ddl (a int)")
+   local all = assert(a:prepare("SELECT * FROM luasql_ddl"))
+   run(a, "ALTER TABLE luasql_ddl ADD COLUMN b int")
+   r, err = all:execute()
+   check("the result type changed after the prepare: nil, msg",
+         r == nil and err ~= nil, r)
+   all:close()
+   run(a, "DROP TABLE luasql_ddl")
+
+   -- closing
+   local before = prepared()
+   local open = assert(a:prepare("SELECT 1"))
+   ok, msg = a:close()
+   check("conn:close with an open statement: false, msg",
+         ok == false and has(msg, "There are open statements"), msg)
+   a:send_query("SELECT 1")
+   ok, msg = open:close()
+   check("stmt:close while results of send_query are pending: "
+         .. "false, msg", ok == false and has(msg, MSG_BUSY), msg)
+   wait(a)
+   local c = a:get_result()
+   c:close()
+   a:get_result()
+   local tbc = load([[
+local con = ...
+do
+   local s <close> = assert(con:prepare("SELECT 1"))
+end
+]])
+   if tbc then
+      tbc(a)
+      check("<close> closes a statement",
+            prepared() == before + 1, prepared())
+   end
+   check("stmt:close: true", open:close() == true)
+   check("closed statements are dropped on the server",
+         prepared() == before, prepared())
+   ins:close()
+   check("conn:close after its statements: true", a:close() == true)
+   b:close()
+end
+
 -- results after the session was ended by the server
 local function kill()
    local a, b = connect(), connect()
@@ -655,12 +1045,19 @@ local function kill()
    a:setautocommit(false)
    run(a, "INSERT INTO luasql_test VALUES (301, 'killed', 0)")
    local cur = assert(a:execute("SELECT 1 UNION ALL SELECT 2"))
+   local stmt = assert(a:prepare("SELECT 1"))
    check("the user ends his own other session",
          value(b, "SELECT pg_terminate_backend(" .. pid .. ")") == true)
    local v, err = a:execute("SELECT 1")
    check("execute after the kill: nil, msg", v == nil and err ~= nil, v)
    v, err = a:execute("SELECT 1")
    check("execute again: nil, msg", v == nil and err ~= nil, v)
+   v, err = stmt:execute()
+   check("stmt:execute after the kill: nil, msg", v == nil and err ~= nil,
+         v)
+   v, err = a:prepare("SELECT 1")
+   check("prepare after the kill: nil, msg", v == nil and err ~= nil, v)
+   check("stmt:close after the kill: true", stmt:close() == true)
    check("the cursor still reads its rows", cur:fetch() == 1)
    cur:close()
    local ok, msg = a:commit()
@@ -731,6 +1128,10 @@ local scenarios = {
    { "transactions",   transactions },
    { "closed_objects", closed_objects },
    { "async",          async },
+   { "bind_types",     bind_types },
+   { "bind_rules",     bind_rules },
+   { "bind_values",    bind_values },
+   { "statements",     statements },
    { "kill",           kill },
    { "exit_open",      exit_open },
 }
@@ -770,6 +1171,8 @@ if not args.keep and ctx.main then
    for _, sql in ipairs{ "DROP TABLE IF EXISTS luasql_test",
                          "DROP TABLE IF EXISTS luasql_types",
                          "DROP TABLE IF EXISTS luasql_dom_t",
+                         "DROP TABLE IF EXISTS luasql_bind",
+                         "DROP TABLE IF EXISTS luasql_ddl",
                          "DROP TYPE IF EXISTS luasql_mood",
                          "DROP TYPE IF EXISTS luasql_mood2",
                          "DROP DOMAIN IF EXISTS luasql_dom" } do

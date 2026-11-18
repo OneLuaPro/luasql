@@ -26,3 +26,7 @@ A session of a killed child process may still exist on the server for a moment; 
 ## Firebird
 
 Nothing to do: there is no module `prep/firebird.lua`. The scenarios drop their own tables; a table that an aborted run left stays until the scenario runs again.
+
+## PostgreSQL
+
+`prep/postgres.lua` drops the helper tables `luastress_err` and `luastress_dml`. The scenarios drop their own tables; the database stays.

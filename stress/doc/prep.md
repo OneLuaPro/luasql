@@ -55,3 +55,13 @@ Only one process at a time can open a DuckDB file. After this step the run there
 ## Firebird
 
 There is no module `prep/firebird.lua`; the output shows `prep:   nothing to prepare for this DBMS`. The test database, the test user and its right `CREATE TABLE` are set up once by hand (see Firebird under [Preparing a Run](../README.md#preparing-a-run)). The scenarios create their tables themselves and drop what an aborted run left.
+
+## PostgreSQL
+
+There is a module `prep/postgres.lua`; it runs on the admin connection, a superuser. It drops the tables of an aborted run (names starting with `luastress` in the schema `public`) and creates two helper tables, owned by the test user: `luastress_err` has one row and a `CHECK` constraint, for a statement with a parameter that fails (scenario [`errorPaths`](errorPaths.md)); `luastress_dml` has an `integer` column that rejects a string that is not a number (scenario [`params`](params.md)). PostgreSQL needs a table for these statements: its blocks of PL/pgSQL (`DO`) take no parameters. The output shows:
+
+```
+prep:   helper tables created
+```
+
+There is no state file: no setting of the server is changed. With `--keep` the helper tables stay in the database. The test database, its owner and its language of messages are set up once by hand (see PostgreSQL under [Preparing a Run](../README.md#preparing-a-run)). Without the admin connection the step is skipped, and the phases that use the helper tables fail with `relation ... does not exist`.

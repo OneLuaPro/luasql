@@ -76,3 +76,17 @@ Connects that must fail:
 | `noSuchFile`  | Connects to a database file that does not exist, next to the test database. | Pass: `nil` and `I/O error during "CreateFile (open)"` (on Windows). Fail: anything else. |
 
 Firebird locks no account after failed logons; the test user is never used with a wrong password all the same.
+
+## PostgreSQL
+
+A session is a row of `pg_stat_activity` with the name of the test user, the application name `luastress` and `backend_type = 'client backend'`, counted on the admin connection. All connections of the suite carry the application name (`application_name=luastress` in the connection string), so a `psql` window of the test user does not count. A session that ends is gone from `pg_stat_activity` a moment after the client has closed it, and the view is read at its first use in a transaction; the count therefore waits 0.1 seconds first, in the same SQL text (`SELECT pg_sleep(0.1); SELECT count(*) ...`). The server counters are `open tx` and `prepared` (see [`cursorLifecycle`](cursorLifecycle.md)). In `exitWithOpen` the second connection of each child process has autocommit off and a row inserted; the row must be rolled back at the end of Lua.
+
+Connects that must fail:
+
+| Test              | Checks                                                     | Results                                                                                   |
+| ----------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `unknownUser`     | Connects as a user `luastress_nouser` that does not exist. | Pass: `nil` and a message with the name of the user. Fail: anything else.                 |
+| `closedPort`      | Connects to port 1, where no server listens.               | Pass: `nil` and `port 1 failed` (`Connection refused`, from libpq). Fail: anything else.  |
+| `unknownDatabase` | Connects to a database `luastress_nodb` that does not exist. | Pass: `nil` and a message with the name of the database. Fail: anything else.           |
+
+The server refuses an unknown user or database before the settings of the test database apply, so its message is in the language of the server, not in English (see PostgreSQL under [DBMS-Specific Notes](../README.md#dbms-specific-notes)); the patterns look for the names only. The test user is never used with a wrong password.

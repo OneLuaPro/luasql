@@ -8,6 +8,7 @@ This file describes the scenario for every DBMS. The cases, with what each one c
 - [`dataTypes-sqlite3.md`](dataTypes-sqlite3.md): what differs with SQLite.
 - [`dataTypes-duckdb.md`](dataTypes-duckdb.md): what differs with DuckDB.
 - [`dataTypes-firebird.md`](dataTypes-firebird.md): what differs with Firebird.
+- [`dataTypes-postgres.md`](dataTypes-postgres.md): what differs with PostgreSQL.
 
 For every case the scenario writes one row, reads it back with `cur:fetch` and checks:
 
@@ -66,3 +67,7 @@ Where LuaSQL promises nothing, e.g. for the text form of a date read back, the e
 ## Firebird
 
 The cases with Firebird, its columns, literals and limits are listed in [`dataTypes-firebird.md`](dataTypes-firebird.md).
+
+## PostgreSQL
+
+The cases with PostgreSQL, its columns, literals and limits are listed in [`dataTypes-postgres.md`](dataTypes-postgres.md).

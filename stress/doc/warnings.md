@@ -41,3 +41,7 @@ Skipped: the backend has no warning statements; the C interface of DuckDB has no
 ## Firebird
 
 Skipped: the backend has no warning statements; Firebird has no statements that succeed with a warning of this kind.
+
+## PostgreSQL
+
+Skipped: the backend has no warning statements. A function of PL/pgSQL is checked when it is created and fails with an error, not with a warning; the notices and warnings of the server (`RAISE WARNING`) are not part of the LuaSQL API.
