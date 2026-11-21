@@ -49,8 +49,8 @@
 -- already. A precheck makes sure the counter sees an open transaction;
 -- otherwise the phases fail as invalid.
 --
--- Skipped if the driver has no prepare() or the backend has no
--- transaction table.
+-- Skipped if the driver has no bind API (conn:prepare and luasql.type)
+-- or the backend has no transaction table.
 
 local dbutil = require("dbutil")
 local phases = require("phases")
@@ -648,8 +648,8 @@ local phaseList = {
 function transactions.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
-   if conn.prepare == nil then
-      report.print("  ", "skipped: driver has no prepare()", "skip")
+   if not dbutil.hasBindApi(ctx) then
+      report.print("  ", "skipped: " .. dbutil.noBindApiReason, "skip")
       return true
    end
    if backend.txTableCreate == nil then

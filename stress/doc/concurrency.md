@@ -4,7 +4,7 @@ Uses several connections of one process side by side, in one thread: cursors, st
 
 Everything runs in one thread, so no call may block: locks are taken and tested so that a lock held by another connection gives an error at once or after a short wait (`backend.concLockWaitSetup`); a lock left behind by an earlier case gives an error instead of a hang. Real lock waits and deadlocks need a second thread; they are part of scenario [`threads`](threads.md).
 
-The scenario uses a table `luastress_conc` with 100 rows; it is skipped if the backend has none or the driver has no `conn:prepare`. The WAL cases use a database of their own (`backend.walChange` replaces test settings, `backend.walSetup` creates the table, the files `backend.walFiles` are deleted before and after).
+The scenario uses a table `luastress_conc` with 100 rows; it is skipped if the backend has none or the driver has no bind API (`conn:prepare` and `luasql.type`). The WAL cases use a database of their own (`backend.walChange` replaces test settings, `backend.walSetup` creates the table, the files `backend.walFiles` are deleted before and after).
 
 ## Cases
 

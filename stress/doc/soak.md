@@ -2,7 +2,7 @@
 
 Runs a mix of everything the other scenarios check one by one, for hours, to find slow leaks that a single phase cannot show. The same round runs over and over on the test connection and, at the same time, in a pool of threads (Lua Lanes) with a connection each: 2 threads, unless the backend sets another number (`backend.soakLanes`, 0 for none). Every 30 seconds the scenario takes a sample of the memory and the server counters; at the end it computes how fast each memory series grows. How the samples are judged is described in the README, see [Soak](../README.md#soak).
 
-The scenario runs in tier `soak`, for `--duration` minutes (default 240), and for one minute in tier `smoke`, to check that it works; in the other tiers it is skipped. It is skipped if the driver has no `conn:prepare` or the backend lacks one of the statements of the round. Without Lua Lanes, or with `soakLanes = 0`, it runs on the test connection only and says so in its first line. It uses a table `luastress_soak`, dropped at the end.
+The scenario runs in tier `soak`, for `--duration` minutes (default 240), and for one minute in tier `smoke`, to check that it works; in the other tiers it is skipped. It is skipped if the driver has no bind API (`conn:prepare` and `luasql.type`) or the backend lacks one of the statements of the round. Without Lua Lanes, or with `soakLanes = 0`, it runs on the test connection only and says so in its first line. It uses a table `luastress_soak`, dropped at the end.
 
 ## One round
 

@@ -20,7 +20,7 @@ For every case the scenario writes one row, reads it back with `cur:fetch` and c
 
 A case is a limit instead of a failure if it hits a documented limitation of the DBMS or its client library; the reasons come from the backend (see [DBMS-Specific Notes](../README.md#dbms-specific-notes) in the README). A case "fails cleanly" when the write or read returns `nil` and an error message without crashing.
 
-The scenario is skipped if the driver has no `conn:prepare` or the backend has no test table. A case is skipped if its column, its SQL literal or a backend key it needs is missing.
+The scenario is skipped if the driver has no bind API (`conn:prepare` and `luasql.type`) or the backend has no test table. A case is skipped if its column, its SQL literal or a backend key it needs is missing.
 
 ## Blocks and how often they run
 

@@ -2,7 +2,7 @@
 
 Prepares, executes and closes many prepared statements on the test connection, with changing parameters, and checks every result. All phases run with autocommit on, except `manualReuse`. Every phase checks that open cursors and temporary LOBs (Large Objects) on the server and the memory of the client do not grow. This is where a driver shows whether it releases statement handles, bind buffers and LOB locators.
 
-The scenario is skipped if the driver has no `conn:prepare`. There are no single cases in this scenario.
+The scenario is skipped if the driver has no bind API (`conn:prepare` and `luasql.type`). There are no single cases in this scenario.
 
 ## Phases
 

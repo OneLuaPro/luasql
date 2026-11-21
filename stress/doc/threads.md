@@ -4,7 +4,7 @@ Uses the driver from several threads at the same time, with Lua Lanes. Each lane
 
 A lane opens its connection itself from the environment variables (`laneconn.lua`); the scenario passes only the DBMS name and the module paths to it. The tasks of the lanes are in `scenarios/threadsLane.lua`.
 
-The scenario is skipped without Lua Lanes, without `conn:prepare` or without the queries of the backend; `parallelWriters`, `lockWait` and `deadlock` are skipped without the threads table, each case without the backend keys it needs. Cases that count or kill sessions need the admin connection and are skipped without it. A lane that hangs inside a call after a failed case is freed by killing its session; Lanes itself cannot cancel a lane inside a driver call.
+The scenario is skipped without Lua Lanes, without the bind API (`conn:prepare` and `luasql.type`) or without the queries of the backend; `parallelWriters`, `lockWait` and `deadlock` are skipped without the threads table, each case without the backend keys it needs. Cases that count or kill sessions need the admin connection and are skipped without it. A lane that hangs inside a call after a failed case is freed by killing its session; Lanes itself cannot cancel a lane inside a driver call.
 
 ## Cases
 

@@ -66,8 +66,9 @@
 --                   and one byte more, which gives nil and a message;
 --                   needs about twice that much memory
 --
--- Skipped if the driver has no prepare() or the backend has no volume
--- table; the tablespace cases are skipped without small tablespace.
+-- Skipped if the driver has no bind API (conn:prepare and luasql.type)
+-- or the backend has no volume table; the tablespace cases are skipped
+-- without small tablespace.
 
 local dbutil = require("dbutil")
 local phases = require("phases")
@@ -944,8 +945,8 @@ end
 function volume.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
-   if conn.prepare == nil then
-      report.print("  ", "skipped: driver has no prepare()", "skip")
+   if not dbutil.hasBindApi(ctx) then
+      report.print("  ", "skipped: " .. dbutil.noBindApiReason, "skip")
       return true
    end
    if backend.volTableCreate == nil then

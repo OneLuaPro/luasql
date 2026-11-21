@@ -64,8 +64,8 @@
 -- $1, $2, ...; a DBMS with positions only gives the one placeholder in
 -- backend.positionalPlaceholder (e.g. ? in Firebird).
 --
--- Skipped if the driver has no prepare() or the backend has no test
--- table.
+-- Skipped if the driver has no bind API (conn:prepare and luasql.type)
+-- or the backend has no test table.
 
 local dbutil = require("dbutil")
 local report = require("report")
@@ -1472,8 +1472,8 @@ end
 function dataTypes.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
-   if conn.prepare == nil then
-      report.print("  ", "skipped: driver has no prepare()", "skip")
+   if not dbutil.hasBindApi(ctx) then
+      report.print("  ", "skipped: " .. dbutil.noBindApiReason, "skip")
       return true
    end
    if backend.typesTableCreate == nil then

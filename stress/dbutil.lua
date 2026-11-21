@@ -51,6 +51,26 @@ function dbutil.checkTempLobs(ctx, phase)
    return nil
 end
 
+-- Why a scenario, case or phase that passes typed parameters
+-- ({ value, types.int }) is skipped without the bind API.
+dbutil.noBindApiReason = "driver has no bind API (conn:prepare and"
+   .. " luasql.type)"
+
+-- True if the driver has the bind API: conn:prepare and luasql.type,
+-- the type constants of the pairs { value, type } that the scenarios
+-- bind. A driver with prepare() but without luasql.type (luasql.odbc
+-- before bindapi-odbc) takes the paths of a driver without prepare():
+-- literals where a scenario has them, otherwise skipped. ctx is the
+-- context of the runner (ctx.driver) or that of a scenario (ctx.types);
+-- both have testConn.
+function dbutil.hasBindApi(ctx)
+   local types = ctx.types
+   if types == nil and ctx.driver then
+      types = ctx.driver.type
+   end
+   return ctx.testConn.prepare ~= nil and types ~= nil
+end
+
 -- Overwrites the stack slots that a function which has returned used,
 -- so that no stale reference there keeps an object alive for the GC.
 -- Called right after that function, at the same place in the caller.

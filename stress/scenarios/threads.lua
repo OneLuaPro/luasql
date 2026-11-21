@@ -828,8 +828,8 @@ local phaseList = {
 function threads.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
-   if conn.prepare == nil then
-      report.print("  ", "skipped: driver has no prepare()", "skip")
+   if not dbutil.hasBindApi(ctx) then
+      report.print("  ", "skipped: " .. dbutil.noBindApiReason, "skip")
       return true
    end
    for _, key in ipairs({ "offsetQuery", "offsetBindQuery", "clobRowsQuery",

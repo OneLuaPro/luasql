@@ -4,16 +4,48 @@
 
 QUERYING_STRING_TYPE_NAME = "string"
 
--- Defaults: -1 (MS Access driver); SQL Server and MariaDB return 0.
--- Per-DBMS expectations can be overridden by environment variables,
--- e.g. ODBC_TEST_CREATE_RV=0 for MariaDB, ODBC_TEST_BIT_TYPE=boolean for PostgreSQL.
+-- ODBC_TEST_TARGET selects the target: pg (DSN luatest_pg, user and
+-- password from POSTGRES_TEST_USER and _PASSWORD) or mariadb (DSN
+-- luatest_mariadb, MYSQL_TEST_USER and _PASSWORD). The DSN is
+-- connected through SQLConnect; no connection string with a password
+-- is built. Arguments on the command line and values given before
+-- (e.g. with lua -e) still come first.
+local targets = {
+   pg = {
+      dsn = "luatest_pg", user = "POSTGRES_TEST_USER",
+      password = "POSTGRES_TEST_PASSWORD",
+      create_rv = -1, drop_rv = -1, bit_type = "boolean",
+   },
+   mariadb = {
+      dsn = "luatest_mariadb", user = "MYSQL_TEST_USER",
+      password = "MYSQL_TEST_PASSWORD",
+      create_rv = 0, drop_rv = 0, bit_type = "bit",
+   },
+}
+local target_name = os.getenv ("ODBC_TEST_TARGET")
+local target = target_name and targets[target_name]
+if target_name and not target then
+   error ("ODBC_TEST_TARGET must be pg or mariadb, not '"..target_name.."'")
+end
+if target then
+   DEFAULT_TEST_DATABASE = DEFAULT_TEST_DATABASE or target.dsn
+   DEFAULT_USERNAME = DEFAULT_USERNAME or os.getenv (target.user)
+   DEFAULT_PASSWORD = DEFAULT_PASSWORD or os.getenv (target.password)
+end
+
+-- Defaults without a target: -1 (MS Access driver); SQL Server and
+-- MariaDB return 0. The expectations can be overridden by environment
+-- variables, e.g. ODBC_TEST_CREATE_RV=0, ODBC_TEST_BIT_TYPE=boolean.
 local function env_number (name, default)
    return tonumber (os.getenv (name) or "") or default
 end
-CREATE_TABLE_RETURN_VALUE = env_number ("ODBC_TEST_CREATE_RV", -1)
-DROP_TABLE_RETURN_VALUE = env_number ("ODBC_TEST_DROP_RV", -1)
+CREATE_TABLE_RETURN_VALUE = env_number ("ODBC_TEST_CREATE_RV",
+   target and target.create_rv or -1)
+DROP_TABLE_RETURN_VALUE = env_number ("ODBC_TEST_DROP_RV",
+   target and target.drop_rv or -1)
 -- Column type used for the "bit" test (PostgreSQL needs boolean).
-local BIT_TYPE = os.getenv ("ODBC_TEST_BIT_TYPE") or "bit"
+local BIT_TYPE = os.getenv ("ODBC_TEST_BIT_TYPE")
+   or (target and target.bit_type) or "bit"
 
 ---------------------------------------------------------------------
 -- Test of data types managed by ODBC driver.

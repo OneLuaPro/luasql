@@ -37,10 +37,11 @@
 --                 fetches do not pile up temporary LOBs or client memory,
 --                 not the release by the driver; so it has no precheck.
 --
--- Skipped if the driver has no prepare(). A phase is skipped if the
--- backend lacks the query it needs. A LOB phase fails as invalid if
--- the backend check (backend.tempLobChecks) shows that its query gives
--- no temporary LOBs, since the phase would then test nothing.
+-- Skipped if the driver has no bind API (conn:prepare and luasql.type).
+-- A phase is skipped if the backend lacks the query it needs. A LOB
+-- phase fails as invalid if the backend check (backend.tempLobChecks)
+-- shows that its query gives no temporary LOBs, since the phase would
+-- then test nothing.
 
 local dbutil = require("dbutil")
 local phases = require("phases")
@@ -540,8 +541,8 @@ local phaseList = {
 -- ctx: tier, driver, backend, testConn, adminConn (may be nil)
 -- Returns true, or nil and an error message.
 function stmtLifecycle.run(ctx)
-   if ctx.testConn.prepare == nil then
-      report.print("  ", "skipped: driver has no prepare()", "skip")
+   if not dbutil.hasBindApi(ctx) then
+      report.print("  ", "skipped: " .. dbutil.noBindApiReason, "skip")
       return true
    end
    local count = iterations[ctx.tier]

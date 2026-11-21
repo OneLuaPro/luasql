@@ -23,6 +23,7 @@ The [upstream documentation](https://lunarmodules.github.io/luasql/) describes t
 | Firebird driver         | `luasql.firebird` reworked: prepared statements, typed parameters, a crash after a failed query, statements left on the server, the error convention, transactions (autocommit with a transaction per statement), text in UTF-8, exact `NUMERIC`, `RETURNING`; see [Differences](#differences-from-lunarmodulesluasql) |
 | PostgreSQL driver       | `luasql.postgres` reworked: prepared statements, typed parameters, values read by their type, the error convention, transactions (a commit after an error reports the loss), text in UTF-8, dates in ISO form, a working asynchronous API, `luasql._CLIENTVERSION`; see [Differences](#differences-from-lunarmodulesluasql) |
 | MySQL/MariaDB driver    | `luasql.mysql` reworked: prepared statements, typed parameters, values read by their type (the same through the text and the binary protocol), the error convention, transactions (a commit after a deadlock reports the loss, `setautocommit(true)` rolls back), several results (every `CALL`) no longer block the connection, the client library kept for all environments, TLS by default with flags to turn it off, `luasql._CLIENTVERSION`; see [Differences](#differences-from-lunarmodulesluasql) |
+| ODBC driver             | `luasql.odbc` reworked: the error convention, transactions (`setautocommit(true)` rolls back), exact `NUMERIC` and unsigned `BIGINT`, complete messages, a use of freed memory after a failed binding, `luasql._CLIENTVERSION`; see [Differences](#differences-from-lunarmodulesluasql) |
 | Stress test suite       | [`stress/`](stress/README.md): a long-running test of driver robustness, implemented for Oracle so far; see [below](#stress-test-suite) |
 
 The guiding rule for the Oracle driver: *the driver uses OCI (Oracle Call Interface) correctly, it does not try to improve OCI.* It covers the OCI features well, but stays inside the frame of the LuaSQL API; additions are kept where another LuaSQL driver already offers the same, so that the drivers behave alike. Where Oracle or OCI behaves differently from what a user might expect, the driver does not hide it; such behavior is documented as a known limitation.
@@ -67,10 +68,14 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **mysql: `conn:commit()` returns `false` and a message when an error has ended the transaction**: InnoDB rolls back the whole transaction on a deadlock (1213), a write conflict (1020, `Record has changed since last read`), a full lock table (1206), and a lock wait timeout (1205) only with `innodb_rollback_on_timeout`; the next statement silently begins a new transaction. The driver rolls back the work done since then too. LuaSQL returns `true`, while the changes before the error are lost. Not detected: a transaction ended by SQL (with autocommit off use `conn:commit()` and `conn:rollback()`), and a failing DDL, which commits the open transaction before it runs.
 - **mysql: `luasql._CLIENTVERSION` is the version of MariaDB Connector/C loaded** (e.g. `"3.4.11"`); LuaSQL gives the MariaDB version the client is compatible with (`"10.8.8"`).
 - **mysql: the number of rows `conn:get_result()` returns is an integer** (`1`); LuaSQL returns a float (`1.0`).
+- **odbc: `NUMERIC` and `DECIMAL` are exact text** (`"12.30"`), and `cur:getcoltypes()` names them `"string"`; LuaSQL reads them as floats (`12.3`, and a large value loses digits) and names them `"number"`.
+- **odbc: an unsigned `BIGINT` is text** (`"18446744073709551615"`), named `"string"`; LuaSQL reads it as a signed integer, so a value above 2^63 - 1 comes back wrong (2^64 - 1 as `-1`) without an error.
+- **odbc: `REAL` is the float32 the DBMS holds**, widened to a Lua float (`0.1` gives `0.10000000149011612`), as in the native drivers; LuaSQL asks the ODBC driver for a double, which each driver converts in its own way (psqlODBC gives `0.1`).
+- **odbc: `conn:setautocommit(true)` rolls back an open transaction**, as the other drivers do; with LuaSQL ODBC commits it.
 
 **Other changes**
 
-- **Errors** follow the section "Error handling" of the LuaSQL manual in all drivers documented here (so far oci8, sqlite3, duckdb, firebird, postgres and mysql):
+- **Errors** follow the section "Error handling" of the LuaSQL manual in all drivers documented here (so far oci8, sqlite3, duckdb, firebird, postgres, mysql and odbc):
   - A wrong use of the API raises an error: a closed object, an argument of the wrong type, an unknown option or value of `setoption`/`getoption`, an invalid parameter, `execute` or `reset` while the cursor of the statement is open.
   - A failure in the database or the client library returns `nil` and a message.
   - `commit`, `rollback` and `setautocommit` return `false` and a message on failure (LuaSQL: partly `nil`); code that tests for `nil` misses it.
@@ -136,6 +141,15 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - **mysql: `cur:seek()` with a negative row number** raises an error; LuaSQL moves past the last row.
 - **mysql: `conn:ping()` returns `false` for a connection lost during a call too** (LuaSQL raises an error then), and its error message is no longer read as a format string.
 - **mysql: `conn:execute(sql, ...)` binds further arguments as parameters**; LuaSQL ignores them. With parameters, also a single `nil` or an empty table, the driver prepares the statement, executes it and closes it again, so the text holds one statement.
+- **odbc: closing:**
+  - `conn:close()` with open cursors or statements and `env:close()` with open connections return `false` and a message, and a to-be-closed connection or environment with open objects stays open, as with `close`; LuaSQL frees a to-be-closed environment all the same.
+  - `stmt:close()` with an open cursor returns `false` and a message; LuaSQL raises an error, also when the garbage collector closes it. `stmt:close()` of a closed statement returns `false` and a message; LuaSQL returns `false` alone.
+  - `conn:close()` rolls back an open transaction before it disconnects, in the order the ODBC specification requires; LuaSQL disconnects at once, which an ODBC driver may refuse (SQLSTATE 25000), and frees the connection all the same. psqlODBC and MariaDB Connector/ODBC roll back in both cases.
+  - A cursor keeps its statement from the garbage collector while it is open; LuaSQL keeps the last argument of `stmt:execute` instead, so a statement could be collected while its cursor was open.
+- **odbc: a closed object, and `stmt:execute()` or `stmt:reset()` with an open cursor,** raise errors that start with `LuaSQL:` (e.g. `LuaSQL: cursor is closed`, `LuaSQL: cannot execute: cursor still open`); LuaSQL raises them as `bad argument #1 to ...`.
+- **odbc: `conn:setautocommit(true)` returns `false` and a message if the rollback fails**, and autocommit stays off.
+- **odbc: messages of ODBC** separate several diagnostic records by one line end and end without one, and a record comes in full up to 32767 bytes; LuaSQL ends every record with a line end and reads it with a buffer of `SQL_MAX_MESSAGE_LENGTH` (512) bytes, so a longer text is cut, or with psqlODBC handed out in pieces of 511 bytes as further records, each with a line end.
+- **odbc: a parameter that cannot be bound** leaves no parameter of the statement bound, so the next `stmt:execute()` without parameters returns `nil` and a message; LuaSQL leaves the parameters after it bound to memory it has freed, which the next execute reads. `conn:execute(sql, ...)` with such a parameter no longer leaves its statement open, which kept `conn:close()` from closing the connection.
 
 **Extensions**
 
@@ -148,6 +162,7 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - The additions of firebird: prepared statements, parameters (also `conn:execute(sql, ...)`), `luasql.type`, long values as temporary `BLOB`s, and `luasql._CLIENTVERSION`, the version of the Firebird client library; see the topic Firebird of the manual (`doc/ldoc/manual/06-firebird.md`).
 - The additions of postgres: prepared statements, parameters (also `conn:execute(sql, ...)`), `luasql.type`, and `luasql._CLIENTVERSION`, the version of libpq loaded (e.g. `"18.7"`; LuaSQL means to set it but never does); see the topic PostgreSQL of the manual (`doc/ldoc/manual/07-postgres.md`).
 - The additions of mysql: prepared statements, parameters (also `conn:execute(sql, ...)`), `luasql.type`, values of the same type through the text and the binary protocol, TLS by default, as MariaDB Connector/C 3.4 does it (a connection is encrypted and the certificate of the server is verified), with the flags `luasql.CLIENT_SSL_DISABLE` (no TLS) and `luasql.CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE` (TLS without verifying the certificate) for the last argument of `env:connect`; they use the bits of `CLIENT_SSL` and `CLIENT_SSL_VERIFY_SERVER_CERT` with the opposite meaning. The other useful client flags are fields of the module too: `CLIENT_FOUND_ROWS`, `CLIENT_COMPRESS`, `CLIENT_IGNORE_SPACE`, `CLIENT_INTERACTIVE`, `CLIENT_MULTI_STATEMENTS`, `CLIENT_MULTI_RESULTS`; see the topic MySQL of the manual (`doc/ldoc/manual/08-mysql.md`).
+- The additions of odbc: `luasql._CLIENTVERSION`, the version of the ODBC Driver Manager (`SQL_DM_VER`) in the form the Driver Manager gives it, unset if it does not give it without a connection.
 
 ## Oracle Driver `luasql.oci8`
 

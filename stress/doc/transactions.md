@@ -4,7 +4,7 @@ Checks autocommit, commit and rollback: what another session sees, what a failed
 
 "Another session" is the admin connection: it sees only committed rows. Cases that need it are skipped without one. Behavior of the DBMS or the driver that a user might not expect is reported as a limit with its reason.
 
-The scenario uses a table `luastress_tx` with a key `id` and a text `v`; it is skipped if the backend has none or the driver has no `conn:prepare`.
+The scenario uses a table `luastress_tx` with a key `id` and a text `v`; it is skipped if the backend has none or the driver has no bind API (`conn:prepare` and `luasql.type`).
 
 ## Cases
 

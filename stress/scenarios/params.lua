@@ -81,10 +81,11 @@
 -- fewer (backend.timestampDigits, e.g. 4 in Firebird) gives them back
 -- cut to these digits.
 --
--- Skipped if the driver has no prepare() or the backend lacks a query;
--- cases and phases that need another backend key are skipped without
--- it.
+-- Skipped if the driver has no bind API (conn:prepare and luasql.type) or
+-- the backend lacks a query; cases and phases that need another backend
+-- key are skipped without it.
 
+local dbutil = require("dbutil")
 local phases = require("phases")
 local report = require("report")
 
@@ -911,8 +912,8 @@ end
 function params.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
-   if conn.prepare == nil then
-      report.print("  ", "skipped: driver has no prepare()", "skip")
+   if not dbutil.hasBindApi(ctx) then
+      report.print("  ", "skipped: " .. dbutil.noBindApiReason, "skip")
       return true
    end
    for _, key in ipairs(requiredQueries) do

@@ -42,7 +42,8 @@
 -- and one case per connect that must fail (backend.failingConnects,
 -- e.g. with Oracle unknownUser, a user that does not exist, and
 -- closedPort, a port without listener): clean error, no session, the
--- environment is not kept.
+-- environment is not kept. An entry with a limit (a text) is reported
+-- as a known limitation if its error matched.
 -- A failing connect may take seconds (a server side delay for an
 -- unknown user, TCP retries for a closed port), so these are cases, not
 -- phases. "The environment is not kept" means: after env:close() and
@@ -347,6 +348,11 @@ end
 local function failingConnectCase(entry)
    return function(ctx)
       failingConnect(ctx, entry.name, entry.error)
+      -- The pattern matched, but the message is poorer than the DBMS
+      -- could give: a known limitation of the client library.
+      if entry.limit then
+         return "limit", entry.limit
+      end
    end
 end
 

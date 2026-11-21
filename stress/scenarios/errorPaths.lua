@@ -30,8 +30,10 @@
 --                    rejects it all the same (DuckDB)
 --
 -- A phase is skipped if the driver has no prepare() but the phase needs
--- it, or if the backend lacks a query the phase needs.
+-- it, if the phase binds typed parameters (executeError) and the driver
+-- has no luasql.type, or if the backend lacks a query the phase needs.
 
+local dbutil = require("dbutil")
 local phases = require("phases")
 local report = require("report")
 
@@ -305,7 +307,7 @@ local phaseList = {
      needs = { "invalidQuery" } },
    { name = "executeError", setup = setupExecuteError,
      step = executeErrorStep, finish = finishStatement,
-     needs = { "failingBlock", "conditionalBlock" }, usesPrepare = true },
+     needs = { "failingBlock", "conditionalBlock" }, usesBindApi = true },
    { name = "fetchError", setup = setupFetchError,
      step = fetchErrorStep, finish = finishFetchError,
      needs = { "fetchErrorQuery" } },
@@ -325,6 +327,9 @@ local phaseList = {
 local function missingRequirement(ctx, phase)
    if phase.usesPrepare and ctx.testConn.prepare == nil then
       return "driver has no prepare()"
+   end
+   if phase.usesBindApi and not dbutil.hasBindApi(ctx) then
+      return dbutil.noBindApiReason
    end
    for _, field in ipairs(phase.needs or {}) do
       if ctx.backend[field] == nil then

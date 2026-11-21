@@ -384,8 +384,8 @@ function soak.run(ctx)
                    .. " smoke)", "skip")
       return true
    end
-   if ctx.testConn.prepare == nil then
-      report.print("  ", "skipped: driver has no prepare()", "skip")
+   if not dbutil.hasBindApi(ctx) then
+      report.print("  ", "skipped: " .. dbutil.noBindApiReason, "skip")
       return true
    end
    for _, key in ipairs({ "soakTableCreate", "soakTableDrop", "soakInsert",

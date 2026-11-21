@@ -57,3 +57,11 @@ The 10-row query reads `generate_series(1, 10)` in order. The LOB phases read te
 The 10-row query reads `seq_1_to_10` of the Sequence engine of MariaDB in order, cast to `SIGNED`: the column `seq` is `BIGINT UNSIGNED`, which `luasql.mysql` reads as text. A table of the Sequence engine opens no transaction. The LOB phases read text and bytes of the result, made with `REPEAT('x', ...)` and `UNHEX(REPEAT('AB', ...))`: MariaDB has no temporary LOBs, so there is no check of the LOB queries (`backend.tempLobChecks`); the phases check that every value comes back whole and that nothing grows.
 
 `commitCursor` runs (`backend.cursorsSurviveEnd`): the result is on the client, so the cursor reads on after `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)`. The 2000-row query reads `seq_1_to_2000` in order.
+
+## ODBC
+
+Targets `odbc_postgres` and `odbc_mariadb`. psqlODBC and MariaDB Connector/ODBC give the whole result of a query to the client at the execute: the server keeps no cursor for it, so there is no server counter of open cursors, and a cursor that is not freed shows in the memory of the process only. The server counter is `open tx`, the open transaction of the test session: with PostgreSQL the state in `pg_stat_activity` (`idle in transaction`, also `idle in transaction (aborted)`), read on the admin connection; with MariaDB `@@in_transaction`, read on the test connection. With autocommit on it must be 0 before every phase. There is no counter of prepared statements yet.
+
+The queries are those of the native backends: `generate_series` for PostgreSQL, `seq_1_to_<n>` of the Sequence engine for MariaDB. The LOB phases read text and bytes of the result (`repeat`, `decode` or `REPEAT`, `UNHEX`); neither DBMS has temporary LOBs, so there is no check of the LOB queries (`backend.tempLobChecks`).
+
+`commitCursor` runs (`backend.cursorsSurviveEnd`): the result is on the client, so the cursor reads on after `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)`; checked with both vendor drivers (500 more rows after each). The 2000-row query is the one of the native backend.

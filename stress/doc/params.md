@@ -8,7 +8,7 @@ Timestamps are bound with 6 digits of a second. A DBMS that keeps fewer (`backen
 
 Errors are checked against the [error convention](../README.md#error-convention): an error of the DBMS gives `nil` and a message, a misuse of the API raises an error of LuaSQL. Too many parameters in a table, a placeholder without a value and a wrong number of variable arguments give `nil` and a message: whether they are right depends on the SQL (`backend.argCountError`).
 
-The scenario is skipped if the driver has no `conn:prepare`; the reset cases are skipped if it has no `stmt:reset()`; `nameThenPosition` and `spellings` are skipped without `backend.paramsNamedQuery`, `argCount` without `backend.argCountError`, `connDml` without `backend.paramsDmlBlock`.
+The scenario is skipped if the driver has no bind API (`conn:prepare` and `luasql.type`); the reset cases are skipped if it has no `stmt:reset()`; `nameThenPosition` and `spellings` are skipped without `backend.paramsNamedQuery`, `argCount` without `backend.argCountError`, `connDml` without `backend.paramsDmlBlock`.
 
 ## Cases
 

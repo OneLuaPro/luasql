@@ -20,7 +20,7 @@ Each case runs once. A failing connect may take seconds (a delay of the server f
 | `envReleased`      | Opens and closes a connection and its environment, then drops the environment.                                                                        | Pass: the environment is collected. Fail: it is not; then the failing connects below cannot tell anything either, because they use the same method.                    |
 | `exitWithOpen`     | Starts a Lua child process 20 times (`scenarios/connectionExit.lua`, with the interpreter of the run). It opens two environments with a connection each (as a lane does, from the environment variables), leaves three cursors open (one partly fetched, one over a temporary CLOB per row, one not fetched), with `conn:prepare` also two prepared statements on each connection, one with a partly fetched cursor and one without, and ends without closing anything: Lua then runs all finalizers in an order no program chooses. If the backend has the table of scenario `connectionLoss`, the second connection has autocommit off and has inserted a row before its cursor, without a commit. | Pass: every child process ends with exit code 0, within 10 seconds the sessions are back to the start, and the inserted row is not on the server (only committed work stays). Fail: a crash in a finalizer (another exit code), a hang (stopped after 60 seconds), a session that stays or the row on the server. Skipped without `luv`, and for a database that only one process at a time may open (DuckDB). |
 
-Then one case per connect that must fail, as the backend lists them (`backend.failingConnects`; the sections of the DBMS below name them). Each must give `nil` and the error of the backend, leave no session, and the environment must be collected after it is closed: the failed connect kept no reference to it.
+Then one case per connect that must fail, as the backend lists them (`backend.failingConnects`; the sections of the DBMS below name them). Each must give `nil` and the error of the backend (an entry with a `limit` is reported as a known limitation if its error matched), leave no session, and the environment must be collected after it is closed: the failed connect kept no reference to it.
 
 ## Phases
 
@@ -104,3 +104,16 @@ Connects that must fail:
 | `unknownDatabase` | Connects to a database `luastress_nodb` that does not exist. | Pass: `nil` and a message with the name of the database. Fail: anything else.                                    |
 
 The test user has no rights outside its database, so MariaDB answers an unknown database with `Access denied for user '...' to database 'luastress_nodb'` (1044), not with `Unknown database` (1049); the pattern looks for the name only. The test user is never used with a wrong password, although MariaDB locks no account after failed logins by default (`max_password_errors` has no limit).
+
+## ODBC
+
+A session is a row with the name of the test user, counted on the admin connection: `pg_stat_activity` (`backend_type = 'client backend'`, after a wait of 0.1 seconds in the same SQL text, as with the native driver) for `odbc_postgres`, `information_schema.PROCESSLIST` for `odbc_mariadb`. `SQLConnect` gives no application name, so a `psql` or `mariadb.exe` window of the test user counts as well: close such windows before the run. The only server counter is `open tx` (see [`cursorLifecycle`](cursorLifecycle.md)).
+
+The connection goes through `env:connect(dsn, user, password)` with the system DSN of the target (`luatest_pg`, `luatest_mariadb`), so host, port and database cannot change. Connects that must fail:
+
+| Test          | Checks                                                  | Results                                                                                                                                  |
+| ------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `unknownUser` | Connects as a user `luastress_nouser` that does not exist. | MariaDB: `nil` and `Access denied for user ...`. PostgreSQL: `nil` and `Error: SqlState=08001`; this is a limit (see below). |
+| `unknownDsn`  | Connects to a DSN `luastress_nodsn` that does not exist. | Pass: `nil` and the message of the Driver Manager, in the language of Windows; the pattern is its prefix `[Microsoft][ODBC Driver Manager]`. |
+
+The limit of `unknownUser` with `odbc_postgres`: psqlODBC Unicode gives no server text for a failed logon (wrong user, wrong password, unknown database), only `Error: SqlState=08001`: PostgreSQL sends the message before the logon in the encoding of the server, and the Unicode driver drops text it cannot read as UTF-8. The case passes if the message is that one and is reported as a known limitation. The test user is never used with a wrong password.

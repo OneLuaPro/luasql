@@ -75,3 +75,7 @@ prep:   helper tables created
 ```
 
 There is no state file: no setting of the server is changed. With `--keep` the helper tables stay in the database. The test database, the test user and its rights are set up once by hand (see MariaDB under [Preparing a Run](../README.md#preparing-a-run)). Without the admin connection the step is skipped, and the phases that use the helper tables fail with `Table '...' doesn't exist`.
+
+## ODBC
+
+There is no module `prep/odbc_postgres.lua` or `prep/odbc_mariadb.lua`; the output shows `prep:   nothing to prepare for this DBMS`. The scenarios that run need no helper tables, and they create their own tables themselves. The test database, the users and the system DSNs are set up once by hand (see ODBC under [Preparing a Run](../README.md#preparing-a-run)).

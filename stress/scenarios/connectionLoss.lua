@@ -497,8 +497,9 @@ local caseList = {
      needs = "clobRowsLiteral", prefetch = 0 },
    { name = "killLobPrefetch1000", run = killDuringLobFetchCase,
      needs = "clobRowsLiteral", prefetch = 1000 },
-   { name = "killWithStmt", run = killWithStmtCase, usesPrepare = true },
-   { name = "killStmtCursor", run = killStmtCursorCase, usesPrepare = true },
+   { name = "killWithStmt", run = killWithStmtCase, usesBindApi = true },
+   { name = "killStmtCursor", run = killStmtCursorCase,
+     usesBindApi = true },
    { name = "killInTransaction", run = killInTransactionCase },
    { name = "killThenGc", run = killThenGcCase },
    { name = "killThenReconnect", run = killThenReconnectCase },
@@ -518,8 +519,8 @@ local function runCases(ctx)
    for _, case in ipairs(caseList) do
       local prefix = string.format("    %-21s ", case.name)
       local reason
-      if case.usesPrepare and ctx.testConn.prepare == nil then
-         reason = "driver has no prepare()"
+      if case.usesBindApi and not dbutil.hasBindApi(ctx) then
+         reason = dbutil.noBindApiReason
       elseif case.prefetch and not hasPrefetch(ctx.testConn) then
          reason = "driver has no option prefetch"
       elseif case.needs and ctx.backend[case.needs] == nil then

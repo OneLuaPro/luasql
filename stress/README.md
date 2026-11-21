@@ -2,7 +2,7 @@
 
 The LuaSQL stress test suite exercises a LuaSQL driver under load: it opens and closes connections, cursors and prepared statements hundreds of thousands of times, provokes errors, kills sessions, uses the driver from several threads at once and runs for hours. It checks that the driver never crashes, never leaks memory, cursors, temporary LOBs (Large Objects) or sessions, never loses or changes data and never leaves a session blocked. Behavior of the client library or the DBMS (Database Management System) that a user might not expect is reported as a known limitation with its reason, without failing the run.
 
-The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver `luasql.firebird`, the PostgreSQL driver `luasql.postgres` and the MariaDB driver `luasql.mysql` are implemented:
+The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver `luasql.firebird`, the PostgreSQL driver `luasql.postgres`, the MariaDB driver `luasql.mysql` and, for PostgreSQL and MariaDB, the ODBC driver `luasql.odbc` are implemented:
 
 | Driver            | DBMS                    | Status    |
 | ----------------- | ----------------------- | --------- |
@@ -12,7 +12,7 @@ The suite is written for several DBMS. Everything specific to one DBMS lives in 
 | `luasql.mysql`    | MariaDB/MySQL           | available |
 | `luasql.duckdb`   | DuckDB                  | available |
 | `luasql.firebird` | Firebird                | available |
-| `luasql.odbc`     | any, via an ODBC driver | planned   |
+| `luasql.odbc`     | PostgreSQL (psqlODBC), MariaDB (Connector/ODBC) | available, without prepared statements |
 
 Many scenarios depend on prepared statements (`conn:prepare`, `stmt:execute`), which most LuaSQL drivers do not offer yet. The suite detects this at run time and skips what it cannot test, so it can serve as the acceptance test for prepared statements once a driver gets them. The suite was written alongside the further development of [LuaSQL](https://github.com/OneLuaPro/luasql) for [OneLuaPro](https://github.com/OneLuaPro) and relies on its extensions (prepared statements, `stmt:reset()`, `conn:setoption()`); it does not necessarily work with the official LuaSQL release of the [Lunar Modules project](https://github.com/lunarmodules/luasql).
 
@@ -32,7 +32,7 @@ The suite needs only plain Lua and two common modules; further modules are optio
 
 ## Preparing a Run
 
-Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite, DuckDB, Firebird, PostgreSQL and MariaDB are available; instructions for the other DBMS will follow when their backends are implemented.
+Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite, DuckDB, Firebird, PostgreSQL and MariaDB, each with its native driver, and PostgreSQL and MariaDB through ODBC are available; instructions for the other DBMS will follow when their backends are implemented.
 
 ### Oracle
 
@@ -380,6 +380,33 @@ tar -xf zoneinfo.zip
 On Linux: `mariadb-tzinfo-to-sql /usr/share/zoneinfo | mariadb -u root -p mysql`. Without the tables `ltzSummer` and `ltzWinter` fail with `Unknown or incorrect time zone: 'Europe/Berlin'`.
 
 
+### ODBC
+
+**Driver and client library:** `luasql.odbc` uses the ODBC Driver Manager and the ODBC driver of the DBMS that the data source names. On Windows the Driver Manager is part of the system. The suite was tested with psqlODBC (Unicode) against PostgreSQL 18.7 and with MariaDB Connector/ODBC 3.2.10 against MariaDB 12.3.4, through the Driver Manager of Windows.
+
+**Targets:** one backend per target, chosen by its name on the command line: `odbc_postgres` (PostgreSQL through psqlODBC) and `odbc_mariadb` (MariaDB through Connector/ODBC). A further target is a further pair of files `config/odbc_<target>.lua` and `backend/odbc_<target>.lua`; the scenarios do not change.
+
+**Data source:** a system DSN (Data Source Name) without user and password, whose name is fixed in the backend: `luatest_pg` for `odbc_postgres` (psqlODBC Unicode, `BoolsAsChar=0`, `LFConversion=0`) and `luatest_mariadb` for `odbc_mariadb` (Connector/ODBC, `CHARSET=utf8mb4`; without it text arrives double encoded). They are the DSNs of the functional test `checks/odbc.lua`. Host, port, database and encryption are those of the DSN. The suite connects with `env:connect(dsn, user, password)`, i.e. through `SQLConnect`; it never builds a connection string, so no password ends up in one.
+
+**Connection data:** from the environment variables of the native backend of the same DBMS, user and password only; the variables for host, port and database are not read.
+
+| Variable                  | Meaning                                    | Target          | Required     |
+| ------------------------- | ------------------------------------------ | --------------- | ------------ |
+| `POSTGRES_TEST_USER`      | test user, e.g. `luatest`                  | `odbc_postgres` | yes          |
+| `POSTGRES_TEST_PASSWORD`  | password of the test user                  | `odbc_postgres` | yes          |
+| `POSTGRES_ADMIN_USER`     | admin user, a superuser, e.g. `postgres`   | `odbc_postgres` | both or none |
+| `POSTGRES_ADMIN_PASSWORD` | password of the admin user                 | `odbc_postgres` | both or none |
+| `MYSQL_TEST_USER`         | test user, e.g. `luatest`                  | `odbc_mariadb`  | yes          |
+| `MYSQL_TEST_PASSWORD`     | password of the test user                  | `odbc_mariadb`  | yes          |
+| `MYSQL_ADMIN_USER`        | admin user, e.g. `root`                    | `odbc_mariadb`  | both or none |
+| `MYSQL_ADMIN_PASSWORD`    | password of the admin user                 | `odbc_mariadb`  | both or none |
+
+Set them as shown for [PostgreSQL](#postgresql) and [MariaDB](#mariadb). The admin connection goes through the same DSN, as the admin user, so it works in the same database. The run creates and drops tables whose names start with `luastress`, the functional test those starting with `luasql`; no other run may use the database at the same time.
+
+**Rights of the database users and the database itself:** as for the native drivers, see [PostgreSQL](#postgresql) and [MariaDB](#mariadb) above: the same database `luatest`, the same users. The suite recognizes errors of the server by their English text, so `lc_messages = 'C'` is set for the PostgreSQL test database as there.
+
+**Preparation:** the preparation step has nothing to do for ODBC (`prep: nothing to prepare for this DBMS`): the scenarios that run need no helper tables.
+
 ## Running
 
 The suite is started with the DBMS and a tier. It can be called from any directory with the path to `stress.lua`, e.g. `lua C:\misc\luasql\stress\stress.lua oracle smoke`; it finds its modules next to `stress.lua`. A relative path given to `--csv` is relative to the current directory.
@@ -434,6 +461,8 @@ Scenarios with slow steps use fewer iterations, e.g. one logon per iteration; ea
 | Quick check of the Firebird driver                         | `lua stress.lua firebird smoke`                             |
 | Quick check of the PostgreSQL driver                       | `lua stress.lua postgres smoke`                             |
 | Quick check of the MariaDB driver                          | `lua stress.lua mysql smoke`                                |
+| Quick check of the ODBC driver on PostgreSQL               | `lua stress.lua odbc_postgres smoke`                        |
+| Quick check of the ODBC driver on MariaDB                  | `lua stress.lua odbc_mariadb smoke`                         |
 | Output without colors                                      | `set NO_COLOR=1` before the run                             |
 
 
@@ -516,6 +545,14 @@ Exit codes: 0 all scenarios passed (limits do not count), 1 a scenario or the cl
 - **`Unknown or incorrect time zone: 'Europe/Berlin'`** in `ltzSummer` and `ltzWinter` of `dataTypes`: the time zone tables of the server are empty, see [Preparing a Run](#preparing-a-run).
 - **`Table '...luastress_err' doesn't exist`** or the same for `luastress_dml`: the run had no admin connection, so the preparation step did not create the helper tables (see [`doc/prep.md`](doc/prep.md)).
 - **A run was aborted.** Its tables stay in the database; the next run drops them in the preparation step.
+
+
+### ODBC
+
+- **`Data source name not found`** (or its translation, `[Microsoft][ODBC Driver Manager]` in front) before the first scenario: the system DSN of the target (`luatest_pg`, `luatest_mariadb`) does not exist in the ODBC administrator of the bitness of the Lua interpreter (a 64-bit Lua needs a 64-bit DSN).
+- **`Error: SqlState=08001`** from `odbc_postgres` before the first scenario: user, password, database or server of the DSN. psqlODBC Unicode gives no server text for a failed logon, see [DBMS-Specific Notes](#odbc-2); look into the log of the server.
+- **`Access denied for user ...`** from `odbc_mariadb`: user or password of the test or admin connection.
+- **Other errors before the first scenario, `FAILED` with messages in another language, wrong numbers of sessions, a hang, an aborted run:** as for the native driver of the DBMS, see [PostgreSQL](#postgresql-1) and [MariaDB](#mariadb-1) above; the causes are the same.
 
 
 ## Scenarios
@@ -804,7 +841,56 @@ Tested with Firebird 5.0.4 (SuperServer) on Windows 10 and the `luasql.firebird`
 
 ### ODBC
 
-No information yet; not implemented.
+Tested with the targets `odbc_postgres` (PostgreSQL 18.7, psqlODBC Unicode) and `odbc_mariadb` (MariaDB 12.3.4, MariaDB Connector/ODBC 3.2.10) on Windows 10, through the Driver Manager of Windows and the `luasql.odbc` of OneLuaPro (task `core-odbc`). The backends are small: `luasql.odbc` has `conn:prepare`, but no `luasql.type` and no typed parameters yet; it binds plain values by position, a Lua number as a `double`. The suite runs what needs no typed parameters and skips the rest with the reason `no bind API (conn:prepare and luasql.type)`; those scenarios come with the task `bindapi-odbc` (see the list below).
+
+**Scenarios and phases that run:** `cursorLifecycle` (all phases and `commitCursor`), `errorPaths` (`sqlError`, `fetchError`, `openError`, `stmtMisuse`, `useAfterClose`, `emptyStatement`), `connectionLifecycle` (all cases, with `connectionExit`) and `connectionLoss` (all cases except two, see below).
+
+**Skipped with ODBC for now:**
+
+| Scenario, phase or case | Reason |
+| ---- | ---- |
+| `stmtLifecycle`, `params`, `concurrency`, `threads`, `dataTypes`, `transactions`, `volume`, `soak` | no bind API (`conn:prepare` and `luasql.type`): they pass typed parameters. |
+| `errorPaths`, `executeError` | the same. |
+| `connectionLoss`, `killWithStmt` and `killStmtCursor` | the same. |
+| `errorPaths`, `badColumnType` | the backend has no `unsupportedTypeQuery` yet; not checked with the vendor drivers. |
+| `prefetch` | `luasql.odbc` has no driver options. |
+| `warnings` | no warnings of this kind (the backend has none of its keys). |
+
+**Connections:** through `SQLConnect` with the DSN, user and password (see [Preparing a Run](#odbc)). Host, port and database belong to the DSN, so the connects that must fail are an unknown user and an unknown DSN; there is no `closedPort` and no `unknownDatabase`.
+
+**The whole result on the client:** psqlODBC and Connector/ODBC give the whole result of a query to the client at the execute. An error in any row of a result comes at the execute, not at a fetch; a cursor reads on after `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)` (`cursorsSurviveEnd`), and after the session was killed it gives all its rows and ends normally (`resultOnClient`). The server keeps no cursor, so there is no server counter of open cursors.
+
+**What a connection holds:** the only server counter is `open tx`, the open transaction of the test session: with PostgreSQL the state in `pg_stat_activity` (`idle in transaction`, also `(aborted)`), with MariaDB `@@in_transaction` of the session, read on the test connection. With autocommit on it is 0 before every phase. A counter of prepared statements of the server is not read: whether the vendor drivers prepare on the server is not checked; it comes with `bindapi-odbc`.
+
+**Sessions:** counted by the name of the test user (no `application_name`: `SQLConnect` gives none), so a `psql` or `mariadb.exe` window of the test user counts as well; close such windows before the run.
+
+**After a lost connection:** the first call that ends a transaction with open work, `conn:commit()`, `conn:rollback()` or `conn:setautocommit(true)`, returns `false` and a message; `conn:execute` returns `nil` and a message. Without open work `commit` and `rollback` return `true`. The messages:
+
+| Target | After the kill |
+| ---- | ---- |
+| `odbc_postgres` | `server closed the connection unexpectedly`, later `SQLPrepareW unable due to the connection lost`; a prepared statement in manual mode gives `internal SAVEPOINT failed` (psqlODBC sends a `SAVEPOINT` before each statement of a transaction, and it fails on the lost connection), with autocommit the text of the server |
+| `odbc_mariadb` | `Lost connection to server during query`, then `Server has gone away` for the calls that end a transaction and `Connection not open` for `conn:execute` |
+
+With MariaDB every later call that ends a transaction keeps failing, so `killThenAutocommit` needs no limit. psqlODBC takes the transaction as ended after the first failed call: `setautocommit(true)`, `rollback` and `commit` then return `true` without calling the server, and the work is lost, as with the native drivers and Firebird (limit `endAfterKill`).
+
+**Empty statement:** `emptyStatement` is an empty text. psqlODBC accepts it and gives the row count -1 (`SQLRowCount`; `luasql.postgres` gives 0), also prepared. Connector/ODBC rejects it with `Syntax error or access violation`, through `conn:execute` and `conn:prepare`.
+
+**Messages:** the Driver Manager gives its own messages in the language of Windows, so the patterns look for its prefix `[Microsoft][ODBC Driver Manager]`; the SQLSTATE is not part of a message of `luasql.odbc`. The messages of the servers are those of the native drivers.
+
+**Known limitations**, reported as "limit":
+
+| Limit | Scenario, case | Reason |
+| ---- | ---- | ---- |
+| `endAfterKill` | `connectionLoss`, `killThenAutocommit` (`odbc_postgres`) | After the first failed call psqlODBC takes the transaction of a lost connection as ended: `conn:setautocommit(true)`, `conn:rollback()` and `conn:commit()` return `true` without calling the server (probe `odbcprobe-kill2.lua`; the work is lost). |
+| `unknownUser` | `connectionLifecycle`, `unknownUser` (`odbc_postgres`) | psqlODBC Unicode gives no server text for a failed logon, only `Error: SqlState=08001`: PostgreSQL sends the message before the logon in the encoding of the server, and the Unicode driver drops text it cannot read as UTF-8. The case passes if the message is that one. |
+
+**Behavior worth knowing**, checked but not reported as limit:
+
+- A message of `luasql.odbc` holds all diagnostic records of ODBC, separated by a line end: psqlODBC gives e.g. `ERROR: division by zero;` and `Error while executing the query` as two records.
+- A DDL statement gives the row count -1 with psqlODBC and 0 with Connector/ODBC.
+- `BIGINT UNSIGNED` and `DECIMAL` of MariaDB come as text.
+
+**Not covered with ODBC yet:** everything in the table of the skipped scenarios; the type cases of `dataTypes` per target (no files `doc/dataTypes-odbc_*.md` yet); `volume` with a full database; a counter of prepared statements.
 
 
 ## Annex
