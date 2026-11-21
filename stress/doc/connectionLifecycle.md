@@ -93,7 +93,7 @@ The server refuses an unknown user or database before the settings of the test d
 
 ## MariaDB
 
-A session is a row of `information_schema.PROCESSLIST` with the name of the test user, counted on the admin connection. MariaDB shows no name of the program there (`performance_schema` is off by default), so a `mariadb.exe` window of the test user counts as well: close such windows before a run. A killed or closed session is gone from `PROCESSLIST` at once. The server counter is `open tx` (see [`cursorLifecycle`](cursorLifecycle.md)). In `exitWithOpen` the second connection of each child process has autocommit off and a row inserted; the row must be rolled back at the end of Lua (the server rolls back the transaction of a connection that ends). `closeWithStmt` and `gcAll` are skipped (no `conn:prepare` yet).
+A session is a row of `information_schema.PROCESSLIST` with the name of the test user, counted on the admin connection. MariaDB shows no name of the program there (`performance_schema` is off by default), so a `mariadb.exe` window of the test user counts as well: close such windows before a run. A killed or closed session is gone from `PROCESSLIST` at once. The server counter is `open tx` (see [`cursorLifecycle`](cursorLifecycle.md)). In `exitWithOpen` the second connection of each child process has autocommit off and a row inserted; the row must be rolled back at the end of Lua (the server rolls back the transaction of a connection that ends). `closeWithStmt` and `gcAll` run with a prepared statement of `bindQuery`.
 
 Connects that must fail:
 

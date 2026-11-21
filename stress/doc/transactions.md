@@ -71,4 +71,6 @@ The table is `luastress_tx (id integer PRIMARY KEY, v varchar(100))`. "Another s
 
 ## MariaDB
 
-Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.
+The table is `luastress_tx (id INT PRIMARY KEY, v VARCHAR(100))`, InnoDB. "Another session" is the admin connection in autocommit mode, in the same database; each of its statements sees what is committed. The counter of open transactions is the server counter `open tx`, `@@in_transaction` of the test session (see [`cursorLifecycle`](cursorLifecycle.md)).
+
+`enableAutocommit` is a limit: `setautocommit(true)` of `luasql.mysql` rolls back the open transaction, as in `luasql.oci8`, `luasql.sqlite3`, `luasql.duckdb`, `luasql.firebird` and `luasql.postgres` (the server alone would commit it). `errorKeepsWork` passes: an ordinary error rolls back its statement only. `ddlCommits` is a limit: MariaDB commits an open transaction implicitly at DDL, also with autocommit off, so the row of the case survives the rollback. `savepoint` runs with `SAVEPOINT` and `ROLLBACK TO SAVEPOINT`. `plsqlAutocommit` runs a compound statement (`BEGIN NOT ATOMIC INSERT ...; END`). Row counts are integers.

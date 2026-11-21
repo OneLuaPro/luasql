@@ -61,4 +61,4 @@ A row is locked with `SELECT ... FOR UPDATE`. `lockNowait` locks with `FOR UPDAT
 
 ## MariaDB
 
-Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.
+A row is locked with `SELECT ... FOR UPDATE`. `lockNowait` locks with `FOR UPDATE NOWAIT`, which gives `Lock wait timeout exceeded; try restarting transaction` (1205) at once. The error rolls back the statement only: B keeps its transaction and locks another row, so the case passes without a limit. `lockWaitTimeout` locks with `FOR UPDATE WAIT 1` and gets the same error after about a second; the wait needs no setting of the session (no `backend.concLockWaitSetup`), so the case checks only that it does not hang. `lockReleasedOnClose` and `lockReleasedOnGc` run: the lock must be free once A is closed or collected. In `readConsistency` the cursor of B has read its whole result at the execute. The table is `luastress_conc` (InnoDB). The WAL cases are skipped (SQLite only). The server counters are `open tx` and `prepared` (see [`stmtLifecycle`](stmtLifecycle.md)).

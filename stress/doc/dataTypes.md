@@ -9,6 +9,7 @@ This file describes the scenario for every DBMS. The cases, with what each one c
 - [`dataTypes-duckdb.md`](dataTypes-duckdb.md): what differs with DuckDB.
 - [`dataTypes-firebird.md`](dataTypes-firebird.md): what differs with Firebird.
 - [`dataTypes-postgres.md`](dataTypes-postgres.md): what differs with PostgreSQL.
+- [`dataTypes-mysql.md`](dataTypes-mysql.md): what differs with MariaDB.
 
 For every case the scenario writes one row, reads it back with `cur:fetch` and checks:
 
@@ -74,4 +75,4 @@ The cases with PostgreSQL, its columns, literals and limits are listed in [`data
 
 ## MariaDB
 
-Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver. Its cases with MariaDB, the columns, literals and limits will be listed in `dataTypes-mysql.md`; the column `d` will be `DATETIME`.
+The cases with MariaDB, its columns, literals and limits are listed in [`dataTypes-mysql.md`](dataTypes-mysql.md).

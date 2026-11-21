@@ -59,4 +59,8 @@ The lanes lock a row with `UPDATE` or `SELECT ... FOR UPDATE`; the wait for a lo
 
 ## MariaDB
 
-Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.
+The table is `luastress_threads` (InnoDB). The lanes lock a row with `UPDATE` or with `SELECT ... FOR UPDATE WAIT n`; an `UPDATE` waits up to `innodb_lock_wait_timeout` (50 seconds by default). The session that blocks another one is found in `information_schema.INNODB_LOCK_WAITS` with `INNODB_TRX`, on the admin connection; both come from a cache that InnoDB renews at most every 0.1 seconds, and the scenario waits for the blocking session in a loop.
+
+`deadlock` gives a limit (`backend.threadsLimits`): InnoDB gives `Deadlock found when trying to get lock; try restarting transaction` (1213) to one session and rolls back its whole transaction, which frees its locks, so the other session gets its row at once. The victim does not keep its first update, and `luasql.mysql` returns `false` and a message from its `commit()` (the transaction was rolled back by an earlier error).
+
+`killDuringCall` lets the lane run `SELECT SLEEP(n)` on the server; the lane counts as busy while its session shows the state `User sleep` in `PROCESSLIST`. The kill is `KILL CONNECTION` on the admin connection; the lane gets `Lost connection to server during query` (2013), the next call `Server has gone away` (2006).

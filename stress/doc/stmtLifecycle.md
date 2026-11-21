@@ -55,4 +55,8 @@ The LOB phases read text and `bytea` values made on the server, with `rpad` of t
 
 ## MariaDB
 
-Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.
+The server counters are `open tx` and `prepared`. `prepared` is `Prepared_stmt_count` of the global status, read on the admin connection: the statements open on the server for all sessions, as only the sessions of the run prepare. The counters of the session (`Com_stmt_prepare` minus `Com_stmt_close`) are no measure: a prepare that fails counts there without a close (probe of 2026-11-21). `luasql.mysql` closes a statement collected by the GC at the next call of its connection; the runner runs a query on the test connection before it reads the counters, so such a statement is closed by then.
+
+The placeholder is `?`; `SELECT ?` gives a value back with the type it was bound with (see [`params`](params.md)). The number query reads `CAST(? AS DOUBLE)`, so an integer comes back as a float of the same value. The multi-row query reads `seq_1_to_10000000` up to the bound count: a table of the Sequence engine has its count in its name. In `noParams`, `execute(nil)` gives `nil` and the message of the driver about the number of parameters (`backend.argCountError`).
+
+The LOB phases read text and bytes made on the server, with `RPAD` of text and with `UNHEX(RPAD(...))` of hex text. MariaDB has no temporary LOBs, so there is no check of the LOB queries (`backend.tempLobChecks`). `jsonRead` builds `{"t":"..."}` with `JSON_QUOTE` of the text, without spaces: `JSON_OBJECT` writes a space after the colon. `manualReuse` runs the statement with autocommit off.

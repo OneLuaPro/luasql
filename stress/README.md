@@ -341,7 +341,7 @@ export MYSQL_ADMIN_USER=root
 read -rsp "Admin passwd: " MYSQL_ADMIN_PASSWORD && echo && export MYSQL_ADMIN_PASSWORD
 ```
 
-The variables of the test connection are the same as those of the functional test `checks/mysql.lua`, and both can use the same database: the suite creates and drops only tables whose names start with `luastress`, the functional test those starting with `luasql`. No other run may use the database at the same time. The admin connection uses host, port and database of the test connection. Without the admin variables the suite still runs, but skips the server counters, the session counts and scenario `connectionLoss`. Run with the admin connection.
+The variables of the test connection are the same as those of the functional test `checks/mysql.lua`, and both can use the same database: the suite creates and drops only tables whose names start with `luastress`, the functional test those starting with `luasql`. No other run may use the database at the same time. The admin connection uses host, port and database of the test connection. Without the admin variables the suite still runs, but skips the server counters, the session counts, scenario `connectionLoss` and the preparation step, so the phases that use its helper tables fail. Run with the admin connection.
 
 **Option files:** `luasql.mysql` lets Connector/C read its option files at every connect (option `MYSQL_READ_DEFAULT_GROUP` with the group `client-lua`), so a setting in such a file applies to every connection of the suite, e.g. a character set, a time limit or TLS options. Connector/C 3.4 reads the groups `[client]`, `[client-server]`, `[client-mariadb]` and `[client-lua]`. On Windows it looks for `my.ini`, then `my.cnf`, in this order in the system Windows folder, the Windows folder, `C:\`, the folder of the program (the `bin` folder of `lua.exe`) and the folder in `MARIADB_HOME` (or `MYSQL_HOME` if `MARIADB_HOME` is not set); on Linux in `/etc`, `/etc/mysql`, the configuration folder of the build, the folders of these variables and `~/.my.cnf`. The `my.ini` that the MariaDB installer writes into the data folder of the server is a file of the server and is not read. For a run with the defaults, none of these files should have one of these groups.
 
@@ -368,6 +368,16 @@ quit
 ```
 
 To remove the test environment again: `DROP DATABASE luatest;` and `DROP USER 'luatest'@'localhost';`.
+
+**Time zone tables:** scenario `dataTypes` sets the time zone of the session to `Europe/Berlin` in two cases, which needs the time zone tables of the server (in the database `mysql`); MariaDB creates them empty. Windows has no zoneinfo database for `mariadb-tzinfo-to-sql`, so load the file `zoneinfo.sql` from the ZIP file at <https://mirror.mariadb.org/zoneinfo/>, made by the MariaDB Foundation with `mariadb-tzinfo-to-sql` (the older time zone files of MySQL do not fit MariaDB since 10.6). Check the ZIP file against `sha256sums.txt` there, unpack it and load it as `root` once:
+
+```CMD
+certutil -hashfile zoneinfo.zip SHA256
+tar -xf zoneinfo.zip
+"C:\Program Files\MariaDB 12.3\bin\mariadb.exe" -h 127.0.0.1 -u root -p mysql < zoneinfo.sql
+```
+
+On Linux: `mariadb-tzinfo-to-sql /usr/share/zoneinfo | mariadb -u root -p mysql`. Without the tables `ltzSummer` and `ltzWinter` fail with `Unknown or incorrect time zone: 'Europe/Berlin'`.
 
 
 ## Running
@@ -503,7 +513,9 @@ Exit codes: 0 all scenarios passed (limits do not count), 1 a scenario or the cl
 - **Settings that differ from the defaults**, e.g. another character set or time limit: an option file of Connector/C with one of the groups the driver reads, see [Preparing a Run](#preparing-a-run).
 - **`sessions grew` or a wrong number of sessions** in `connectionLifecycle` or `connectionLoss`: another session of the test user, e.g. a `mariadb.exe` window, came or went during the run. The suite cannot tell its own sessions from others of the same user; close such windows before the run.
 - **A run or a scenario hangs.** DDL of the run waits for a metadata lock that another session holds, e.g. a `mariadb.exe` window whose open transaction has read a table of the run; such a wait lasts long (`lock_wait_timeout`). End that session.
-- **A run was aborted.** Its tables stay in the database; each scenario drops its own tables first.
+- **`Unknown or incorrect time zone: 'Europe/Berlin'`** in `ltzSummer` and `ltzWinter` of `dataTypes`: the time zone tables of the server are empty, see [Preparing a Run](#preparing-a-run).
+- **`Table '...luastress_err' doesn't exist`** or the same for `luastress_dml`: the run had no admin connection, so the preparation step did not create the helper tables (see [`doc/prep.md`](doc/prep.md)).
+- **A run was aborted.** Its tables stay in the database; the next run drops them in the preparation step.
 
 
 ## Scenarios
@@ -676,17 +688,19 @@ Tested with PostgreSQL 18.7 on Windows 10, server and client in the same VM (VMw
 
 ### MariaDB
 
-Tested with MariaDB 12.3.4 on Windows and the `luasql.mysql` of OneLuaPro, which contains MariaDB Connector/C 3.4.11; MySQL is not tested yet. `luasql.mysql` has no prepared statements yet (task `core-mysql`; they come with its bind API) and no driver options, so the suite runs `cursorLifecycle`, `errorPaths`, `connectionLifecycle` and `connectionLoss`, and these without the phases and cases that need `conn:prepare`. All other scenarios are skipped. With these scenarios tier smoke takes about 45 seconds and tier nightly about 50 minutes, with the server on the same computer.
+Tested with MariaDB 12.3.4 on Windows and the `luasql.mysql` of OneLuaPro, which contains MariaDB Connector/C 3.4.11; MySQL is not tested yet. `luasql.mysql` has prepared statements with `?` by position (task `bindapi-mysql`) and no driver options, so the suite runs all scenarios except `prefetch` and `warnings`. With these scenarios tier smoke takes about 2 minutes and tier nightly about 1 hour 11 minutes, with the server on the same computer (21 November 2026); tier soak has not run with MariaDB yet.
 
 **Connections:** `luasql.mysql` takes host and port as arguments of their own, `env:connect(database, user, password, host, port)`; the backend gives them with `connectArgs`, which replaces the default arguments (source name, user, password) of every connect of the suite, also in lanes and for the connects that must fail (`failingConnects`, e.g. `change = { port = 1 }` for a port without listener). The connections use TLS (see [Preparing a Run](#preparing-a-run)), and Connector/C reads its option files at every connect.
 
 **The whole result on the client:** `luasql.mysql` reads the whole result of a query at the execute (`mysql_store_result`). An error in any row of a result comes at the execute, not at a fetch; a cursor reads on after `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)` (`backend.cursorsSurviveEnd`) and after a lost connection: after a kill, an open cursor gives all its rows and ends normally (`backend.resultOnClient`, see [`doc/connectionLoss.md`](doc/connectionLoss.md)). The server keeps no cursor for it, and MariaDB has no temporary LOBs: the values of the LOB phases are text and bytes of the result.
 
-**What a connection holds:** the server counter is `open tx`, the row of the test session in `information_schema.INNODB_TRX` (by its thread id), read on the admin connection. A transaction begins with the first statement that reads or writes a table, a plain `SELECT` included (not `SELECT 1`, not a table of the Sequence engine), and shows there until it ends; with autocommit on no transaction is open between statements, so `open tx` must be 0 before every phase. A cursor that is not freed shows in the memory of the process only. Sessions are the rows of `information_schema.PROCESSLIST` of the test user; MariaDB has no name of the program there (`performance_schema` is off by default), so a `mariadb.exe` window of the test user counts too. A killed session is gone from `PROCESSLIST` at once.
+**What a connection holds:** the server counter is `open tx`, `@@in_transaction` of the test session, read on the test connection (reading a variable opens no transaction). `information_schema.INNODB_TRX` shows the same, but InnoDB fills it from a cache that it renews at most every 0.1 seconds: right after a statement it may show the state before it. A transaction begins with the first statement that reads or writes a table, a plain `SELECT` included (not `SELECT 1`, not a table of the Sequence engine), and lasts until it ends; with autocommit on no transaction is open between statements, so `open tx` must be 0 before every phase. A cursor that is not freed shows in the memory of the process only. Sessions are the rows of `information_schema.PROCESSLIST` of the test user; MariaDB has no name of the program there (`performance_schema` is off by default), so a `mariadb.exe` window of the test user counts too. A killed session is gone from `PROCESSLIST` at once.
 
 **Values:** `luasql.mysql` reads the integer types as integers, except `BIGINT UNSIGNED`, which can be larger than a Lua integer and comes as text. The column `seq` of the Sequence engine is `BIGINT UNSIGNED`, so the queries of the backend cast it (`CAST(seq AS SIGNED)`).
 
-**Transactions:** the isolation is `REPEATABLE READ`, with `innodb_snapshot_isolation` on (the default of MariaDB 12.3). An ordinary error rolls back the statement only; a deadlock and a write conflict roll back the whole transaction. DDL commits the open transaction implicitly, also a DDL that fails after the parser. A lock waits up to `innodb_lock_wait_timeout` (50 seconds by default). These matter for the scenarios that come with the bind API.
+**Prepared statements:** the placeholder is `?`, by position only. `luasql.mysql` binds each value with a type of its own, and `SELECT ?` gives it back with that type, so the queries of the backend cast where they need one type (`CAST(? AS DOUBLE)`, `CAST(? AS SIGNED)`, `CAST(? AS CHAR)`). The server counter `prepared` is `Prepared_stmt_count` of the global status, read on the admin connection; the counters of the session (`Com_stmt_prepare`, `Com_stmt_close`) are no measure, as a prepare that fails counts there without a close. A statement collected by the GC is closed at the next call of its connection. The helper tables of the preparation step (`luastress_err`, `luastress_dml`) belong to `root`; the test user writes them with its rights on the test database.
+
+**Transactions:** the isolation is `REPEATABLE READ`, with `innodb_snapshot_isolation` on (the default of MariaDB 12.3). An ordinary error rolls back the statement only, also a lock that is not free (1205, `Lock wait timeout exceeded`), which comes at once with `FOR UPDATE NOWAIT`, after n seconds with `WAIT n` and else after `innodb_lock_wait_timeout` (50 seconds by default). A deadlock (1213) and a write conflict (1020, `Record has changed since last read`) roll back the whole transaction; `luasql.mysql` then returns `false` and a message from `conn:commit()`. DDL commits the open transaction implicitly, also a DDL that fails after the parser.
 
 **Messages:** the server gives its messages in English by default (`lc_messages = en_US`), as do Connector/C and `luasql.mysql`.
 
@@ -695,6 +709,10 @@ Tested with MariaDB 12.3.4 on Windows and the `luasql.mysql` of OneLuaPro, which
 | Limit | Scenario, case | Reason |
 | ---- | ---- | ---- |
 | `endAfterKill` | `connectionLoss`, `killThenAutocommit` | After a kill, `conn:rollback()` and `conn:setautocommit(true)` return `true`, once the commit with open work has failed: the server rolls back the transaction of a lost connection. |
+| `deadlock` | `threads`, `deadlock` | InnoDB rolls back the whole transaction of the victim of a deadlock, which frees its locks: the other session gets its row at once, and the commit of the victim returns `false`. |
+| `enableAutocommit` | `transactions`, `enableAutocommit` | `setautocommit(true)` of `luasql.mysql` rolls back an open transaction. |
+| `ddlCommits` | `transactions`, `ddlCommits` | MariaDB commits an open transaction implicitly at DDL, also with autocommit off. |
+| types | `dataTypes`, 22 cases | Column `n` is `DOUBLE` (integers above 2^53, 1e200), no NaN and no infinity in `DOUBLE`, no years before Christ in `luasql.mysql`, `luasql.type.time` in a `DATETIME` with the current date, `BOOLEAN` read as an integer, the length of `VARCHAR(n)` in characters, `CHAR` read without the spaces at the end, duplicate keys in `JSON`; the list is in [`doc/dataTypes-mysql.md`](doc/dataTypes-mysql.md). |
 
 **Behavior worth knowing**, checked but not reported as limit:
 
@@ -703,7 +721,7 @@ Tested with MariaDB 12.3.4 on Windows and the `luasql.mysql` of OneLuaPro, which
 - A failing block without a table is a compound statement of MariaDB (`BEGIN NOT ATOMIC SIGNAL ...; END`); a division by zero in a `SELECT` gives `NULL` and a warning (1365), not an error.
 - After a kill, Connector/C in `luasql.mysql` reports the lost connection over TLS often first as `TLS/SSL error` (2026), then as `Server has gone away` (2006); the client `mariadb.exe` reported `Lost connection to server during query` (2013) at the next query of a killed idle session. `close` of the cursor and the connection returns `true`.
 
-**Not covered with MariaDB yet:** everything that needs `conn:prepare` (`stmtLifecycle`, `params`, `concurrency`, `threads`, `dataTypes`, `transactions`, `volume`, `soak`, and the phases and cases of the other scenarios that use prepared statements), `prefetch` (no driver options), `warnings` (see [`doc/warnings.md`](doc/warnings.md)), `badColumnType` of `errorPaths` (`luasql.mysql` reads every type), and MySQL.
+**Not covered with MariaDB yet:** `prefetch` (no driver options), `warnings` (see [`doc/warnings.md`](doc/warnings.md)), `badColumnType` of `errorPaths` (`luasql.mysql` reads every type), named placeholders (`luasql.mysql` has none), the cases of `volume` with a full tablespace and `maxLength`, the WAL cases of `concurrency` (SQLite only), the cases of `dataTypes` for a timestamp with its own offset, intervals, row ids, hex text in binary columns and unsupported types (see [`doc/dataTypes-mysql.md`](doc/dataTypes-mysql.md)), and MySQL.
 
 ### DuckDB
 

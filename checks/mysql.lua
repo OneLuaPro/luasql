@@ -161,9 +161,8 @@ local function connect_info()
          v == nil and has(err, string.rep("x", 60)), err)
 end
 
--- values read by the type of their column
-local function values()
-   local con = ctx.con()
+-- the table of all column types, with one row of values and one of NULLs
+local function make_types(con)
    pcall(run, con, "DROP TABLE luasql_types")
    run(con, [[CREATE TABLE luasql_types (
       id INT PRIMARY KEY, b1 TINYINT(1), ti TINYINT, tiu TINYINT UNSIGNED,
@@ -183,6 +182,12 @@ local function values()
       (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
        NULL, NULL, NULL, NULL, NULL, NULL)]])
+end
+
+-- values read by the type of their column
+local function values()
+   local con = ctx.con()
+   make_types(con)
    local cur = assert(con:execute("SELECT * FROM luasql_types ORDER BY id"))
    local r = cur:fetch({}, "a")
    check("TINYINT(1) is an integer, not a boolean",
@@ -806,6 +811,601 @@ KEEP = { env, con, cur }
          left .. " " .. before)
 end
 
+----------------------------------------------------------------------------
+-- prepared statements
+
+local T = luasql.type
+
+-- the counters of the session: prepared and closed statements
+local function stmt_counts(con)
+   local cur = assert(con:execute(
+      "SELECT VARIABLE_NAME, VARIABLE_VALUE FROM "
+      .. "information_schema.SESSION_STATUS WHERE VARIABLE_NAME IN "
+      .. "('Com_stmt_prepare', 'Com_stmt_close')"))
+   local t = {}
+   local k, v = cur:fetch()
+   while k do
+      t[k:lower()] = tonumber(v)
+      k, v = cur:fetch()
+   end
+   return t.com_stmt_prepare, t.com_stmt_close
+end
+
+-- statements open on the server for this session
+local function open_stmts(con)
+   local p, c = stmt_counts(con)
+   return p - c
+end
+
+-- a value as text for messages: type and value
+local function show(v)
+   if type(v) == "string" then
+      return "string " .. string.format("%q", v)
+   end
+   return kind(v) .. " " .. tostring(v)
+end
+
+-- the same Lua value: same type (also integer or float) and value
+local function same(a, b)
+   return kind(a) == kind(b) and (a == b or (a ~= a and b ~= b))
+end
+
+-- rows of a query through conn:execute (text protocol) and through a
+-- prepared statement (binary protocol), compared column by column; the
+-- statement is sql, or stmt_sql with the parameters after it
+local function compare(con, label, sql, stmt_sql, ...)
+   local text = assert(con:execute(sql))
+   local s = assert(con:prepare(stmt_sql or sql))
+   local bin = assert(s:execute(...))
+   local names = text:getcolnames()
+   local ttypes, btypes = text:getcoltypes(), bin:getcoltypes()
+   local diffs, rows = {}, 0
+   while true do
+      local a = text:fetch({}, "n")
+      local b = bin:fetch({}, "n")
+      if a == nil or b == nil then
+         if a ~= nil or b ~= nil then
+            diffs[#diffs + 1] = "different number of rows"
+            if a then text:close() end
+            if b then bin:close() end
+         end
+         break
+      end
+      rows = rows + 1
+      for i = 1, #names do
+         if not same(a[i], b[i]) then
+            diffs[#diffs + 1] = string.format("row %d %s: text %s, "
+                                              .. "binary %s", rows, names[i],
+                                              show(a[i]), show(b[i]))
+         end
+      end
+   end
+   for i = 1, #names do
+      if ttypes[i] ~= btypes[i] then
+         diffs[#diffs + 1] = string.format("getcoltypes %s: %s, %s",
+                                           names[i], ttypes[i], btypes[i])
+      end
+   end
+   s:close()
+   check(label .. ": " .. rows .. " row(s) the same in both protocols",
+         #diffs == 0, table.concat(diffs, "; "))
+end
+
+-- every column type gives the same Lua value through both protocols
+local function protocols()
+   local con = ctx.con()
+   make_types(con)
+   compare(con, "all column types", "SELECT * FROM luasql_types ORDER BY id")
+   compare(con, "all column types, one parameter",
+           "SELECT * FROM luasql_types WHERE id = 1",
+           "SELECT * FROM luasql_types WHERE id = ?", 1)
+   compare(con, "expressions",
+           "SELECT 1.5, 1e0, TRUE, b'1', CAST(1 AS UNSIGNED), "
+           .. "18446744073709551615, SUM(id), AVG(id), COUNT(*), "
+           .. "CAST(SUM(id) AS SIGNED), MAX(dtm6), MIN(tm6), NULL, '' "
+           .. "FROM luasql_types")
+   compare(con, "dates and times",
+           "SELECT CAST('2026-11-18 12:34:56.5' AS DATETIME(1)), "
+           .. "CAST('-12:00:00.25' AS TIME(2)), CAST('2026-11-18' AS DATE), "
+           .. "TIMESTAMP '2026-11-18 01:02:03', CAST('12:00' AS TIME), "
+           .. "TIME '838:59:59', CAST('2026-11-18 01:02:03.123456' AS "
+           .. "DATETIME(6)), CAST('00:00:00.000001' AS TIME(6))")
+   compare(con, "numbers at their limits",
+           "SELECT CAST(-128 AS SIGNED), 127, 255, -32768, 65535, "
+           .. "-9223372036854775807 - 1, 9223372036854775807, "
+           .. "CAST(9223372036854775808 AS UNSIGNED), "
+           .. "CAST(1.5 AS DOUBLE), CAST(1e308 AS DOUBLE), "
+           .. "CAST(0.1 AS FLOAT), CAST(-0.0 AS DOUBLE)")
+   compare(con, "strings",
+           "SELECT 'Grüße', REPEAT('x', 1000), X'00FF00', "
+           .. "CAST(X'00' AS CHAR), CONVERT('ä' USING latin1), "
+           .. "JSON_OBJECT('a', 1)")
+   local cur = assert(con:prepare("SELECT id FROM luasql_types ORDER BY id"))
+   local c = assert(cur:execute())
+   check("numrows of a statement result", c:numrows() == 2, c:numrows())
+   c:seek(1)
+   check("seek(1) goes to the second row", c:fetch() == 2)
+   c:seek(0)
+   check("seek(0) to the first again", c:fetch() == 1)
+   c:close()
+   cur:close()
+end
+
+-- binding of values (B2, B5) and the conversions of the server
+local function binding()
+   local con = ctx.con()
+   pcall(run, con, "DROP TABLE luasql_bind")
+   run(con, [[CREATE TABLE luasql_bind (
+      id INT PRIMARY KEY, i BIGINT, ti TINYINT, d DOUBLE, de DECIMAL(10,2),
+      s VARCHAR(20), v5 VARCHAR(5), tx TEXT, bl BLOB, dt DATE,
+      dtm DATETIME(6), tm TIME(6), bt BIT(8)) ENGINE = InnoDB]])
+   local ins = assert(con:prepare("INSERT INTO luasql_bind (id, i, d, s, tx, "
+                                  .. "bl, dt, dtm, tm) VALUES "
+                                  .. "(?, ?, ?, ?, ?, ?, ?, ?, ?)"))
+   local n = ins:execute(1, math.maxinteger, 0.1, "a\0b", "Grüße",
+                         { "\0\255\0", T.binary }, { "2026-11-17", T.date },
+                         { "2026-11-17 10:20:30.1234567", T.timestamp },
+                         { "23:59:58.5", T.time })
+   check("INSERT through a statement: 1", n == 1 and kind(n) == "integer", n)
+   assert(ins:execute(2, math.mininteger, 1e308, "", "",
+                      { "", T.binary }, { "2026-11-17 10:20:30", T.date },
+                      { "2026-11-17", T.timestamp }, { "00:00:00", T.time }))
+   assert(ins:execute(3, T.null, { T.null, T.number }, nil,
+                      { T.null, T.string }, { T.null, T.binary },
+                      { T.null, T.date }, nil, nil))
+   ins:close()
+   local sel = assert(con:prepare("SELECT i, d, s, tx, bl, dt, dtm, tm "
+                                  .. "FROM luasql_bind WHERE id = ?"))
+   local cur = assert(sel:execute(1))
+   local i, d, s, tx, bl, dt, dtm, tm = cur:fetch()
+   cur:close()
+   check("integer math.maxinteger", i == math.maxinteger, show(i))
+   check("float 0.1 exactly", d == 0.1, show(d))
+   check("a string with a zero byte keeps it", s == "a\0b", show(s))
+   check("UTF-8 text", tx == "Grüße", show(tx))
+   check("T.binary with zero bytes", bl == "\0\255\0", show(bl))
+   check("T.date into DATE", dt == "2026-11-17", show(dt))
+   check("T.timestamp: the fraction cut to six digits, not rounded",
+         dtm == "2026-11-17 10:20:30.123456", show(dtm))
+   check("T.time with a fraction", tm == "23:59:58.500000", show(tm))
+   cur = assert(sel:execute(2))
+   i, d, s, tx, bl, dt, dtm, tm = cur:fetch()
+   cur:close()
+   check("integer math.mininteger", i == math.mininteger, show(i))
+   check("float 1e308", d == 1e308, show(d))
+   check("'' is an empty string, not NULL", s == "" and tx == "", show(s))
+   check("an empty T.binary stays empty", bl == "", show(bl))
+   check("T.date with a time into DATE: the day", dt == "2026-11-17", show(dt))
+   check("T.timestamp without a time: midnight",
+         dtm == "2026-11-17 00:00:00.000000", show(dtm))
+   cur = assert(sel:execute(3))
+   local r = cur:fetch({}, "n")
+   cur:close()
+   check("T.null, {T.null, type} and nil are NULL", next(r) == nil)
+   sel:close()
+
+   -- booleans (Q1) and conversions of the server
+   local up = assert(con:prepare("UPDATE luasql_bind SET ti = ?, s = ? "
+                                 .. "WHERE id = 1"))
+   assert(up:execute(true, false))
+   check("true into TINYINT is 1, false into VARCHAR is '0'",
+         value(con, "SELECT ti FROM luasql_bind WHERE id = 1") == 1
+         and value(con, "SELECT s FROM luasql_bind WHERE id = 1") == "0")
+   up:close()
+   local function try(col, v)
+      local st = assert(con:prepare("UPDATE luasql_bind SET " .. col
+                                    .. " = ? WHERE id = 2"))
+      local res, err = st:execute(v)
+      st:close()
+      if res == nil then return nil, err end
+      return value(con, "SELECT " .. col .. " FROM luasql_bind WHERE id = 2")
+   end
+   local v, err = try("i", "42")
+   check("the string '42' into BIGINT: 42", v == 42, show(v))
+   v = try("s", 42)
+   check("the integer 42 into VARCHAR: '42'", v == "42", show(v))
+   v = try("de", 0.125)
+   check("0.125 into DECIMAL(10,2): '0.13'", v == "0.13", show(v))
+   v = try("i", 2.5)
+   info("the float 2.5 into BIGINT: " .. show(v))
+   v, err = try("i", "12abc")
+   check("'12abc' into BIGINT: nil, msg (strict mode)", v == nil, err)
+   v, err = try("ti", 300)
+   check("300 into TINYINT: nil, msg (out of range)", v == nil, err)
+   v, err = try("v5", "abcdef")
+   check("6 characters into VARCHAR(5): nil, msg", v == nil, err)
+   v, err = try("bt", 256)
+   check("256 into BIT(8): nil, msg", v == nil, err)
+   v, err = try("tx", "\255")
+   check("invalid UTF-8 into TEXT: nil, msg", v == nil, err)
+   v = try("dt", "2026-11-6")
+   info("the string '2026-11-6' into DATE (not checked by the driver): "
+        .. show(v))
+   v, err = try("dt", { "2026-11-6", T.date })
+   check("T.date '2026-11-6': nil, msg of the driver",
+         v == nil and has(err, "LuaSQL:"), err)
+   v, err = try("dt", { "2026-02-30", T.date })
+   check("T.date '2026-02-30': nil, msg of the driver",
+         v == nil and has(err, "LuaSQL:"), err)
+   v, err = try("tm", { "100:00:00", T.time })
+   check("T.time '100:00:00': nil, msg of the driver",
+         v == nil and has(err, "LuaSQL:"), err)
+   v = try("tm", "100:00:00")
+   check("the string '100:00:00' into TIME", v == "100:00:00.000000", show(v))
+
+   -- placeholders and what can be prepared
+   local st = assert(con:prepare("SELECT id FROM luasql_bind ORDER BY id "
+                                 .. "LIMIT ?"))
+   cur = assert(st:execute(1))
+   check("a placeholder in LIMIT", cur:fetch() == 1 and cur:fetch() == nil)
+   st:close()
+   v, err = con:prepare("SELECT * FROM ?")
+   check("a placeholder as a table name: nil, msg", v == nil, err)
+   v, err = con:prepare("SELECT 1; SELECT 2")
+   check("two statements: nil, msg", v == nil, err)
+   v, err = con:prepare("")
+   check("an empty statement: nil, msg", v == nil, err)
+   st = assert(con:prepare("SET @luasql_x = ?"))
+   check("SET can be prepared", st:execute(5) == 0
+            and value(con, "SELECT @luasql_x") == 5)
+   st:close()
+   st, err = con:prepare("/* only a comment */")
+   info("a comment only: " .. (st and "prepared" or ("nil, " .. tostring(err))))
+   if st then st:close() end
+   st = assert(con:prepare("SELECT ? + ?"))
+   cur = assert(st:execute(1, 2))
+   check("SELECT ? + ? with two integers: 3", cur:fetch() == 3)
+   cur:close()
+   cur = assert(st:execute(1, 0.5))
+   local x = cur:fetch()
+   cur:close()
+   info("SELECT ? + ? with 1 and 0.5: " .. show(x))
+   cur = assert(st:execute("1", "2"))
+   x = cur:fetch()
+   cur:close()
+   info("SELECT ? + ? with '1' and '2': " .. show(x))
+   st:close()
+   st = assert(con:prepare("SELECT ?"))
+   for _, w in ipairs{ 42, 0.5, "text", true, { "ab", T.binary },
+                       { "2026-11-17", T.date },
+                       { "2026-11-17 10:00:00", T.timestamp },
+                       { "10:00:00", T.time } } do
+      cur = assert(st:execute{ w })
+      x = cur:fetch()
+      local t = cur:getcoltypes()[1]
+      cur:close()
+      info(string.format("SELECT ? with %s: %s, %s",
+                         show(type(w) == "table" and w[1] or w), show(x), t))
+   end
+   st:close()
+end
+
+-- statement objects: counters, values kept (B4), the rules of the cursor
+local function statements()
+   local con = connect()
+   pcall(run, con, "DELETE FROM luasql_test WHERE id >= 600")
+   local st = assert(con:prepare("SELECT ?, ?"))
+   local v, err = st:execute(1)
+   check("too few values: nil, msg",
+         v == nil and err == "LuaSQL: statement has 2 parameters, 1 given",
+         err)
+   v, err = st:execute(1, 2, 3)
+   check("too many values: nil, msg",
+         v == nil and err == "LuaSQL: statement has 2 parameters, 3 given",
+         err)
+   v, err = st:execute()
+   check("no value yet: nil, msg",
+         v == nil and err == "LuaSQL: parameter 1 has no value", err)
+   v, err = st:execute{ [3] = 1 }
+   check("a position the statement does not have: nil, msg", v == nil and
+            err == "LuaSQL: statement has 2 parameters, no position 3", err)
+   local ok, msg = pcall(st.execute, st, { a = 1 })
+   check("names raise", not ok and has(msg, "named parameters"), msg)
+   local cur = assert(st:execute(1, 2))
+   local a, b = cur:fetch()
+   check("execute(1, 2)", a == 1 and b == 2)
+   check("the cursor closes after the last row", cur:fetch() == nil)
+   cur = assert(st:execute{ [2] = 5 })
+   a, b = cur:fetch()
+   check("a table changes only its positions", a == 1 and b == 5)
+   ok, msg = pcall(st.execute, st)
+   check("execute with an open cursor raises",
+         not ok and has(msg, "cannot execute: cursor still open"), msg)
+   ok, msg = pcall(st.reset, st)
+   check("reset with an open cursor raises", not ok
+            and has(msg, "cannot reset statement with open cursor"), msg)
+   ok, msg = st:close()
+   check("close with an open cursor: false, msg", ok == false
+            and msg == "LuaSQL: cannot close statement with open cursor", msg)
+   ok, msg = con:close()
+   check("conn:close: open cursors first", ok == false
+            and msg == "There are open cursors", msg)
+   cur:close()
+   ok, msg = con:close()
+   check("conn:close: then open statements", ok == false
+            and msg == "There are open statements", msg)
+   cur = assert(st:execute())
+   a, b = cur:fetch()
+   check("execute() runs with the values given last", a == 1 and b == 5)
+   cur:close()
+   check("reset: true", st:reset() == true)
+   v, err = st:execute()
+   check("after reset: no value", v == nil and
+            err == "LuaSQL: parameter 1 has no value", err)
+   check("close: true", st:close() == true)
+   ok, msg = st:close()
+   check("close again: false, msg",
+         ok == false and msg == "statement is already closed", msg)
+   ok, msg = pcall(st.execute, st)
+   check("a closed statement raises",
+         not ok and has(msg, "LuaSQL: statement is closed"), msg)
+
+   -- transactions
+   assert(con:setautocommit(false))
+   st = assert(con:prepare("INSERT INTO luasql_test VALUES (?, ?, 0)"))
+   check("prepare opens no transaction",
+         tonumber(value(con, "SELECT @@in_transaction")) == 0)
+   assert(st:execute(601, "a"))
+   check("commit: true", con:commit() == true)
+   assert(st:execute(602, "b"))
+   check("rollback: true", con:rollback() == true)
+   check("the statement stays valid after commit and rollback",
+         st:execute(603, "c") == 1)
+   check("its rows", count(con, "id BETWEEN 601 AND 603") == 2)
+   v = st:execute(601, "dup")
+   check("a duplicate key: nil, the transaction stays open",
+         v == nil and tonumber(value(con, "SELECT @@in_transaction")) == 1)
+   assert(con:commit())
+   run(con, "CREATE OR REPLACE PROCEDURE luasql_abort() BEGIN ROLLBACK; "
+            .. "SIGNAL SQLSTATE '40001' SET MYSQL_ERRNO = 1213, "
+            .. "MESSAGE_TEXT = 'luasql deadlock'; END")
+   local ab = assert(con:prepare("CALL luasql_abort()"))
+   assert(st:execute(604, "lost"))
+   v, err = ab:execute()
+   check("a deadlock through a statement: nil, msg",
+         v == nil and has(err, "luasql deadlock"), err)
+   ok, msg = con:commit()
+   check("commit after it: false (B1a)", ok == false
+            and has(msg, MSG_ABORTED), msg)
+   check("the row is not stored", count(con, "id = 604") == 0)
+   ab:close()
+   st:close()
+   assert(con:setautocommit(true))
+
+   -- getlastautoid and conn:execute with parameters
+   pcall(run, con, "DROP TABLE luasql_auto")
+   run(con, "CREATE TABLE luasql_auto (id INT AUTO_INCREMENT PRIMARY KEY, "
+            .. "v INT) ENGINE = InnoDB")
+   st = assert(con:prepare("INSERT INTO luasql_auto (v) VALUES (?)"))
+   assert(st:execute(1))
+   assert(st:execute(2))
+   check("getlastautoid after a statement", con:getlastautoid() == 2,
+         con:getlastautoid())
+   st:close()
+   v = con:execute("INSERT INTO luasql_auto (v) VALUES (?)", 3)
+   check("conn:execute(sql, arg): the row count", v == 1, v)
+   check("getlastautoid after it", con:getlastautoid() == 3,
+         con:getlastautoid())
+   cur = assert(con:execute("SELECT v FROM luasql_auto WHERE id = ?", 2))
+   check("conn:execute(sql, arg): a cursor", cur:fetch() == 2)
+   cur:close()
+   v, err = con:execute("SELECT ?", 1, 2)
+   check("conn:execute with too many values: nil, msg", v == nil and
+            err == "LuaSQL: statement has 1 parameter, 2 given", err)
+   v, err = con:execute("SELECT 1", nil)
+   check("conn:execute(sql, nil) binds NULL: nil, msg", v == nil and
+            err == "LuaSQL: statement has 0 parameters, 1 given", err)
+   v, err = con:execute("SELECT ?", {})
+   check("conn:execute(sql, {}): nil, msg", v == nil and
+            err == "LuaSQL: parameter 1 has no value", err)
+   v, err = con:execute("SELECT 1; SELECT 2", 1)
+   check("conn:execute with parameters takes one statement", v == nil, err)
+
+   -- statements on the server
+   local open0 = open_stmts(con)
+   cur = assert(con:execute("SELECT id FROM luasql_auto WHERE v > ?", 0))
+   cur:fetch()
+   cur:close()
+   assert(con:execute("UPDATE luasql_auto SET v = v WHERE id = ?", 1))
+   check("conn:execute(sql, arg) leaves no statement on the server",
+         open_stmts(con) == open0, open_stmts(con) .. " " .. open0)
+   st = assert(con:prepare("SELECT 1"))
+   check("a prepared statement is open on the server",
+         open_stmts(con) == open0 + 1)
+   st = nil
+   collectgarbage()
+   collectgarbage()
+   check("a collected statement is closed with the next call",
+         open_stmts(con) == open0)
+   info("Prepared_stmt_count of the server: " .. tostring(value(con,
+        "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS "
+        .. "WHERE VARIABLE_NAME = 'Prepared_stmt_count'")))
+   info("max_prepared_stmt_count: "
+        .. tostring(value(con, "SELECT @@max_prepared_stmt_count")))
+
+   -- a statement whose table changes
+   pcall(run, con, "DROP TABLE luasql_ddl")
+   run(con, "CREATE TABLE luasql_ddl (a INT) ENGINE = InnoDB")
+   run(con, "INSERT INTO luasql_ddl VALUES (1)")
+   st = assert(con:prepare("SELECT * FROM luasql_ddl"))
+   run(con, "ALTER TABLE luasql_ddl ADD COLUMN b INT DEFAULT 2")
+   cur, err = st:execute()
+   check("a statement whose table got a column: nil, msg",
+         cur == nil and err ~= nil, show(cur))
+   info("message: " .. tostring(err))
+   check("the connection works after it", value(con, "SELECT 16") == 16)
+   cur, err = st:execute()
+   info("its next execute: " .. show(cur) .. " " .. tostring(err))
+   if type(cur) == "userdata" then cur:close() end
+   st:close()
+   st = assert(con:prepare("SELECT * FROM luasql_ddl"))
+   cur = assert(st:execute())
+   check("prepared again: the new columns", #cur:getcolnames() == 2)
+   cur:close()
+   st:close()
+   run(con, "DELETE FROM luasql_test WHERE id >= 600")
+   check("conn:close: true", con:close() == true)
+end
+
+-- several results of a prepared CALL
+local function stmt_results()
+   local con = ctx.con()
+   run(con, "CREATE OR REPLACE PROCEDURE luasql_sel() SELECT 7 AS a")
+   run(con, "CREATE OR REPLACE PROCEDURE luasql_fail() BEGIN "
+            .. "SELECT 1 AS a; "
+            .. "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'luasql boom'; END")
+   run(con, "CREATE OR REPLACE PROCEDURE luasql_two(n INT) BEGIN "
+            .. "SELECT CAST(seq AS SIGNED) AS a FROM seq_1_to_3 "
+            .. "WHERE seq <= n ORDER BY seq; "
+            .. "SELECT 'x' AS b; END")
+   run(con, "CREATE OR REPLACE PROCEDURE luasql_out(IN a INT, OUT b INT) "
+            .. "SET b = a * 2")
+
+   local st = assert(con:prepare("CALL luasql_sel()"))
+   local cur = assert(st:execute())
+   check("a prepared CALL returns a cursor", cur:fetch() == 7)
+   check("hasnextresult: the status result follows",
+         cur:hasnextresult() == true)
+   local ok, no, msg = cur:nextresult()
+   check("nextresult of the status: false, 0, ''",
+         ok == false and no == 0 and msg == "")
+   check("then no more", cur:hasnextresult() == false)
+   cur:close()
+   cur = assert(st:execute())
+   check("the next execute after reading to the end",
+         cur:fetch() == 7 and cur:fetch() == nil)
+   check("conn:execute after it", value(con, "SELECT 8") == 8)
+   st:close()
+
+   st = assert(con:prepare("CALL luasql_two(?)"))
+   cur = assert(st:execute(3))
+   check("the first result", cur:fetch() == 1)
+   check("nextresult: true", cur:nextresult() == true)
+   check("the second result", cur:fetch() == "x")
+   cur:close()
+   cur = assert(st:execute(3))
+   check("(fetch)", cur:fetch() == 1)
+   check("another call with the cursor open", value(con, "SELECT 9") == 9)
+   check("the cursor keeps its rows", cur:fetch() == 2 and cur:fetch() == 3)
+   check("numrows of them", cur:numrows() == 3)
+   cur:seek(0)
+   check("seek on them", cur:fetch() == 1)
+   check("no further results for it", cur:hasnextresult() == false)
+   local cur2 = assert(st:execute(1))
+   check("the statement is free again", cur2:fetch() == 1)
+   cur2:close()
+   cur:close()
+   local r, m = con:get_result()
+   check("conn:get_result: nil for a statement", r == nil and m == nil, m)
+   st:close()
+
+   st = assert(con:prepare("CALL luasql_fail()"))
+   cur = assert(st:execute())
+   check("a procedure that fails after its SELECT: a cursor",
+         cur:fetch() == 1)
+   cur:close()
+   local v, err = con:execute("SELECT 10")
+   check("the next call returns the error",
+         v == nil and has(err, MSG_LATER) and has(err, "luasql boom"), err)
+   check("then it works", value(con, "SELECT 11") == 11)
+   cur = assert(st:execute())
+   ok, no, msg = cur:nextresult()
+   check("nextresult of the error: false, 1644, msg",
+         ok == false and no == 1644 and has(msg, "luasql boom"),
+         tostring(no) .. " " .. tostring(msg))
+   cur:close()
+   cur = assert(st:execute())
+   cur:close()
+   check("stmt:close after it: true", st:close() == true)
+   v, err = con:execute("SELECT 12")
+   check("the error kept by stmt:close comes with the next call",
+         v == nil and has(err, "luasql boom"), err)
+
+   st = assert(con:prepare("CALL luasql_out(?, ?)"))
+   cur, err = st:execute(21, nil)
+   if type(cur) == "userdata" then
+      local b = cur:fetch()
+      check("OUT parameters come as one more result", b == 42, show(b))
+      info("its column: " .. tostring(cur:getcolnames()[1]))
+      cur:close()
+   else
+      check("OUT parameters come as one more result", false,
+            show(cur) .. " " .. tostring(err))
+   end
+   check("then the next call works", value(con, "SELECT 13") == 13)
+   st:close()
+
+   cur = assert(con:execute("CALL luasql_two(?)", 2))
+   check("conn:execute(sql, arg) of a CALL", cur:fetch() == 1)
+   check("its next result", cur:nextresult() == true and cur:fetch() == "x")
+   cur:close()
+   check("then the next call works", value(con, "SELECT 14") == 14)
+end
+
+-- statements while results of send_query are unread
+local function stmt_async()
+   local a = connect()
+   local st = assert(a:prepare("SELECT ?"))
+   assert(a:send_query("SELECT 1"))
+   local ok, msg = pcall(a.prepare, a, "SELECT 1")
+   check("prepare raises", not ok and has(msg, MSG_BUSY), msg)
+   ok, msg = pcall(st.execute, st, 1)
+   check("stmt:execute raises", not ok and has(msg, MSG_BUSY), msg)
+   ok, msg = pcall(a.execute, a, "SELECT ?", 1)
+   check("conn:execute with parameters raises",
+         not ok and has(msg, MSG_BUSY), msg)
+   ok, msg = st:close()
+   check("stmt:close: false, msg", ok == false and has(msg, MSG_BUSY), msg)
+   local cur = a:get_result()
+   check("get_result", cur:fetch() == 1)
+   check("then nil", a:get_result() == nil)
+   cur = assert(st:execute(5))
+   check("the statement works again", cur:fetch() == 5)
+   cur:close()
+   st:close()
+   a:close()
+end
+
+-- long values: no send_long_data, the limit is max_allowed_packet
+local function long_values()
+   local con = ctx.con()
+   local max = value(con, "SELECT @@max_allowed_packet")
+   info("max_allowed_packet: " .. tostring(max))
+   pcall(run, con, "DROP TABLE luasql_long")
+   run(con, "CREATE TABLE luasql_long (id INT PRIMARY KEY, b LONGBLOB, "
+            .. "t LONGTEXT) ENGINE = InnoDB")
+   local big = string.rep("\0\1\2\255", 256 * 1024)  -- 1 MB
+   local txt = string.rep("äbc", 100000)
+   local st = assert(con:prepare("INSERT INTO luasql_long VALUES (?, ?, ?)"))
+   check("1 MB through a statement", st:execute(1, { big, T.binary }, txt) == 1)
+   st:close()
+   local cur = assert(con:execute("SELECT b, t FROM luasql_long WHERE id = 1"))
+   local b, t = cur:fetch()
+   cur:close()
+   check("read back by the text protocol", b == big and t == txt,
+         #tostring(b))
+   st = assert(con:prepare("SELECT b, t FROM luasql_long WHERE id = ?"))
+   cur = assert(st:execute(1))
+   b, t = cur:fetch()
+   cur:close()
+   st:close()
+   check("read back by the binary protocol", b == big and t == txt,
+         #tostring(b))
+   -- a value over max_allowed_packet, on its own connection
+   local c = connect()
+   local huge = string.rep("x", math.tointeger(tonumber(max)) + 1)
+   local v, err = c:execute("INSERT INTO luasql_long (id, b) VALUES (?, ?)",
+                            2, { huge, T.binary })
+   check("a value over max_allowed_packet: nil, msg", v == nil, show(v))
+   info("message: " .. tostring(err))
+   local alive = c:ping()
+   info("the connection after it: ping " .. tostring(alive))
+   c:close()
+   huge = nil
+   collectgarbage()
+   check("the other connection works", value(con, "SELECT 15") == 15)
+end
+
 local scenarios = {
    { "connect_info",   connect_info },
    { "values",         values },
@@ -816,6 +1416,12 @@ local scenarios = {
    { "closed_objects", closed_objects },
    { "library",        library },
    { "async",          async },
+   { "protocols",      protocols },
+   { "binding",        binding },
+   { "statements",     statements },
+   { "stmt_results",   stmt_results },
+   { "stmt_async",     stmt_async },
+   { "long_values",    long_values },
    { "kill",           kill },
    { "exit_open",      exit_open },
 }
@@ -856,6 +1462,10 @@ if not args.keep and ctx.main then
                          "DROP TABLE IF EXISTS luasql_types",
                          "DROP TABLE IF EXISTS luasql_auto",
                          "DROP TABLE IF EXISTS luasql_ddl",
+                         "DROP TABLE IF EXISTS luasql_bind",
+                         "DROP TABLE IF EXISTS luasql_long",
+                         "DROP PROCEDURE IF EXISTS luasql_two",
+                         "DROP PROCEDURE IF EXISTS luasql_out",
                          "DROP PROCEDURE IF EXISTS luasql_sel",
                          "DROP PROCEDURE IF EXISTS luasql_fail",
                          "DROP PROCEDURE IF EXISTS luasql_abort",

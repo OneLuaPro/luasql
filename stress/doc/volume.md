@@ -101,4 +101,4 @@ The tables have the types `integer`, `double precision` and `varchar`; `luastres
 
 ## MariaDB
 
-Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.
+The tables are InnoDB tables with the types `INT`, `DOUBLE` and `VARCHAR`; `luastress_vollob` has a `LONGTEXT` column. `luastress_volbin` has a `LONGBLOB` column and no key; its rows are deleted before each insert (`backend.volBinaryDelete`), as MariaDB has no temporary table whose rows go at a commit. `luasql.mysql` reads the whole result of a query at the execute, so the fetch phases hold all rows of a query in the process for a moment; the memory must still not grow from round to round. A single value sent or read is limited by `max_allowed_packet` (16 MB by default). The tablespaces of InnoDB have no size limit of their own, so the cases with a full tablespace are skipped, and `maxLength` as well.

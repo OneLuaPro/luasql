@@ -9,8 +9,9 @@ project.
 
 So far it covers the Oracle driver `luasql.oci8`, the SQLite driver
 `luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver
-`luasql.firebird` and the PostgreSQL driver `luasql.postgres`, which have
-been reworked for OneLuaPro and tested in depth. The other drivers follow the same API; their documentation will be
+`luasql.firebird`, the PostgreSQL driver `luasql.postgres` and the MySQL
+driver `luasql.mysql`, which have been reworked for OneLuaPro and tested in
+depth. The other drivers follow the same API; their documentation will be
 added here.
 
 ## Objects
@@ -19,7 +20,7 @@ Every driver works with the same four kinds of objects:
 
 <table>
 <tr><th>Object</th><th>Created by</th><th>Purpose</th></tr>
-<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code>, <code>driver.firebird()</code>, <code>driver.postgres()</code></td><td>holds the client library of the driver; opens connections</td></tr>
+<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code>, <code>driver.firebird()</code>, <code>driver.postgres()</code>, <code>driver.mysql()</code></td><td>holds the client library of the driver; opens connections</td></tr>
 <tr><td>connection</td><td><code>env:connect(...)</code></td><td>a session on the database server; runs statements and controls transactions</td></tr>
 <tr><td>cursor</td><td><code>conn:execute(...)</code>, <code>stmt:execute(...)</code></td><td>the rows of a query, read one by one</td></tr>
 <tr><td>statement</td><td><code>conn:prepare(...)</code></td><td>a prepared statement, executed many times with parameters</td></tr>
@@ -405,11 +406,11 @@ code without an error message come first.
 - **postgres: `conn:execute(sql, ...)` binds further arguments as
   parameters**; LuaSQL ignores them. With parameters the text holds one
   statement.
-- **mysql: `conn:close()` with open cursors and `env:close()` with open
-  connections** return `false` and a message, and a to-be-closed connection or
-  environment with open objects stays open, as with `close`; LuaSQL closes
-  them all the same. `conn:close()` with an open transaction leaves it to the
-  server, which rolls it back, as in LuaSQL.
+- **mysql: `conn:close()` with open cursors or statements and `env:close()`
+  with open connections** return `false` and a message, and a to-be-closed
+  connection or environment with open objects stays open, as with `close`;
+  LuaSQL closes them all the same. `conn:close()` with an open transaction
+  leaves it to the server, which rolls it back, as in LuaSQL.
 - **mysql: the client library is initialised once and never ended**; LuaSQL
   ends it with `env:close()` and when an environment is collected, after which
   the connections of other environments crash the process.
@@ -425,14 +426,15 @@ code without an error message come first.
 - **mysql: several results** (statements with `CLIENT_MULTI_STATEMENTS`, and
   the extra status result of every `CALL`):
     - Results that were not read are read and dropped before the next call
-      that goes to the server (`execute`, `send_query`, `commit`, `rollback`,
-      `setautocommit`, `ping`); with LuaSQL that call and every later one fail
-      with `Commands out of sync`, so a connection is unusable after a `CALL`.
+      that goes to the server (`execute`, `prepare`, `stmt:execute`,
+      `stmt:close`, `send_query`, `commit`, `rollback`, `setautocommit`,
+      `ping`); with LuaSQL that call and every later one fail with
+      `Commands out of sync`, so a connection is unusable after a `CALL`.
     - If one of these results is an error, the call returns it (`nil` or
       `false` and the message "LuaSQL: a later result of the previous
       statement failed, call not executed: " followed by the message of the
-      server) and does nothing else; `ping` passes it on to the next call.
-      `close` does not report it.
+      server) and does nothing else; `ping` and `stmt:close` pass it on to the
+      next call. `conn:close` does not report it.
     - `cur:nextresult()` returns `false`, the error number and the message of
       the server; LuaSQL returns `false`, `1` and `"Unknown"`. The cursor
       takes the columns of the new result (LuaSQL keeps those of the first),
@@ -465,11 +467,15 @@ code without an error message come first.
 - **mysql: `conn:ping()` returns `false` for a connection lost during a call
   too** (LuaSQL raises an error then), and its error message is no longer read
   as a format string.
+- **mysql: `conn:execute(sql, ...)` binds further arguments as parameters**;
+  LuaSQL ignores them. With parameters, also a single `nil` or an empty table,
+  the driver prepares the statement, executes it and closes it again, so the
+  text holds one statement.
 
 **Extensions**
 
-- Prepared statements for oci8, sqlite3, duckdb, firebird and postgres:
-  `conn:prepare` and statement objects (upstream pull request
+- Prepared statements for oci8, sqlite3, duckdb, firebird, postgres and
+  mysql: `conn:prepare` and statement objects (upstream pull request
   [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
 - `luasql.type` with the pairs `{value, type}`, `T.null` (a special value),
   `T.binary`, fixed forms for dates and times, `{T.null, type}`.
@@ -492,9 +498,12 @@ code without an error message come first.
   prepared statements, parameters (also `conn:execute(sql, ...)`),
   `luasql.type`, and `luasql._CLIENTVERSION`, the version of libpq loaded
   (e.g. `"18.7"`; LuaSQL means to set it but never does).
-- The additions of mysql: TLS by default, as MariaDB Connector/C 3.4 does it
-  (a connection is encrypted and the certificate of the server is verified),
-  with the flags `luasql.CLIENT_SSL_DISABLE` (no TLS) and
+- The additions of mysql in the @{08-mysql.md|MySQL topic}: prepared
+  statements, parameters (also `conn:execute(sql, ...)`), `luasql.type`,
+  values of the same type through the text and the binary protocol, TLS by
+  default, as MariaDB Connector/C 3.4 does it (a connection is encrypted and
+  the certificate of the server is verified), with the flags
+  `luasql.CLIENT_SSL_DISABLE` (no TLS) and
   `luasql.CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE` (TLS without verifying the
   certificate) for the last argument of `env:connect`; they use the bits of
   `CLIENT_SSL` and `CLIENT_SSL_VERIFY_SERVER_CERT` with the opposite meaning.
@@ -517,7 +526,9 @@ code without an error message come first.
 - @{07-postgres.md|PostgreSQL}: connecting, the character set, data types,
   parameters, transactions, asynchronous queries and the behavior of
   PostgreSQL worth knowing.
+- @{08-mysql.md|MySQL}: connecting, TLS, data types, parameters,
+  transactions, several results and the behavior of MariaDB worth knowing.
 - The reference of the modules @{luasql.oci8}, @{luasql.sqlite3},
-  @{luasql.duckdb}, @{luasql.firebird} and @{luasql.postgres} with every
-  function.
+  @{luasql.duckdb}, @{luasql.firebird}, @{luasql.postgres} and
+  @{luasql.mysql} with every function.
 - The examples, ready to run against your own database.

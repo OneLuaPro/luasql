@@ -166,4 +166,4 @@ A run of 4 hours (`lua stress.lua postgres soak --csv soak240-postgres.csv`) on 
 
 ## MariaDB
 
-Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.
+The scenario runs with lanes: each worker changes rows of its own ids only. The table `luastress_soak` (InnoDB) has the types `INT` and `VARCHAR`; the date and time query reads `NOW(6)`, `CURRENT_TIMESTAMP`, `CURDATE()`, `CURTIME(6)` and `UTC_TIMESTAMP()`. The JSON value is built as in [`stmtLifecycle`](stmtLifecycle.md). An error of a round rolls back its statement only. The warning step is left out (see [`warnings`](warnings.md)), and there is no series `pga`. The server counters are `open tx` of the test session and `prepared`, which counts the statements of all sessions on the server (see [`stmtLifecycle`](stmtLifecycle.md)), the lanes included; both must stay the same from sample to sample.

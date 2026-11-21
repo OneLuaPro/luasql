@@ -68,4 +68,10 @@ There is no state file: no setting of the server is changed. With `--keep` the h
 
 ## MariaDB
 
-There is no module `prep/mysql.lua`; the output shows `prep:   nothing to prepare for this DBMS`. The test database, the test user and its rights are set up once by hand (see MariaDB under [Preparing a Run](../README.md#preparing-a-run)). The scenarios create their tables themselves and drop what an aborted run left; no setting of the server is changed.
+There is a module `prep/mysql.lua`; it runs on the admin connection (`root`), which is connected to the test database. It drops the tables of an aborted run (names starting with `luastress` in the test database) and creates two InnoDB helper tables: `luastress_err` has one row and a `CHECK` constraint, for a statement with a parameter that fails (scenario [`errorPaths`](errorPaths.md)); `luastress_dml` has one row and an `INT` column that rejects a string that is not a number (scenario [`params`](params.md)). The test user has all rights on the test database, so it may write the tables of `root` there. The output shows:
+
+```
+prep:   helper tables created
+```
+
+There is no state file: no setting of the server is changed. With `--keep` the helper tables stay in the database. The test database, the test user and its rights are set up once by hand (see MariaDB under [Preparing a Run](../README.md#preparing-a-run)). Without the admin connection the step is skipped, and the phases that use the helper tables fail with `Table '...' doesn't exist`.
