@@ -52,3 +52,7 @@ The server counters are `statements`, the statements of the test attachment in `
 The server counters are `open tx` and `prepared` (see [`cursorLifecycle`](cursorLifecycle.md)): a prepared statement is a row of `pg_prepared_statements` (named `luasql_<n>` by the driver) until it is closed or collected. The placeholders are `$1`, `$2`, ...; `luasql.postgres` prepares without types, and a parameter alone in the select list would be text, so the queries cast their parameters (`$1::bigint`). The number query reads `double precision`, so an integer comes back as a float of the same value. In `noParams`, `execute(nil)` gives `nil` and the message of the driver about the number of parameters (`backend.argCountError`).
 
 The LOB phases read text and `bytea` values made on the server, with `rpad` of text and with `decode(rpad(...), 'hex')` of hex text. PostgreSQL has no temporary LOBs, so there is no check of the LOB queries (`backend.tempLobChecks`). `jsonRead` builds `{"t":"..."}` from `to_json` of the text, without spaces: `json_build_object` writes spaces after the colon. `manualReuse` runs the statement with autocommit off.
+
+## MariaDB
+
+Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.

@@ -2,14 +2,14 @@
 
 The LuaSQL stress test suite exercises a LuaSQL driver under load: it opens and closes connections, cursors and prepared statements hundreds of thousands of times, provokes errors, kills sessions, uses the driver from several threads at once and runs for hours. It checks that the driver never crashes, never leaks memory, cursors, temporary LOBs (Large Objects) or sessions, never loses or changes data and never leaves a session blocked. Behavior of the client library or the DBMS (Database Management System) that a user might not expect is reported as a known limitation with its reason, without failing the run.
 
-The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver `luasql.firebird` and the PostgreSQL driver `luasql.postgres` are implemented:
+The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver `luasql.firebird`, the PostgreSQL driver `luasql.postgres` and the MariaDB driver `luasql.mysql` are implemented:
 
 | Driver            | DBMS                    | Status    |
 | ----------------- | ----------------------- | --------- |
 | `luasql.oci8`     | Oracle                  | available |
 | `luasql.sqlite3`  | SQLite                  | available |
 | `luasql.postgres` | PostgreSQL              | available |
-| `luasql.mysql`    | MariaDB/MySQL           | planned   |
+| `luasql.mysql`    | MariaDB/MySQL           | available |
 | `luasql.duckdb`   | DuckDB                  | available |
 | `luasql.firebird` | Firebird                | available |
 | `luasql.odbc`     | any, via an ODBC driver | planned   |
@@ -32,7 +32,7 @@ The suite needs only plain Lua and two common modules; further modules are optio
 
 ## Preparing a Run
 
-Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite, DuckDB, Firebird and PostgreSQL are available; instructions for the other DBMS will follow when their backends are implemented.
+Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite, DuckDB, Firebird, PostgreSQL and MariaDB are available; instructions for the other DBMS will follow when their backends are implemented.
 
 ### Oracle
 
@@ -297,6 +297,78 @@ ALTER DATABASE luatest SET lc_messages = 'C';
 
 The setting of `lc_messages` applies to new connections. A role of PostgreSQL belongs to the server, not to a database. To remove the test environment again: `DROP DATABASE luatest;` and `DROP ROLE luatest;`.
 
+### MariaDB
+
+**Driver and client library:** `luasql.mysql` uses MariaDB Connector/C, the client library of MariaDB. The `luasql.mysql` of OneLuaPro contains Connector/C 3.4.11, linked statically, and needs no further DLL. The suite was tested with a MariaDB 12.3.4 server; MySQL is not tested yet, and the queries of the backend use the Sequence engine of MariaDB (`seq_1_to_10`), which MySQL does not have.
+
+**Encryption:** the connections of the suite use TLS and verify the certificate of the server, the default of `luasql.mysql` and Connector/C 3.4; the backend passes no client flags. The local server of the tests offered TLS without any setup. A server without TLS, or one whose certificate the client cannot verify, refuses every connect of the suite.
+
+**Connection data:** as with Oracle, everything comes from environment variables; a missing one stops the run with its name.
+
+| Variable               | Meaning                                         | Required     |
+| ---------------------- | ----------------------------------------------- | ------------ |
+| `MYSQL_TEST_HOST`      | host of the server, e.g. `127.0.0.1`            | yes          |
+| `MYSQL_TEST_PORT`      | port of the server, e.g. 3306                   | yes          |
+| `MYSQL_TEST_NAME`      | the test database, e.g. `luatest`               | yes          |
+| `MYSQL_TEST_USER`      | test user, e.g. `luatest`                       | yes          |
+| `MYSQL_TEST_PASSWORD`  | password of the test user                       | yes          |
+| `MYSQL_ADMIN_USER`     | admin user, e.g. `root`                         | both or none |
+| `MYSQL_ADMIN_PASSWORD` | password of the admin user                      | both or none |
+
+`127.0.0.1` connects through TCP; with `localhost` the client library may take another way to the server. A user `'luatest'@'localhost'` of the server also matches connections from `127.0.0.1`.
+
+In Windows command prompt (CMD):
+
+```CMD
+set MYSQL_TEST_HOST=127.0.0.1
+set MYSQL_TEST_PORT=3306
+set MYSQL_TEST_NAME=luatest
+set MYSQL_TEST_USER=luatest
+set "MYSQL_TEST_PASSWORD=..."
+set MYSQL_ADMIN_USER=root
+set "MYSQL_ADMIN_PASSWORD=..."
+```
+
+In bash (Linux, macOS):
+
+```bash
+export MYSQL_TEST_HOST=127.0.0.1
+export MYSQL_TEST_PORT=3306
+export MYSQL_TEST_NAME=luatest
+export MYSQL_TEST_USER=luatest
+read -rsp "Test passwd: " MYSQL_TEST_PASSWORD && echo && export MYSQL_TEST_PASSWORD
+export MYSQL_ADMIN_USER=root
+read -rsp "Admin passwd: " MYSQL_ADMIN_PASSWORD && echo && export MYSQL_ADMIN_PASSWORD
+```
+
+The variables of the test connection are the same as those of the functional test `checks/mysql.lua`, and both can use the same database: the suite creates and drops only tables whose names start with `luastress`, the functional test those starting with `luasql`. No other run may use the database at the same time. The admin connection uses host, port and database of the test connection. Without the admin variables the suite still runs, but skips the server counters, the session counts and scenario `connectionLoss`. Run with the admin connection.
+
+**Option files:** `luasql.mysql` lets Connector/C read its option files at every connect (option `MYSQL_READ_DEFAULT_GROUP` with the group `client-lua`), so a setting in such a file applies to every connection of the suite, e.g. a character set, a time limit or TLS options. Connector/C 3.4 reads the groups `[client]`, `[client-server]`, `[client-mariadb]` and `[client-lua]`. On Windows it looks for `my.ini`, then `my.cnf`, in this order in the system Windows folder, the Windows folder, `C:\`, the folder of the program (the `bin` folder of `lua.exe`) and the folder in `MARIADB_HOME` (or `MYSQL_HOME` if `MARIADB_HOME` is not set); on Linux in `/etc`, `/etc/mysql`, the configuration folder of the build, the folders of these variables and `~/.my.cnf`. The `my.ini` that the MariaDB installer writes into the data folder of the server is a file of the server and is not read. For a run with the defaults, none of these files should have one of these groups.
+
+**Rights of the database users:**
+
+- Test user: all rights on the test database and no others (`GRANT ALL PRIVILEGES ON luatest.*`); the run creates its tables there.
+- Admin user: `root`, or a user that sees the sessions and transactions of other users in `information_schema.PROCESSLIST` and `information_schema.INNODB_TRX` (right `PROCESS`) and ends them with `KILL CONNECTION` (right `CONNECTION ADMIN`).
+
+**Language of the messages:** the suite recognizes errors of the server by their English text. MariaDB gives its messages in English by default (`lc_messages = en_US`); Connector/C gives its own messages in English.
+
+**Setting up the database and the user:** with the client `mariadb.exe` as `root`; `-p` without a value makes it ask for the password (no password on the command line):
+
+```CMD
+"C:\Program Files\MariaDB 12.3\bin\mariadb.exe" -h 127.0.0.1 -u root -p
+```
+
+Run the following commands in this interactive session; MariaDB has no command that asks for a new password, so the password of the test user is typed into `CREATE USER` there, never into a script or a command line:
+
+```sql
+CREATE DATABASE luatest CHARACTER SET utf8mb4;
+CREATE USER 'luatest'@'localhost' IDENTIFIED BY '...';
+GRANT ALL PRIVILEGES ON luatest.* TO 'luatest'@'localhost';
+quit
+```
+
+To remove the test environment again: `DROP DATABASE luatest;` and `DROP USER 'luatest'@'localhost';`.
+
 
 ## Running
 
@@ -351,6 +423,7 @@ Scenarios with slow steps use fewer iterations, e.g. one logon per iteration; ea
 | Quick check of the DuckDB driver                           | `lua stress.lua duckdb smoke`                               |
 | Quick check of the Firebird driver                         | `lua stress.lua firebird smoke`                             |
 | Quick check of the PostgreSQL driver                       | `lua stress.lua postgres smoke`                             |
+| Quick check of the MariaDB driver                          | `lua stress.lua mysql smoke`                                |
 | Output without colors                                      | `set NO_COLOR=1` before the run                             |
 
 
@@ -420,6 +493,17 @@ Exit codes: 0 all scenarios passed (limits do not count), 1 a scenario or the cl
 - **`relation "luastress_err" does not exist`** or **`relation "luastress_dml" does not exist`**: the run had no admin connection, so the preparation step did not create the helper tables.
 - **A run or a scenario hangs.** PostgreSQL waits for a lock without a time limit (`lock_timeout` 0, the default): a session of another program, e.g. a `psql` window that changed a table of the run in an open transaction, makes the run wait. End that session.
 - **A run was aborted.** Its tables stay in the database; the next run drops them in the preparation step.
+
+### MariaDB
+
+- **`Access denied for user '...'@'...' (using password: YES)`** before the first scenario: user or password of the test or admin connection, or the user does not exist for the host it connects from.
+- **`Access denied for user '...' to database '...'`**: `MYSQL_TEST_NAME` is wrong or the test user has no rights on it; MariaDB gives the same message for a database that does not exist.
+- **`Can't connect to server on '...'`**: host or port, or the server does not run.
+- **`TLS/SSL error` or a message about the certificate** when connecting: `luasql.mysql` uses TLS and verifies the certificate of the server by default, see [Preparing a Run](#preparing-a-run).
+- **Settings that differ from the defaults**, e.g. another character set or time limit: an option file of Connector/C with one of the groups the driver reads, see [Preparing a Run](#preparing-a-run).
+- **`sessions grew` or a wrong number of sessions** in `connectionLifecycle` or `connectionLoss`: another session of the test user, e.g. a `mariadb.exe` window, came or went during the run. The suite cannot tell its own sessions from others of the same user; close such windows before the run.
+- **A run or a scenario hangs.** DDL of the run waits for a metadata lock that another session holds, e.g. a `mariadb.exe` window whose open transaction has read a table of the run; such a wait lasts long (`lock_wait_timeout`). End that session.
+- **A run was aborted.** Its tables stay in the database; each scenario drops its own tables first.
 
 
 ## Scenarios
@@ -590,23 +674,36 @@ Tested with PostgreSQL 18.7 on Windows 10, server and client in the same VM (VMw
 
 **Not covered with PostgreSQL yet:** `prefetch` (no driver options), `warnings` (no warnings of this kind, see [`doc/warnings.md`](doc/warnings.md)), the named parameters of `params`, `badColumnType` of `errorPaths` (`luasql.postgres` reads every type), the cases of `volume` with a full tablespace and `maxLength` (the tablespaces of PostgreSQL have no size limit of their own), the WAL cases of `concurrency` (SQLite only) and the cases of `dataTypes` for intervals, row ids, hex text in binary columns and unsupported types (see [`doc/dataTypes-postgres.md`](doc/dataTypes-postgres.md)).
 
-### MariaDB/MySQL
+### MariaDB
 
-No information yet; not implemented. `luasql.mysql` takes host and port as arguments of their own, `env:connect(database, user, password, host, port)`. A backend gives them with `connectArgs`, which replaces the default arguments (source name, user, password) of every connect of the suite, also in lanes and for the connects that must fail (`failingConnects`, e.g. `change = { port = 1 }` for a port without listener):
+Tested with MariaDB 12.3.4 on Windows and the `luasql.mysql` of OneLuaPro, which contains MariaDB Connector/C 3.4.11; MySQL is not tested yet. `luasql.mysql` has no prepared statements yet (task `core-mysql`; they come with its bind API) and no driver options, so the suite runs `cursorLifecycle`, `errorPaths`, `connectionLifecycle` and `connectionLoss`, and these without the phases and cases that need `conn:prepare`. All other scenarios are skipped. With these scenarios tier smoke takes about 45 seconds and tier nightly about 50 minutes, with the server on the same computer.
 
-```lua
--- backend/mysql.lua
-sourceName = function(values)   -- for messages only
-   return string.format("%s:%d/%s", values.host, values.port,
-                        values.name)
-end,
-connectArgs = function(values)
-   return values.name, values.user, values.password, values.host,
-      values.port
-end,
-```
+**Connections:** `luasql.mysql` takes host and port as arguments of their own, `env:connect(database, user, password, host, port)`; the backend gives them with `connectArgs`, which replaces the default arguments (source name, user, password) of every connect of the suite, also in lanes and for the connects that must fail (`failingConnects`, e.g. `change = { port = 1 }` for a port without listener). The connections use TLS (see [Preparing a Run](#preparing-a-run)), and Connector/C reads its option files at every connect.
 
-with `testFields = { "host", "port", "name", "user", "password" }` in `config/mysql.lua`.
+**The whole result on the client:** `luasql.mysql` reads the whole result of a query at the execute (`mysql_store_result`). An error in any row of a result comes at the execute, not at a fetch; a cursor reads on after `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)` (`backend.cursorsSurviveEnd`) and after a lost connection: after a kill, an open cursor gives all its rows and ends normally (`backend.resultOnClient`, see [`doc/connectionLoss.md`](doc/connectionLoss.md)). The server keeps no cursor for it, and MariaDB has no temporary LOBs: the values of the LOB phases are text and bytes of the result.
+
+**What a connection holds:** the server counter is `open tx`, the row of the test session in `information_schema.INNODB_TRX` (by its thread id), read on the admin connection. A transaction begins with the first statement that reads or writes a table, a plain `SELECT` included (not `SELECT 1`, not a table of the Sequence engine), and shows there until it ends; with autocommit on no transaction is open between statements, so `open tx` must be 0 before every phase. A cursor that is not freed shows in the memory of the process only. Sessions are the rows of `information_schema.PROCESSLIST` of the test user; MariaDB has no name of the program there (`performance_schema` is off by default), so a `mariadb.exe` window of the test user counts too. A killed session is gone from `PROCESSLIST` at once.
+
+**Values:** `luasql.mysql` reads the integer types as integers, except `BIGINT UNSIGNED`, which can be larger than a Lua integer and comes as text. The column `seq` of the Sequence engine is `BIGINT UNSIGNED`, so the queries of the backend cast it (`CAST(seq AS SIGNED)`).
+
+**Transactions:** the isolation is `REPEATABLE READ`, with `innodb_snapshot_isolation` on (the default of MariaDB 12.3). An ordinary error rolls back the statement only; a deadlock and a write conflict roll back the whole transaction. DDL commits the open transaction implicitly, also a DDL that fails after the parser. A lock waits up to `innodb_lock_wait_timeout` (50 seconds by default). These matter for the scenarios that come with the bind API.
+
+**Messages:** the server gives its messages in English by default (`lc_messages = en_US`), as do Connector/C and `luasql.mysql`.
+
+**Known limitations**, reported as "limit":
+
+| Limit | Scenario, case | Reason |
+| ---- | ---- | ---- |
+| `endAfterKill` | `connectionLoss`, `killThenAutocommit` | After a kill, `conn:rollback()` and `conn:setautocommit(true)` return `true`, once the commit with open work has failed: the server rolls back the transaction of a lost connection. |
+
+**Behavior worth knowing**, checked but not reported as limit:
+
+- An empty text gives error 1065 (`Query was empty`, `nil` and a message); a text with a comment only runs as a statement and gives 0.
+- An unknown database gives `Access denied for user '...' to database '...'` (1044), not `Unknown database`, when the user has no rights outside its database: the cases of `connectionLifecycle` look for the names only.
+- A failing block without a table is a compound statement of MariaDB (`BEGIN NOT ATOMIC SIGNAL ...; END`); a division by zero in a `SELECT` gives `NULL` and a warning (1365), not an error.
+- After a kill, Connector/C in `luasql.mysql` reports the lost connection over TLS often first as `TLS/SSL error` (2026), then as `Server has gone away` (2006); the client `mariadb.exe` reported `Lost connection to server during query` (2013) at the next query of a killed idle session. `close` of the cursor and the connection returns `true`.
+
+**Not covered with MariaDB yet:** everything that needs `conn:prepare` (`stmtLifecycle`, `params`, `concurrency`, `threads`, `dataTypes`, `transactions`, `volume`, `soak`, and the phases and cases of the other scenarios that use prepared statements), `prefetch` (no driver options), `warnings` (see [`doc/warnings.md`](doc/warnings.md)), `badColumnType` of `errorPaths` (`luasql.mysql` reads every type), and MySQL.
 
 ### DuckDB
 

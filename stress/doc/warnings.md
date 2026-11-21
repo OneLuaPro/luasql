@@ -45,3 +45,7 @@ Skipped: the backend has no warning statements; Firebird has no statements that 
 ## PostgreSQL
 
 Skipped: the backend has no warning statements. A function of PL/pgSQL is checked when it is created and fails with an error, not with a warning; the notices and warnings of the server (`RAISE WARNING`) are not part of the LuaSQL API.
+
+## MariaDB
+
+Skipped: the backend has no warning statements. MariaDB reports a stored program with an error in its body as an error when it is created, not as a warning. A statement can succeed with warnings (e.g. `SELECT 1 / 0` gives `NULL` and warning 1365, `Division by 0`), but `luasql.mysql` neither passes them on nor takes them as errors; warnings are an open topic for all LuaSQL drivers.

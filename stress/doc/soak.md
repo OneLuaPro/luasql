@@ -163,3 +163,7 @@ A run of 4 hours (`lua stress.lua postgres soak --csv soak240-postgres.csv`) on 
 | private bytes              | 5064 KB at the start, 5572 KB after the warm-up of 24 minutes, 5784 KB at the end; slope +28 KB per hour (limit 512). Between 5568 and 5640 KB up to minute 40, then a step of 136 KB to 5708 KB and from there steps of 4 to 12 KB, the last one after 3 hours 50 minutes; in the last 2 hours +60 KB. |
 | Lua heap                   | 632 KB from the first sample after 30 seconds to the end; slope 0                                                                                               |
 | counters                   | open tx 1 and prepared 7, the same from the start to the end (see above); sessions 2                                                                            |
+
+## MariaDB
+
+Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.

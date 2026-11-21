@@ -65,3 +65,7 @@ prep:   helper tables created
 ```
 
 There is no state file: no setting of the server is changed. With `--keep` the helper tables stay in the database. The test database, its owner and its language of messages are set up once by hand (see PostgreSQL under [Preparing a Run](../README.md#preparing-a-run)). Without the admin connection the step is skipped, and the phases that use the helper tables fail with `relation ... does not exist`.
+
+## MariaDB
+
+There is no module `prep/mysql.lua`; the output shows `prep:   nothing to prepare for this DBMS`. The test database, the test user and its rights are set up once by hand (see MariaDB under [Preparing a Run](../README.md#preparing-a-run)). The scenarios create their tables themselves and drop what an aborted run left; no setting of the server is changed.

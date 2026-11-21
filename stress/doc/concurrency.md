@@ -58,3 +58,7 @@ A row is locked with `SELECT ... WITH LOCK`. `luasql.firebird` waits for a lock 
 ## PostgreSQL
 
 A row is locked with `SELECT ... FOR UPDATE`. `lockNowait` locks with `FOR UPDATE NOWAIT`, which gives `could not obtain lock on row` at once; in PostgreSQL this error aborts the transaction of B, so B cannot lock another row until it rolls back. The case is therefore a limit (`concurrencyLimits.conflictAborts`). `lockWaitTimeout` sets `lock_timeout` with autocommit on (a `SET` in a transaction is undone by its rollback) and gets `canceling statement due to lock timeout`. `lockReleasedOnClose` and `lockReleasedOnGc` run: the lock must be free once A is closed or collected. `readConsistency` passes: the isolation is `READ COMMITTED`, and the cursor of B has read its whole result at the execute. The WAL cases are skipped (SQLite only). The server counters are `open tx` and `prepared`.
+
+## MariaDB
+
+Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.

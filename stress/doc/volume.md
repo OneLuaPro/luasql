@@ -98,3 +98,7 @@ The tables have the types `INTEGER`, `DOUBLE PRECISION`, `VARCHAR` in UTF8 and B
 ## PostgreSQL
 
 The tables have the types `integer`, `double precision` and `varchar`; `luastress_vollob` has a `text` column, PostgreSQL has no LOB type of its own. `luastress_volbin` is a temporary table of the test session whose rows go at each commit (`ON COMMIT DELETE ROWS`), with a `bytea` column. `luasql.postgres` reads the whole result of a query at the execute, so the fetch phases hold all rows of a query in the process for a moment; the memory must still not grow from round to round. The tablespaces of PostgreSQL have no size limit of their own, so the cases with a full tablespace are skipped, and `maxLength` as well.
+
+## MariaDB
+
+Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.

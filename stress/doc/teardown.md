@@ -30,3 +30,7 @@ Nothing to do: there is no module `prep/firebird.lua`. The scenarios drop their 
 ## PostgreSQL
 
 `prep/postgres.lua` drops the helper tables `luastress_err` and `luastress_dml`. The scenarios drop their own tables; the database stays.
+
+## MariaDB
+
+Nothing to do: there is no module `prep/mysql.lua`. The scenarios drop their own tables; the database stays.

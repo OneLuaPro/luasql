@@ -68,3 +68,7 @@ The table is `luastress_tx (id INTEGER PRIMARY KEY, v VARCHAR(100))`, created wi
 The table is `luastress_tx (id integer PRIMARY KEY, v varchar(100))`. "Another session" is the admin connection in autocommit mode, in the same database and schema; each of its statements sees what is committed. The counter of open transactions is the server counter `open tx`, the state `idle in transaction` of the test session in `pg_stat_activity`.
 
 `enableAutocommit` is a limit: `setautocommit(true)` rolls back the open transaction, as in `luasql.oci8`, `luasql.sqlite3`, `luasql.duckdb` and `luasql.firebird`. `errorKeepsWork` is a limit as well (`transactionLimits.errorAborts`): an error in a statement aborts the whole transaction in PostgreSQL; every further statement fails with `current transaction is aborted`, and `commit()` rolls back and gives `false` and a message. DDL is part of the transaction, a rollback undoes it: `ddlCommits` passes. `savepoint` runs with `SAVEPOINT` and `ROLLBACK TO SAVEPOINT`. `plsqlAutocommit` runs a block of PL/pgSQL (`DO`) with an `INSERT`. Row counts are integers.
+
+## MariaDB
+
+Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.

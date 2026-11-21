@@ -245,6 +245,31 @@ code without an error message come first.
   with `German`.
 - **postgres: the number of rows a statement has changed and `cur:numrows()`
   are integers** (`1`); LuaSQL returns floats (`1.0`).
+- **mysql: values are read by their type**: the integer types `TINYINT` to
+  `BIGINT` and `YEAR` as integers, `FLOAT` and `DOUBLE` as floats; LuaSQL
+  returns every value as text (`"42"`). `BIGINT UNSIGNED` (it can be larger
+  than a Lua integer), `DECIMAL`, `BIT`, dates, times and the other types stay
+  text or bytes, so a number with a point in SQL (`1.5`) and `SUM` or `AVG`
+  over an integer column, which MariaDB computes as `DECIMAL`, are still
+  strings; `CAST(... AS SIGNED)` or `CAST(... AS DOUBLE)` in SQL gives a
+  number. `TINYINT(1)` (`BOOLEAN` in MariaDB) is an integer, not a boolean.
+- **mysql: `conn:setautocommit(true)` rolls back an open transaction**; with
+  LuaSQL the server commits it.
+- **mysql: `conn:commit()` returns `false` and a message when an error has
+  ended the transaction**: InnoDB rolls back the whole transaction on a
+  deadlock (1213), a write conflict (1020,
+  `Record has changed since last read`), a full lock table (1206), and a lock
+  wait timeout (1205) only with `innodb_rollback_on_timeout`; the next
+  statement silently begins a new transaction. The driver rolls back the work
+  done since then too. LuaSQL returns `true`, while the changes before the
+  error are lost. Not detected: a transaction ended by SQL (with autocommit
+  off use `conn:commit()` and `conn:rollback()`), and a failing DDL, which
+  commits the open transaction before it runs.
+- **mysql: `luasql._CLIENTVERSION` is the version of MariaDB Connector/C
+  loaded** (e.g. `"3.4.11"`); LuaSQL gives the MariaDB version the client is
+  compatible with (`"10.8.8"`).
+- **mysql: the number of rows `conn:get_result()` returns is an integer**
+  (`1`); LuaSQL returns a float (`1.0`).
 
 **Other changes**
 
@@ -380,6 +405,66 @@ code without an error message come first.
 - **postgres: `conn:execute(sql, ...)` binds further arguments as
   parameters**; LuaSQL ignores them. With parameters the text holds one
   statement.
+- **mysql: `conn:close()` with open cursors and `env:close()` with open
+  connections** return `false` and a message, and a to-be-closed connection or
+  environment with open objects stays open, as with `close`; LuaSQL closes
+  them all the same. `conn:close()` with an open transaction leaves it to the
+  server, which rolls it back, as in LuaSQL.
+- **mysql: the client library is initialised once and never ended**; LuaSQL
+  ends it with `env:close()` and when an environment is collected, after which
+  the connections of other environments crash the process.
+- **mysql: transactions:**
+    - `commit`, `rollback` and `setautocommit` return `false` and a message if
+      the server fails them; LuaSQL: `commit` and `rollback` return `false`
+      without a message, `setautocommit` ignores the failure. If
+      `setautocommit(true)` cannot roll back, autocommit stays off.
+    - After a lost connection, `conn:rollback()` and
+      `conn:setautocommit(true)` return `true` (the server rolls back the
+      transaction of a lost connection), `conn:commit()` returns `false` and a
+      message.
+- **mysql: several results** (statements with `CLIENT_MULTI_STATEMENTS`, and
+  the extra status result of every `CALL`):
+    - Results that were not read are read and dropped before the next call
+      that goes to the server (`execute`, `send_query`, `commit`, `rollback`,
+      `setautocommit`, `ping`); with LuaSQL that call and every later one fail
+      with `Commands out of sync`, so a connection is unusable after a `CALL`.
+    - If one of these results is an error, the call returns it (`nil` or
+      `false` and the message "LuaSQL: a later result of the previous
+      statement failed, call not executed: " followed by the message of the
+      server) and does nothing else; `ping` passes it on to the next call.
+      `close` does not report it.
+    - `cur:nextresult()` returns `false`, the error number and the message of
+      the server; LuaSQL returns `false`, `1` and `"Unknown"`. The cursor
+      takes the columns of the new result (LuaSQL keeps those of the first),
+      and a statement without a result set in between no longer crashes the
+      next `fetch`.
+    - `cur:nextresult()` and `cur:hasnextresult()` only see the results of the
+      statement the cursor comes from: after another statement on the
+      connection they return `false` and `-1`, and `false`; LuaSQL hands out
+      the results of the newer statement.
+- **mysql: asynchronous queries** (`send_query`, `poll`, `get_result`,
+  `getfd`) are not asynchronous, as with LuaSQL, which never compiles in the
+  non-blocking API of MariaDB Connector/C:
+    - `send_query` waits for the query; `poll` returns `false` and `0`.
+    - `send_query` returns `nil` and a message if the query fails; LuaSQL
+      returns `0` and `1`, and the message comes from `get_result`.
+    - While results of `send_query` were not read with `get_result` (until it
+      returns `nil`), `execute` and `send_query` raise an error, and `commit`,
+      `rollback` and `setautocommit` return `false` and a message, as with
+      postgres; with LuaSQL they fail with `Commands out of sync`.
+    - `getfd` returns the socket of `mysql_get_socket` on all systems, without
+      cutting it to 32 bits.
+- **mysql: `cur:getcoltypes()`** gives `"decimal"`, `"bit"` and `"geometry"`
+  for these types (LuaSQL: `"undefined"`), `"string"` for `TEXT` columns
+  (LuaSQL: `"binary"`, as for `BLOB`), and the length of `JSON` and `GEOMETRY`
+  columns without a sign (LuaSQL on Windows: `-1`).
+- **mysql: the message of a failed connect is complete**; LuaSQL cuts it to 99
+  characters.
+- **mysql: `cur:seek()` with a negative row number** raises an error; LuaSQL
+  moves past the last row.
+- **mysql: `conn:ping()` returns `false` for a connection lost during a call
+  too** (LuaSQL raises an error then), and its error message is no longer read
+  as a format string.
 
 **Extensions**
 
@@ -407,6 +492,15 @@ code without an error message come first.
   prepared statements, parameters (also `conn:execute(sql, ...)`),
   `luasql.type`, and `luasql._CLIENTVERSION`, the version of libpq loaded
   (e.g. `"18.7"`; LuaSQL means to set it but never does).
+- The additions of mysql: TLS by default, as MariaDB Connector/C 3.4 does it
+  (a connection is encrypted and the certificate of the server is verified),
+  with the flags `luasql.CLIENT_SSL_DISABLE` (no TLS) and
+  `luasql.CLIENT_SSL_VERIFY_SERVER_CERT_DISABLE` (TLS without verifying the
+  certificate) for the last argument of `env:connect`; they use the bits of
+  `CLIENT_SSL` and `CLIENT_SSL_VERIFY_SERVER_CERT` with the opposite meaning.
+  The other useful client flags are fields of the module too:
+  `CLIENT_FOUND_ROWS`, `CLIENT_COMPRESS`, `CLIENT_IGNORE_SPACE`,
+  `CLIENT_INTERACTIVE`, `CLIENT_MULTI_STATEMENTS`, `CLIENT_MULTI_RESULTS`.
 
 ## Where to Go Next
 

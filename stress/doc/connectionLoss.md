@@ -62,3 +62,11 @@ The kill is `SELECT pg_terminate_backend(pid, 5000)` on the admin connection (a 
 `luasql.postgres` reads the whole result of a query at the execute (`backend.resultOnClient`): after the kill, the cursors of `killDuringFetch`, `killDuringLobFetch`, `killStmtCursor` and phase `killFetchLoop` give all their rows and end normally; the next call that needs the server fails. The LOB rows are text of the result (PostgreSQL has no temporary LOBs). The table of `killInTransaction` and `killThenAutocommit` (`luastress_loss`) is created with plain DDL and dropped with `DROP TABLE IF EXISTS`.
 
 `killThenAutocommit` gives a limit: after the commit with open work, which fails, `conn:rollback()` and `conn:setautocommit(true)` return `true`, as `luasql.postgres` documents: the server rolls back the transaction of a lost connection. The prefetch cases are skipped: `luasql.postgres` has no driver options.
+
+## MariaDB
+
+The kill is `KILL CONNECTION <thread id>` on the admin connection; the session is gone from `PROCESSLIST` at once, so the sessions are counted right after it, as in [`connectionLifecycle`](connectionLifecycle.md). The patterns of a lost connection are `TLS/SSL error` (2026, over TLS often the first error after a kill), `has gone away` (2006, `Server has gone away`), `Lost connection to` (2013) and `Connection was killed` (1927).
+
+`luasql.mysql` reads the whole result of a query at the execute (`backend.resultOnClient`): after the kill, the cursors of `killDuringFetch`, `killDuringLobFetch` and phase `killFetchLoop` give all their rows and end normally; the next call that needs the server fails. The LOB rows are text of the result (MariaDB has no temporary LOBs). The table of `killInTransaction` and `killThenAutocommit` (`luastress_loss`, InnoDB) is created with plain DDL and dropped with `DROP TABLE IF EXISTS`.
+
+`killThenAutocommit` gives a limit: after the commit with open work, which fails, `conn:rollback()` and `conn:setautocommit(true)` return `true`: the server rolls back the transaction of a lost connection. The prefetch cases are skipped (`luasql.mysql` has no driver options), and so are `killWithStmt` and `killStmtCursor` (no `conn:prepare` yet).

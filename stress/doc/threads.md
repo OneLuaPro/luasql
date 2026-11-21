@@ -56,3 +56,7 @@ The lanes lock a row with `UPDATE` or `SELECT ... WITH LOCK` and wait without a 
 The lanes lock a row with `UPDATE` or `SELECT ... FOR UPDATE`; the wait for a lock is limited with `SET lock_timeout`. With `READ COMMITTED`, the isolation of PostgreSQL, a transaction that waited for a row lock goes on once the holder has committed: `parallelWriters` and `lockWait` pass. The session that blocks another one is found with `pg_blocking_pids()`. `deadlock` gives a limit: PostgreSQL detects the deadlock after `deadlock_timeout` (1 second by default) and gives `deadlock detected` to the session that waited first; the error aborts its transaction, so its first update is no longer readable and every further statement fails with `current transaction is aborted` until the rollback (`backend.threadsLimits`).
 
 `killDuringCall` lets the lane run `pg_sleep` on the server; the lane counts as busy while its session waits in it (`wait_event = 'PgSleep'` in `pg_stat_activity`). The kill is `pg_terminate_backend` on the admin connection; the lane gets `terminating connection due to administrator command`.
+
+## MariaDB
+
+Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver.

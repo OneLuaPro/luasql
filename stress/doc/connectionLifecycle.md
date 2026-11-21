@@ -90,3 +90,17 @@ Connects that must fail:
 | `unknownDatabase` | Connects to a database `luastress_nodb` that does not exist. | Pass: `nil` and a message with the name of the database. Fail: anything else.           |
 
 The server refuses an unknown user or database before the settings of the test database apply, so its message is in the language of the server, not in English (see PostgreSQL under [DBMS-Specific Notes](../README.md#dbms-specific-notes)); the patterns look for the names only. The test user is never used with a wrong password.
+
+## MariaDB
+
+A session is a row of `information_schema.PROCESSLIST` with the name of the test user, counted on the admin connection. MariaDB shows no name of the program there (`performance_schema` is off by default), so a `mariadb.exe` window of the test user counts as well: close such windows before a run. A killed or closed session is gone from `PROCESSLIST` at once. The server counter is `open tx` (see [`cursorLifecycle`](cursorLifecycle.md)). In `exitWithOpen` the second connection of each child process has autocommit off and a row inserted; the row must be rolled back at the end of Lua (the server rolls back the transaction of a connection that ends). `closeWithStmt` and `gcAll` are skipped (no `conn:prepare` yet).
+
+Connects that must fail:
+
+| Test              | Checks                                                       | Results                                                                                                          |
+| ----------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `unknownUser`     | Connects as a user `luastress_nouser` that does not exist.   | Pass: `nil` and a message with the name of the user (`Access denied for user ...`, 1045). Fail: anything else.   |
+| `closedPort`      | Connects to port 1, where no server listens.                 | Pass: `nil` and `Can't connect to server on ...` (2002, from Connector/C). Fail: anything else.                 |
+| `unknownDatabase` | Connects to a database `luastress_nodb` that does not exist. | Pass: `nil` and a message with the name of the database. Fail: anything else.                                    |
+
+The test user has no rights outside its database, so MariaDB answers an unknown database with `Access denied for user '...' to database 'luastress_nodb'` (1044), not with `Unknown database` (1049); the pattern looks for the name only. The test user is never used with a wrong password, although MariaDB locks no account after failed logins by default (`max_password_errors` has no limit).

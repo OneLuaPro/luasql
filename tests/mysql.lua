@@ -2,7 +2,17 @@
 -- MySQL specific tests and configurations.
 ---------------------------------------------------------------------
 
-QUERYING_STRING_TYPE_NAME = "binary(262140)"
+-- Connection data from the environment (variables MYSQL_TEST_* of
+-- checks/mysql.lua), unless already given (e.g. with lua -e);
+-- arguments on the command line still come first
+DEFAULT_TEST_DATABASE = DEFAULT_TEST_DATABASE or os.getenv"MYSQL_TEST_NAME"
+DEFAULT_USERNAME = DEFAULT_USERNAME or os.getenv"MYSQL_TEST_USER"
+DEFAULT_PASSWORD = DEFAULT_PASSWORD or os.getenv"MYSQL_TEST_PASSWORD"
+DEFAULT_HOST = DEFAULT_HOST or os.getenv"MYSQL_TEST_HOST"
+DEFAULT_PORT = DEFAULT_PORT or os.getenv"MYSQL_TEST_PORT"
+
+-- TEXT in utf8mb4: 65535 bytes, 4 bytes per character
+QUERYING_STRING_TYPE_NAME = "string(262140)"
 
 ---------------------------------------------------------------------
 -- Seeks to an arbitrary row in a query result set.

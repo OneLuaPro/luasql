@@ -55,3 +55,7 @@ Skipped: `luasql.firebird` has no option `prefetch` (no driver options at all).
 ## PostgreSQL
 
 Skipped: `luasql.postgres` has no option `prefetch` (no driver options at all); it reads the whole result of a query at the execute.
+
+## MariaDB
+
+Skipped: `luasql.mysql` has no option `prefetch` (no driver options at all); it reads the whole result of a query at the execute.

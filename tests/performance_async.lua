@@ -2,7 +2,8 @@
 -- LuaSQL Performance and Async Test Suite
 ---------------------------------------------------------------------
 -- This script benchmarks LuaSQL drivers for throughput and latency.
--- It supports Sync and Async (PostgreSQL and MySQL) operations.
+-- It supports Sync and Async (PostgreSQL and MySQL) operations; the
+-- MySQL driver is not asynchronous (send_query waits for the query).
 --
 -- Environment Variables for Configuration:
 --   DB_HOST: Database host (default: localhost)
@@ -45,7 +46,9 @@ local function get_connection()
         local conn_str = string.format("host=%s dbname=%s user=%s password=%s", host, dbname, user, pass)
         return env:connect(conn_str)
     elseif driver_name == "mysql" then
-        return env:connect(dbname, user, pass, host)
+        -- several statements in one query need CLIENT_MULTI_STATEMENTS
+        return env:connect(dbname, user, pass, host, nil, nil,
+                           luasql.CLIENT_MULTI_STATEMENTS)
     end
 end
 
@@ -70,13 +73,16 @@ local sync_duration = end_time - start_time
 print(string.format("  Sync INSERT: %.4f seconds (%.2f op/s)", sync_duration, ITERATIONS / sync_duration))
 
 -- 2. Async/Batch Performance (PostgreSQL and MySQL specific)
-if driver_name == "postgres" and conn.send_query and conn.get_result then
-    print(string.format("  Running Postgres Async INSERT test (batch size: %d)...", ASYNC_BATCH))
+if (driver_name == "postgres" or driver_name == "mysql")
+    and conn.send_query and conn.get_result then
+    -- the MySQL driver runs the query in send_query already (it is not
+    -- asynchronous), but its results are read the same way
+    print(string.format("  Running %s Async INSERT test (batch size: %d)...", driver_name, ASYNC_BATCH))
     conn:execute("DELETE FROM perf_test")
     
     start_time = os.clock()
     for i = 1, ITERATIONS, ASYNC_BATCH do
-        -- libpq takes one query at a time: send the batch as one query
+        -- one query at a time (libpq, MariaDB): send the batch as one query
         -- of several statements, then read all its results (one per
         -- statement) until get_result returns nil
         local batch = {}
@@ -99,44 +105,6 @@ if driver_name == "postgres" and conn.send_query and conn.get_result then
     print(string.format("  Async INSERT: %.4f seconds (%.2f op/s)", async_duration, ITERATIONS / async_duration))
     print(string.format("  Async is %.2fx faster than Sync", sync_duration / async_duration))
 
-elseif driver_name == "mysql" and conn.send_query and conn.get_result then
-    print(string.format("  Running MySQL Async INSERT test (batch size: %d)...", ASYNC_BATCH))
-    conn:execute("DELETE FROM perf_test")
-    
-    start_time = os.clock()
-    for i = 1, ITERATIONS, ASYNC_BATCH do
-        local batch_handles = {}
-        for j = 0, ASYNC_BATCH - 1 do
-            if (i+j) <= ITERATIONS then
-                local status, ret = conn:send_query(string.format("INSERT INTO perf_test VALUES (%d, 'async_value_%d')", i+j, i+j))
-                if status ~= 0 then
-                    -- If status is not 0, we need to poll
-                    table.insert(batch_handles, status)
-                end
-            end
-        end
-        
-        -- Poll remaining results (MySQL async is per-query, limited by single connection)
-        -- Note: On a single connection, MySQL async still serializes, but allows non-blocking wait.
-        for _, status in ipairs(batch_handles) do
-            local busy, new_status = conn:poll(status)
-            while busy do
-                busy, new_status = conn:poll(new_status)
-            end
-        end
-        
-        -- Consume results
-        for j = 0, ASYNC_BATCH - 1 do
-            if (i+j) <= ITERATIONS then
-                local res = conn:get_result()
-                if type(res) == "userdata" then res:close() end
-            end
-        end
-    end
-    end_time = os.clock()
-    local async_duration = end_time - start_time
-    print(string.format("  Async INSERT: %.4f seconds (%.2f op/s)", async_duration, ITERATIONS / async_duration))
-    print(string.format("  Async is %.2fx faster than Sync", sync_duration / async_duration))
 else
     print("  Native Async (send_query/get_result) not available for this driver.")
 end

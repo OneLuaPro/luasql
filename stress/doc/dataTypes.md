@@ -71,3 +71,7 @@ The cases with Firebird, its columns, literals and limits are listed in [`dataTy
 ## PostgreSQL
 
 The cases with PostgreSQL, its columns, literals and limits are listed in [`dataTypes-postgres.md`](dataTypes-postgres.md).
+
+## MariaDB
+
+Skipped: `luasql.mysql` has no `conn:prepare` yet (task `core-mysql`); the backend gets the keys of this scenario with the bind API of the driver. Its cases with MariaDB, the columns, literals and limits will be listed in `dataTypes-mysql.md`; the column `d` will be `DATETIME`.
