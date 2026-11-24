@@ -76,3 +76,7 @@ The cases with PostgreSQL, its columns, literals and limits are listed in [`data
 ## MariaDB
 
 The cases with MariaDB, its columns, literals and limits are listed in [`dataTypes-mysql.md`](dataTypes-mysql.md).
+
+## ODBC
+
+The cases with the targets `odbc_postgres` and `odbc_mariadb`, their columns, literals and limits are listed in [`dataTypes-odbc_postgres.md`](dataTypes-odbc_postgres.md) and [`dataTypes-odbc_mariadb.md`](dataTypes-odbc_mariadb.md).

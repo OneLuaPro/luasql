@@ -5,8 +5,8 @@ many times with different values. The values are not part of the SQL text,
 so they need no quoting and cannot change the statement (no SQL injection).
 Prepared statements come from upstream pull request
 [#209](https://github.com/lunarmodules/luasql/pull/209) of LuaSQL; so far the
-Oracle, the SQLite, the DuckDB, the Firebird, the PostgreSQL and the MySQL
-driver offer them. `conn:execute` takes parameters in the same way.
+Oracle, the SQLite, the DuckDB, the Firebird, the PostgreSQL, the MySQL and
+the ODBC driver offer them. `conn:execute` takes parameters in the same way.
 
 ## Placeholders and Parameters
 
@@ -51,7 +51,8 @@ missing value (`{1, nil, 3}` has no definite length), so NULL in a table is
 always `T.null`; as a variable argument, `nil` is NULL as well.
 `{T.null, type}` is NULL with a type, e.g. `{T.null, T.binary}`; Oracle,
 SQLite, DuckDB, Firebird, PostgreSQL and MySQL need no type for NULL and
-ignore it.
+ignore it. The ODBC driver binds such a NULL with the SQL type of that type,
+for vendor drivers that need one.
 
 A value that does not match its type (e.g. a string with `T.int`, or `3.7`
 with `T.int`), an unknown type or a Lua type that cannot be bound raises an
@@ -81,13 +82,14 @@ values in it; placeholders not in it keep their value (see below).
 arguments it binds nothing. It prepares the statement at each call, so a table
 binds only the values in it and a placeholder without a value gives
 `ORA-01008` in Oracle, is NULL in SQLite and gives an error in DuckDB, in
-Firebird, in PostgreSQL and in MySQL (`LuaSQL: parameter 2 has no value`). In
-DuckDB, PostgreSQL and MySQL, `conn:execute` without parameters runs all
-statements of the text (in MySQL with `CLIENT_MULTI_STATEMENTS`); with
-parameters it takes one statement. In Firebird, `conn:execute` without
-parameters checks their number as well: a statement with placeholders gives
-`nil` and a message. In PostgreSQL, a wrong number of variable arguments for
-`conn:execute` gives the message of the server.
+Firebird, in PostgreSQL, in MySQL and in ODBC
+(`LuaSQL: parameter 2 has no value`). In DuckDB, PostgreSQL and MySQL,
+`conn:execute` without parameters runs all statements of the text (in MySQL
+with `CLIENT_MULTI_STATEMENTS`); with parameters it takes one statement. In
+Firebird and ODBC, `conn:execute` without parameters checks their number as
+well: a statement with placeholders gives `nil` and a message. In
+PostgreSQL, a wrong number of variable arguments for `conn:execute` gives the
+message of the server.
 
 ## Names and Positions
 
@@ -133,6 +135,9 @@ cur:close()
 - In MySQL, the only placeholder is `?`, bound by position; a table with
   names raises an error. Every `?` is a position of its own. See the
   @{08-mysql.md|MySQL topic}.
+- In ODBC, the only placeholder is `?`, bound by position; a table with
+  names raises an error. Every `?` is a position of its own. See the
+  @{09-odbc.md|ODBC topic}.
 
 ## Types
 
@@ -142,8 +147,10 @@ type, the @{05-duckdb.md|DuckDB topic} shows DuckDB, the
 @{06-firebird.md|Firebird topic} shows Firebird, whose server converts every
 value to the type of its parameter, the @{07-postgres.md|PostgreSQL topic}
 shows PostgreSQL, whose server infers the type of each parameter from its
-place, and the @{08-mysql.md|MySQL topic} shows MySQL, whose server converts
-every value to the type the statement needs.
+place, the @{08-mysql.md|MySQL topic} shows MySQL, whose server converts
+every value to the type the statement needs, and the @{09-odbc.md|ODBC topic}
+shows the C and SQL types of ODBC and what psqlODBC and Connector/ODBC make
+of them.
 
 <table>
 <tr><th>Type</th><th>Lua value</th><th>Bound as</th></tr>
@@ -182,10 +189,10 @@ way; in PL/SQL and SQL functions the limit is 32767 bytes (see the
 
 A value bound to a placeholder stays bound to the statement until the
 placeholder is bound again, `stmt:reset()` is called or the statement is
-closed. This is how OCI, SQLite and DuckDB work, and the ODBC driver of LuaSQL
-does the same. The client of Firebird and libpq of PostgreSQL keep no values,
-and Connector/C of MySQL keeps only pointers to them; the Firebird, the
-PostgreSQL and the MySQL driver keep them themselves, with the same rules.
+closed. This is how OCI, SQLite and DuckDB work. The client of Firebird and
+libpq of PostgreSQL keep no values, and Connector/C of MySQL and ODBC keep
+only pointers to them; the Firebird, the PostgreSQL, the MySQL and the ODBC
+driver keep them themselves, with the same rules.
 
 - `stmt:execute()`, without parameters, runs the statement again with the
   values bound last. A statement without placeholders needs no parameters at
@@ -195,7 +202,7 @@ PostgreSQL and the MySQL driver keep them themselves, with the same rules.
 - Variable arguments bind all placeholders, as their number must match.
 - `stmt:reset()` drops all bound values. Afterwards, a placeholder without a
   value gives `ORA-01008` in Oracle, is NULL in SQLite and gives an error in
-  DuckDB, in Firebird, in PostgreSQL and in MySQL.
+  DuckDB, in Firebird, in PostgreSQL, in MySQL and in ODBC.
 
 ```lua
 local stmt = assert(conn:prepare("SELECT :1 * 2 FROM dual"))
@@ -216,12 +223,14 @@ stmt:close()
 If an execute fails while binding in Oracle, e.g. with a date in a wrong
 format, the parameters bound before the error stay bound. Call `stmt:reset()`
 if a statement must start from a clean state. The SQLite, the DuckDB, the
-Firebird, the PostgreSQL and the MySQL driver check names, positions and dates
-of all parameters before they bind the first one, so after such an error
-nothing of that execute is bound (in DuckDB, only a string that is not UTF-8
-is found while binding). In Firebird, PostgreSQL and MySQL, a value the server
-cannot convert gives its error at the execute; the values given stay with the
-statement.
+Firebird, the PostgreSQL, the MySQL and the ODBC driver check names,
+positions and dates of all parameters before they bind the first one, so
+after such an error nothing of that execute is bound (in DuckDB, only a
+string that is not UTF-8 is found while binding). In Firebird, PostgreSQL,
+MySQL and ODBC, a value the server cannot convert gives its error at the
+execute; the values given stay with the statement. With Connector/ODBC some
+of these errors look like success with 0 rows (see the
+@{09-odbc.md|ODBC topic}).
 
 ## Cursors of a Statement
 

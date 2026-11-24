@@ -972,11 +972,11 @@ if driver == "oci8" or driver == "sqlite3" then
 	table.insert(tests, 2, { "type constants", type_constants_test })
 	table.insert(tests, 4, { "prepared statements", prepared_statements_test })
 elseif driver == "duckdb" or driver == "firebird" or driver == "postgres"
-	or driver == "mysql" then
+	or driver == "mysql" or driver == "odbc" then
 	-- prepared_statements_test uses placeholders and types of Oracle and
-	-- SQLite; checks/duckdb.lua, checks/firebird.lua, checks/postgres.lua
-	-- and checks/mysql.lua test the prepared statements of DuckDB, Firebird,
-	-- PostgreSQL and MySQL
+	-- SQLite; checks/duckdb.lua, checks/firebird.lua, checks/postgres.lua,
+	-- checks/mysql.lua and checks/odbc.lua test the prepared statements of
+	-- DuckDB, Firebird, PostgreSQL, MySQL and ODBC
 	table.insert(tests, 2, { "type constants", type_constants_test })
 end
 

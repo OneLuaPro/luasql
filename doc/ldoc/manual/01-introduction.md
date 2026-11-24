@@ -9,10 +9,10 @@ project.
 
 So far it covers the Oracle driver `luasql.oci8`, the SQLite driver
 `luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver
-`luasql.firebird`, the PostgreSQL driver `luasql.postgres` and the MySQL
-driver `luasql.mysql`, which have been reworked for OneLuaPro and tested in
-depth. The other drivers follow the same API; their documentation will be
-added here.
+`luasql.firebird`, the PostgreSQL driver `luasql.postgres`, the MySQL driver
+`luasql.mysql` and the ODBC driver `luasql.odbc`, which have been reworked
+for OneLuaPro and tested in depth. The other drivers follow the same API;
+their documentation will be added here.
 
 ## Objects
 
@@ -20,7 +20,7 @@ Every driver works with the same four kinds of objects:
 
 <table>
 <tr><th>Object</th><th>Created by</th><th>Purpose</th></tr>
-<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code>, <code>driver.firebird()</code>, <code>driver.postgres()</code>, <code>driver.mysql()</code></td><td>holds the client library of the driver; opens connections</td></tr>
+<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code>, <code>driver.firebird()</code>, <code>driver.postgres()</code>, <code>driver.mysql()</code>, <code>driver.odbc()</code></td><td>holds the client library of the driver; opens connections</td></tr>
 <tr><td>connection</td><td><code>env:connect(...)</code></td><td>a session on the database server; runs statements and controls transactions</td></tr>
 <tr><td>cursor</td><td><code>conn:execute(...)</code>, <code>stmt:execute(...)</code></td><td>the rows of a query, read one by one</td></tr>
 <tr><td>statement</td><td><code>conn:prepare(...)</code></td><td>a prepared statement, executed many times with parameters</td></tr>
@@ -271,6 +271,12 @@ code without an error message come first.
   compatible with (`"10.8.8"`).
 - **mysql: the number of rows `conn:get_result()` returns is an integer**
   (`1`); LuaSQL returns a float (`1.0`).
+- **odbc: a table of parameters changes only the values in it**; the other
+  placeholders keep the values of the last execute. LuaSQL binds NULL to
+  every placeholder that is not in the table.
+- **odbc: an integer is bound as a 64-bit integer** (`SQL_BIGINT`); LuaSQL
+  binds every number as a double, so an integer beyond 2^53 loses its last
+  digits.
 - **odbc: `NUMERIC` and `DECIMAL` are exact text** (`"12.30"`), and
   `cur:getcoltypes()` names them `"string"`; LuaSQL reads them as floats
   (`12.3`, and a large value loses digits) and names them `"number"`.
@@ -512,12 +518,31 @@ code without an error message come first.
   `SQL_MAX_MESSAGE_LENGTH` (512) bytes, so a longer text is cut, or with
   psqlODBC handed out in pieces of 511 bytes as further records, each with a
   line end.
-- **odbc: a parameter that cannot be bound** leaves no parameter of the
-  statement bound, so the next `stmt:execute()` without parameters returns
-  `nil` and a message; LuaSQL leaves the parameters after it bound to memory
-  it has freed, which the next execute reads. `conn:execute(sql, ...)` with
-  such a parameter no longer leaves its statement open, which kept
-  `conn:close()` from closing the connection.
+- **odbc: parameters:**
+    - A placeholder without a value gives `nil` and
+      `LuaSQL: parameter N has no value`, and a wrong number of variable
+      arguments `nil` and `LuaSQL: statement has N parameters, M given`, also
+      `conn:execute(sql)` without arguments for a statement with
+      placeholders; LuaSQL binds NULL for missing values and ignores further
+      ones.
+    - A table with names raises an error (ODBC has positions only); LuaSQL
+      ignores the names and binds NULL.
+    - A Lua type that cannot be bound (e.g. a function) raises an error;
+      LuaSQL returns `nil` and `unsupported parameter type`.
+    - A string is bound with its full length, and a string with a zero byte
+      gives `nil` and a message, since some vendor drivers (psqlODBC) cut it
+      there without an error; LuaSQL cuts it at the zero byte itself.
+    - All values are checked before the first one is bound, so a value that
+      cannot be bound leaves the values of the statement as they were;
+      LuaSQL leaves the parameters after it bound to memory it has freed,
+      which the next execute reads. `conn:execute(sql, ...)` with such a
+      value no longer leaves its statement open, which kept `conn:close()`
+      from closing the connection.
+- **odbc: `conn:prepare` no longer asks the types of the parameters**:
+  `stmt:getparamtypes()` asks them at its first call (with psqlODBC a call to
+  the server, which `conn:prepare` and `conn:execute(sql, ...)` no longer
+  make) and returns `nil` and a message if the vendor driver does not
+  describe parameters; LuaSQL returns `nil` without a message then.
 
 **Extensions**
 
@@ -557,9 +582,12 @@ code without an error message come first.
   The other useful client flags are fields of the module too:
   `CLIENT_FOUND_ROWS`, `CLIENT_COMPRESS`, `CLIENT_IGNORE_SPACE`,
   `CLIENT_INTERACTIVE`, `CLIENT_MULTI_STATEMENTS`, `CLIENT_MULTI_RESULTS`.
-- The additions of odbc: `luasql._CLIENTVERSION`, the version of the ODBC
-  Driver Manager (`SQL_DM_VER`) in the form the Driver Manager gives it,
-  unset if it does not give it without a connection.
+- The additions of odbc in the @{09-odbc.md|ODBC topic}: `luasql.type` and
+  typed parameters for the prepared statements of LuaSQL (`T.binary`, dates
+  and times checked against the calendar, `{T.null, type}` with the SQL type
+  of that type), and `luasql._CLIENTVERSION`, the version of the ODBC Driver
+  Manager (`SQL_DM_VER`) in the form the Driver Manager gives it, unset if it
+  does not give it without a connection.
 
 ## Where to Go Next
 
@@ -578,7 +606,10 @@ code without an error message come first.
   PostgreSQL worth knowing.
 - @{08-mysql.md|MySQL}: connecting, TLS, data types, parameters,
   transactions, several results and the behavior of MariaDB worth knowing.
+- @{09-odbc.md|ODBC}: connecting, text, data types, parameters,
+  transactions, statements on the server and the behavior of psqlODBC and
+  MariaDB Connector/ODBC worth knowing.
 - The reference of the modules @{luasql.oci8}, @{luasql.sqlite3},
-  @{luasql.duckdb}, @{luasql.firebird}, @{luasql.postgres} and
-  @{luasql.mysql} with every function.
+  @{luasql.duckdb}, @{luasql.firebird}, @{luasql.postgres}, @{luasql.mysql}
+  and @{luasql.odbc} with every function.
 - The examples, ready to run against your own database.

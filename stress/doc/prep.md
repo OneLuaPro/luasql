@@ -78,4 +78,4 @@ There is no state file: no setting of the server is changed. With `--keep` the h
 
 ## ODBC
 
-There is no module `prep/odbc_postgres.lua` or `prep/odbc_mariadb.lua`; the output shows `prep:   nothing to prepare for this DBMS`. The scenarios that run need no helper tables, and they create their own tables themselves. The test database, the users and the system DSNs are set up once by hand (see ODBC under [Preparing a Run](../README.md#preparing-a-run)).
+`prep/odbc_postgres.lua` and `prep/odbc_mariadb.lua` are the modules of the native backends (`prep/postgres.lua`, `prep/mysql.lua`): the DSNs connect to the same test databases, and the admin connection goes through the DSN as the admin user. They drop the tables of an aborted run and create the helper tables `luastress_err` and `luastress_dml` for `executeError` of [`errorPaths`](errorPaths.md) and `connDml` of [`params`](params.md); with PostgreSQL they belong to the test user, with MariaDB to `root`. The test database, the users and the system DSNs are set up once by hand (see ODBC under [Preparing a Run](../README.md#preparing-a-run)).

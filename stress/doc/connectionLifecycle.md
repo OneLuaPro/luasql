@@ -107,7 +107,7 @@ The test user has no rights outside its database, so MariaDB answers an unknown 
 
 ## ODBC
 
-A session is a row with the name of the test user, counted on the admin connection: `pg_stat_activity` (`backend_type = 'client backend'`, after a wait of 0.1 seconds in the same SQL text, as with the native driver) for `odbc_postgres`, `information_schema.PROCESSLIST` for `odbc_mariadb`. `SQLConnect` gives no application name, so a `psql` or `mariadb.exe` window of the test user counts as well: close such windows before the run. The only server counter is `open tx` (see [`cursorLifecycle`](cursorLifecycle.md)).
+A session is a row with the name of the test user, counted on the admin connection: `pg_stat_activity` (`backend_type = 'client backend'`, after a wait of 0.1 seconds in the same SQL text, as with the native driver) for `odbc_postgres`, `information_schema.PROCESSLIST` for `odbc_mariadb`. `SQLConnect` gives no application name, so a `psql` or `mariadb.exe` window of the test user counts as well: close such windows before the run. The server counters are `open tx` and `prepared` (see [`cursorLifecycle`](cursorLifecycle.md)).
 
 The connection goes through `env:connect(dsn, user, password)` with the system DSN of the target (`luatest_pg`, `luatest_mariadb`), so host, port and database cannot change. Connects that must fail:
 
@@ -117,3 +117,5 @@ The connection goes through `env:connect(dsn, user, password)` with the system D
 | `unknownDsn`  | Connects to a DSN `luastress_nodsn` that does not exist. | Pass: `nil` and the message of the Driver Manager, in the language of Windows; the pattern is its prefix `[Microsoft][ODBC Driver Manager]`. |
 
 The limit of `unknownUser` with `odbc_postgres`: psqlODBC Unicode gives no server text for a failed logon (wrong user, wrong password, unknown database), only `Error: SqlState=08001`: PostgreSQL sends the message before the logon in the encoding of the server, and the Unicode driver drops text it cannot read as UTF-8. The case passes if the message is that one and is reported as a known limitation. The test user is never used with a wrong password.
+
+With `odbc_mariadb` the process memory of the phases `connectClose`, `connectGc`, `connectScoped` and `envCycle` is a limit (`backend.memoryLimits`): Connector/ODBC 3.2.10 on Windows loses about 250 bytes per TLS connect inside Connector/C (Schannel, `ma_schannel_client_handshake` does not free the ClientHello buffer; MariaDB JIRA CONC-883, formerly ODBC-519), about +2.5 MB per 10 000 connects. The same holds for `laneLoop` of [`threads`](threads.md) and for [`soak`](soak.md). The Lua heap, the counters and the sessions are judged as before. Without TLS (a DSN with `FORCETLS` off, used for the probes) the phases are flat; the DSN of the suite keeps TLS on, so the leak stays visible.

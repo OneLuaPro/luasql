@@ -14,7 +14,8 @@ SQL statements and reads the results row by row. Start with the
 
 file = { '../../src/ls_oci8.c', '../../src/ls_sqlite3.c',
          '../../src/ls_duckdb.c', '../../src/ls_firebird.c',
-         '../../src/ls_postgres.c', '../../src/ls_mysql.c' }
+         '../../src/ls_postgres.c', '../../src/ls_mysql.c',
+         '../../src/ls_odbc.c' }
 topics = {
    'manual/01-introduction.md',
    'manual/02-prepared-statements.md',
@@ -24,6 +25,7 @@ topics = {
    'manual/06-firebird.md',
    'manual/07-postgres.md',
    'manual/08-mysql.md',
+   'manual/09-odbc.md',
 }
 examples = {
    'examples/oci8_basics.lua',
@@ -36,6 +38,7 @@ examples = {
    'examples/firebird_prepared.lua',
    'examples/postgres_prepared.lua',
    'examples/mysql_prepared.lua',
+   'examples/odbc_prepared.lua',
 }
 
 format = 'markdown'

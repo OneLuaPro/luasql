@@ -17,7 +17,7 @@ Each worker (the test connection and each thread) has its own range of ids, work
 | date and time           | every round           | four date and time values of the DBMS in one row (`backend.soakTypesQuery`)                                                               | a value is missing                                            |
 | DML                     | every round           | insert, update and delete of one row (DML, Data Manipulation Language) through prepared statements; commit in even, rollback in odd rounds                                  | a call fails, or the update does not report 1 row             |
 | invalid statement       | every round           | a statement that cannot be parsed                                                                                                         | it does not fail                                              |
-| failing fetch           | every round           | a query that fails in its 5th row, fetched until the error                                                                                | the fetch does not fail                                       |
+| failing fetch           | every round           | a query that fails in its 5th row, fetched until the error; left out with `backend.soakLimits.fetchError` (a reason, shown as a known limitation) | the fetch does not fail                                       |
 | cursor left to the GC   | every 25th round      | a cursor read once and dropped without closing, then a full garbage collection (GC)                                                       | a call fails                                                  |
 | second connection       | every 100th round     | opens another connection, runs a query and closes it                                                                                      | a call fails                                                  |
 | warning                 | every 100th round     | the statement with a compile error from scenario [`warnings`](warnings.md), if the backend has it, test connection only (DDL, Data Definition Language: one worker is enough) | it returns an error                                    |
@@ -36,7 +36,7 @@ Every 10 minutes a progress line shows the rounds and the latest sample. At the 
 
 | Line                          | Fails when                                                                                                                    |
 | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| private bytes (or rss)        | the robust slope after the warm-up is above 512 KB per hour                                                                   |
+| private bytes (or rss)        | the robust slope after the warm-up is above 512 KB per hour; with `backend.soakLimits.memory` (a reason) a known limitation    |
 | lua                           | the slope is above 64 KB per hour                                                                                             |
 | pga                           | the slope is above 256 KB per hour; admin connection and `backend.pgaQuery` only                                              |
 | counters                      | a counter is higher at the end than in the first sample after the warm-up; admin connection only                              |
@@ -167,3 +167,21 @@ A run of 4 hours (`lua stress.lua postgres soak --csv soak240-postgres.csv`) on 
 ## MariaDB
 
 The scenario runs with lanes: each worker changes rows of its own ids only. The table `luastress_soak` (InnoDB) has the types `INT` and `VARCHAR`; the date and time query reads `NOW(6)`, `CURRENT_TIMESTAMP`, `CURDATE()`, `CURTIME(6)` and `UTC_TIMESTAMP()`. The JSON value is built as in [`stmtLifecycle`](stmtLifecycle.md). An error of a round rolls back its statement only. The warning step is left out (see [`warnings`](warnings.md)), and there is no series `pga`. The server counters are `open tx` of the test session and `prepared`, which counts the statements of all sessions on the server (see [`stmtLifecycle`](stmtLifecycle.md)), the lanes included; both must stay the same from sample to sample.
+
+## ODBC
+
+The tables and queries are those of the native backends; the lanes connect through the DSN of the target. An error of a round rolls back its statement only with both targets (psqlODBC rolls back to a savepoint of its own), so the round needs no rollback after its errors. The warning step is left out (see [`warnings`](warnings.md)), and there is no series `pga`.
+
+Each round runs a new SQL text through `conn:execute` (the offset query with the number of the round). With `odbc_mariadb` the round leaves the failing query out (`backend.soakLimits.fetchError`, shown as a known limitation): after a query that fails while Connector/ODBC 3.2.10 stores its result, its full statement cache no longer evicts, and from about round 250 every new text would fail with `Could not deallocate query` (fault A, see [`README.md`](../README.md#odbc-2)). [`errorPaths`](errorPaths.md) covers the failing query.
+
+The server counters are `open tx` and `prepared`: with `odbc_postgres` the prepared statements of the test session, which works with autocommit off and keeps the seven statements of the round (`open tx 1`, `prepared 7`); with `odbc_mariadb` the bound `prepared beyond cache` (see [`stmtLifecycle`](stmtLifecycle.md)). Both must stay the same from sample to sample.
+
+With `odbc_mariadb` the private bytes are a limit (`backend.soakLimits.memory`): the second connection every 100 rounds, on the test connection and in each lane, connects through TLS, and Connector/C loses about 250 bytes per TLS connect (MariaDB JIRA CONC-883, see [`connectionLifecycle`](connectionLifecycle.md#odbc)). The Lua heap, the counters and the sessions stay judged.
+
+| Run                                         | Result |
+| ------------------------------------------- | ------ |
+| `odbc_postgres`, 120 min, 23 November 2026   | 1.38 million rounds on the test connection (192 per second), 2.75 million in 2 lanes; private bytes 8140 KB after 10 minutes, 8124 KB at the end, slope +0 KB per hour; Lua heap 555 KB, slope 0; `open tx 1 -> 1`, `prepared 7 -> 7` |
+| `odbc_mariadb`, 120 min, 24 November 2026    | 2.90 million rounds on the test connection (403 per second), 5.79 million in 2 lanes; private bytes 20 644 KB after 10 minutes, 38 500 KB at the end, slope +9645 KB per hour: 86 858 connects, about 227 bytes each (CONC-883); Lua heap 555 KB, slope 0; counters and sessions unchanged |
+| `odbc_mariadb` without TLS, 20 min, 24 November 2026 | 0.48 million rounds on the test connection (397 per second), 0.94 million in 2 lanes; private bytes 19 760 KB after 10 minutes, 18 876 KB at the end, slope -1344 KB per hour; Lua heap 492 KB, slope 0 |
+
+The private bytes of `odbc_mariadb` rise to about 19 MB in the first minutes, also without TLS, against about 8 MB with `odbc_postgres`; after that they are flat without TLS. Where the higher level comes from is not checked.

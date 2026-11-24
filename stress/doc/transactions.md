@@ -21,7 +21,7 @@ Each case runs once. Every case starts with autocommit on, no open transaction a
 | `errorKeepsWork`      | Autocommit off: inserts row 1, inserts row 1 again (duplicate key), inserts row 2, commits.                                                                                  | Pass: the duplicate fails, rows 1 and 2 are there: a failed statement undoes only itself. Limit: the DBMS aborts the whole transaction at the error (`transactionLimits.errorAborts`, DuckDB); then the insert of row 2 must fail, `commit()` must give `false` and a message, and neither row may be committed. Fail: the duplicate is accepted, a row is lost, or with the limit `commit()` gives another result or keeps a row. |
 | `errorThenRollback`   | Autocommit off: inserts row 1, a duplicate fails, `conn:rollback()`.                                                                                                         | Pass: row 1 is gone. Fail: it is still there.                                                                                                                 |
 | `ddlCommits`          | Autocommit off: inserts a row, runs DDL (`CREATE TABLE`), rolls back.                                                                                                        | Pass: the row is gone (SQLite: DDL is part of the transaction). Limit (Oracle): Oracle commits an open transaction implicitly at DDL, also with autocommit off; the row stays. |
-| `savepoint`           | Autocommit off: inserts row 1, sets a savepoint, inserts row 2, rolls back to the savepoint, commits.                                                                        | Pass: row 1 is there, row 2 is not. Fail: otherwise.                                                                                                          |
+| `savepoint`           | Autocommit off: inserts row 1, sets a savepoint, inserts row 2, rolls back to the savepoint, commits.                                                                        | Pass: row 1 is there, row 2 is not. Limit: the rollback to the savepoint fails with the error of `transactionLimits.savepoint`, a client library that loses the savepoint of the user (psqlODBC). Fail: otherwise. |
 | `stmtAcrossCommit`    | Autocommit off: one prepared insert, executed for row 1, commit, row 2, rollback, row 3, commit.                                                                             | Pass: the statement stays usable across `commit()` and `rollback()`; rows 1 and 3 are there, row 2 is not. Fail: an error or wrong rows.                     |
 | `rowCounts`           | Row counts of `conn:execute`: insert (1), `INSERT ... SELECT` (5), update of all rows (6), update of no row (0), delete (3); of `stmt:execute`: insert (1), delete of no row (0), delete (3). | Pass: every count is right, also 0. Fail: a wrong count.                                                                                                      |
 | `rowCountType`        | The row count of an insert through `conn:execute` and through `stmt:execute`.                                                                                                | Pass: both are Lua integers. Limit (SQLite): floats with an integral value, `backend.rowCountFloat`. Fail: a float or another type.                          |
@@ -74,3 +74,23 @@ The table is `luastress_tx (id integer PRIMARY KEY, v varchar(100))`. "Another s
 The table is `luastress_tx (id INT PRIMARY KEY, v VARCHAR(100))`, InnoDB. "Another session" is the admin connection in autocommit mode, in the same database; each of its statements sees what is committed. The counter of open transactions is the server counter `open tx`, `@@in_transaction` of the test session (see [`cursorLifecycle`](cursorLifecycle.md)).
 
 `enableAutocommit` is a limit: `setautocommit(true)` of `luasql.mysql` rolls back the open transaction, as in `luasql.oci8`, `luasql.sqlite3`, `luasql.duckdb`, `luasql.firebird` and `luasql.postgres` (the server alone would commit it). `errorKeepsWork` passes: an ordinary error rolls back its statement only. `ddlCommits` is a limit: MariaDB commits an open transaction implicitly at DDL, also with autocommit off, so the row of the case survives the rollback. `savepoint` runs with `SAVEPOINT` and `ROLLBACK TO SAVEPOINT`. `plsqlAutocommit` runs a compound statement (`BEGIN NOT ATOMIC INSERT ...; END`). Row counts are integers.
+
+## ODBC
+
+The tables and statements are those of the native backends. `enableAutocommit` is a limit with both targets: `setautocommit(true)` of `luasql.odbc` rolls back the open transaction, as the other drivers of LuaSQL do (ODBC itself would commit it).
+
+With `odbc_postgres`, `errorKeepsWork` passes: psqlODBC (its default `Protocol`) sets a savepoint of its own (`_EXEC_SVP_...`) before each statement of a transaction and rolls back a failed statement to it, so the transaction goes on. DDL is part of the transaction: `ddlCommits` passes. `savepoint` is a limit (`transactionLimits.savepoint`): psqlODBC releases its savepoint of a statement only before the next statement, and `RELEASE` also removes every savepoint set after it, so the savepoint of the user is gone and `ROLLBACK TO SAVEPOINT luastress` gives `savepoint "luastress" does not exist`. The server log of the case shows it:
+
+```
+BEGIN
+SAVEPOINT _EXEC_SVP_...                          (psqlODBC)
+INSERT INTO luastress_tx (id, v) VALUES (1, 'x')
+SAVEPOINT luastress                              (the case)
+RELEASE _EXEC_SVP_...;SAVEPOINT _EXEC_SVP_...    (psqlODBC)
+INSERT INTO luastress_tx (id, v) VALUES (2, 'x')
+ROLLBACK TO SAVEPOINT luastress                  -> does not exist
+```
+
+Whether psqlODBC sets its savepoint before the first statement of a transaction depends on what the connection did before: the same statements on a new connection pass. `plsqlAutocommit` runs a block of PL/pgSQL (`DO`).
+
+With `odbc_mariadb` the cases behave as with `luasql.mysql`: `errorKeepsWork` passes, `ddlCommits` is a limit, `savepoint` passes, and `plsqlAutocommit` runs a compound statement (`BEGIN NOT ATOMIC ...; END`) through the prepare of Connector/ODBC. Row counts are integers with both targets.

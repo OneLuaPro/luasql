@@ -19,7 +19,10 @@
 --                        commit() must give false and a message
 --   errorThenRollback    rollback() after a failed statement undoes all
 --   ddlCommits           DDL with an open transaction
---   savepoint            rollback to a savepoint
+--   savepoint            rollback to a savepoint; a limit if the
+--                        rollback fails with the error of
+--                        backend.transactionLimits.savepoint (a client
+--                        library that loses the savepoint of the user)
 --   stmtAcrossCommit     a prepared statement stays usable across
 --                        commit() and rollback()
 --   rowCounts            row counts of INSERT, UPDATE, DELETE, also 0
@@ -291,13 +294,24 @@ local function ddlCommits(ctx)
    end
 end
 
+-- A client library that loses the savepoint of the user
+-- (transactionLimits.savepoint, e.g. psqlODBC with its own savepoint
+-- per statement) makes the rollback to it fail with its error: a limit.
 local function savepoint(ctx)
    local conn = ctx.testConn
    setAutocommit(conn, false)
    insertRow(ctx, conn, 1)
    exec(conn, ctx.backend.txSavepoint, "savepoint")
    insertRow(ctx, conn, 2)
-   exec(conn, ctx.backend.txRollbackToSavepoint, "rollback to savepoint")
+   local limit = (ctx.backend.transactionLimits or {}).savepoint
+   local result, err = conn:execute(ctx.backend.txRollbackToSavepoint)
+   if result == nil and limit and tostring(err):find(limit.error) then
+      return "limit", limit.reason
+   end
+   check(result, err, "rollback to savepoint")
+   if type(result) ~= "number" then
+      result:close()
+   end
    commit(conn)
    expect(countOwn(ctx, 1) == 1, "row before the savepoint lost")
    expect(countOwn(ctx, 2) == 0, "row after the savepoint kept")

@@ -12,6 +12,11 @@
 --   warnings              true to also run the compile error statement
 --                         (DDL; only one worker should)
 -- Every call raises an error on failure.
+--
+-- backend.soakLimits.fetchError (a reason) leaves the failing query
+-- (fetchErrorQuery) out of the round, for a client library that cannot
+-- run many rounds after it; scenario soak reports the reason as a known
+-- limitation.
 
 local dbutil = require("dbutil")
 local laneconn = require("laneconn")
@@ -195,18 +200,20 @@ function soakRound.run(worker, i)
    expect(bad == nil and type(badErr) == "string",
           "invalid statement did not fail")
    afterError(conn, backend)
-   cur = conn:execute(backend.fetchErrorQuery)
-   if cur then
-      local rows = 0
-      row, err = cur:fetch({})
-      while row ~= nil and rows < 20 do
-         rows = rows + 1
+   if not (backend.soakLimits or {}).fetchError then
+      cur = conn:execute(backend.fetchErrorQuery)
+      if cur then
+         local rows = 0
          row, err = cur:fetch({})
+         while row ~= nil and rows < 20 do
+            rows = rows + 1
+            row, err = cur:fetch({})
+         end
+         expect(err ~= nil, "failing fetch did not fail")
+         pcall(cur.close, cur)
       end
-      expect(err ~= nil, "failing fetch did not fail")
-      pcall(cur.close, cur)
+      afterError(conn, backend)
    end
-   afterError(conn, backend)
 
    -- A cursor left to the GC, collected right away so open_cursors is
    -- never reached.

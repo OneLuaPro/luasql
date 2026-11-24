@@ -12,7 +12,7 @@ The suite is written for several DBMS. Everything specific to one DBMS lives in 
 | `luasql.mysql`    | MariaDB/MySQL           | available |
 | `luasql.duckdb`   | DuckDB                  | available |
 | `luasql.firebird` | Firebird                | available |
-| `luasql.odbc`     | PostgreSQL (psqlODBC), MariaDB (Connector/ODBC) | available, without prepared statements |
+| `luasql.odbc`     | PostgreSQL (psqlODBC), MariaDB (Connector/ODBC) | available |
 
 Many scenarios depend on prepared statements (`conn:prepare`, `stmt:execute`), which most LuaSQL drivers do not offer yet. The suite detects this at run time and skips what it cannot test, so it can serve as the acceptance test for prepared statements once a driver gets them. The suite was written alongside the further development of [LuaSQL](https://github.com/OneLuaPro/luasql) for [OneLuaPro](https://github.com/OneLuaPro) and relies on its extensions (prepared statements, `stmt:reset()`, `conn:setoption()`); it does not necessarily work with the official LuaSQL release of the [Lunar Modules project](https://github.com/lunarmodules/luasql).
 
@@ -386,7 +386,7 @@ On Linux: `mariadb-tzinfo-to-sql /usr/share/zoneinfo | mariadb -u root -p mysql`
 
 **Targets:** one backend per target, chosen by its name on the command line: `odbc_postgres` (PostgreSQL through psqlODBC) and `odbc_mariadb` (MariaDB through Connector/ODBC). A further target is a further pair of files `config/odbc_<target>.lua` and `backend/odbc_<target>.lua`; the scenarios do not change.
 
-**Data source:** a system DSN (Data Source Name) without user and password, whose name is fixed in the backend: `luatest_pg` for `odbc_postgres` (psqlODBC Unicode, `BoolsAsChar=0`, `LFConversion=0`) and `luatest_mariadb` for `odbc_mariadb` (Connector/ODBC, `CHARSET=utf8mb4`; without it text arrives double encoded). They are the DSNs of the functional test `checks/odbc.lua`. Host, port, database and encryption are those of the DSN. The suite connects with `env:connect(dsn, user, password)`, i.e. through `SQLConnect`; it never builds a connection string, so no password ends up in one.
+**Data source:** a system DSN (Data Source Name) without user and password, whose name is fixed in the backend: `luatest_pg` for `odbc_postgres` (psqlODBC Unicode, `BoolsAsChar=0`, `LFConversion=0`) and `luatest_mariadb` for `odbc_mariadb` (Connector/ODBC, `CHARSET=utf8mb4`, without which text arrives double encoded; TLS on; `PS cache size` at its default, 250). They are the DSNs of the functional test `checks/odbc.lua`. Host, port, database and encryption are those of the DSN. The suite connects with `env:connect(dsn, user, password)`, i.e. through `SQLConnect`; it never builds a connection string, so no password ends up in one.
 
 **Connection data:** from the environment variables of the native backend of the same DBMS, user and password only; the variables for host, port and database are not read.
 
@@ -405,7 +405,7 @@ Set them as shown for [PostgreSQL](#postgresql) and [MariaDB](#mariadb). The adm
 
 **Rights of the database users and the database itself:** as for the native drivers, see [PostgreSQL](#postgresql) and [MariaDB](#mariadb) above: the same database `luatest`, the same users. The suite recognizes errors of the server by their English text, so `lc_messages = 'C'` is set for the PostgreSQL test database as there.
 
-**Preparation:** the preparation step has nothing to do for ODBC (`prep: nothing to prepare for this DBMS`): the scenarios that run need no helper tables.
+**Preparation:** the preparation step is that of the native driver of the DBMS: `prep/odbc_postgres.lua` and `prep/odbc_mariadb.lua` run `prep/postgres.lua` and `prep/mysql.lua` on the admin connection. They drop the tables of an aborted run and create the helper tables `luastress_err` and `luastress_dml` for `executeError` of `errorPaths` and `connDml` of `params`; without the admin connection these phases fail (see [`doc/prep.md`](doc/prep.md)).
 
 ## Running
 
@@ -552,6 +552,7 @@ Exit codes: 0 all scenarios passed (limits do not count), 1 a scenario or the cl
 - **`Data source name not found`** (or its translation, `[Microsoft][ODBC Driver Manager]` in front) before the first scenario: the system DSN of the target (`luatest_pg`, `luatest_mariadb`) does not exist in the ODBC administrator of the bitness of the Lua interpreter (a 64-bit Lua needs a 64-bit DSN).
 - **`Error: SqlState=08001`** from `odbc_postgres` before the first scenario: user, password, database or server of the DSN. psqlODBC Unicode gives no server text for a failed logon, see [DBMS-Specific Notes](#odbc-2); look into the log of the server.
 - **`Access denied for user ...`** from `odbc_mariadb`: user or password of the test or admin connection.
+- **`Could not deallocate query`** from `odbc_mariadb`: a fault of Connector/ODBC 3.2.10 after a query that fails while the driver stores its result (see [DBMS-Specific Notes](#odbc-2)); check that `PS cache size` of `luatest_mariadb` is 250 (with 0 `errorPaths` fails) and that the backend has `soakLimits.fetchError`.
 - **Other errors before the first scenario, `FAILED` with messages in another language, wrong numbers of sessions, a hang, an aborted run:** as for the native driver of the DBMS, see [PostgreSQL](#postgresql-1) and [MariaDB](#mariadb-1) above; the causes are the same.
 
 
@@ -841,28 +842,29 @@ Tested with Firebird 5.0.4 (SuperServer) on Windows 10 and the `luasql.firebird`
 
 ### ODBC
 
-Tested with the targets `odbc_postgres` (PostgreSQL 18.7, psqlODBC Unicode) and `odbc_mariadb` (MariaDB 12.3.4, MariaDB Connector/ODBC 3.2.10) on Windows 10, through the Driver Manager of Windows and the `luasql.odbc` of OneLuaPro (task `core-odbc`). The backends are small: `luasql.odbc` has `conn:prepare`, but no `luasql.type` and no typed parameters yet; it binds plain values by position, a Lua number as a `double`. The suite runs what needs no typed parameters and skips the rest with the reason `no bind API (conn:prepare and luasql.type)`; those scenarios come with the task `bindapi-odbc` (see the list below).
+Tested with the targets `odbc_postgres` (PostgreSQL 18.7, psqlODBC Unicode) and `odbc_mariadb` (MariaDB 12.3.4, MariaDB Connector/ODBC 3.2.10) on Windows 10, through the Driver Manager of Windows and the `luasql.odbc` of OneLuaPro. `luasql.odbc` has prepared statements with `?` by position and typed parameters (`luasql.type`, task `bindapi-odbc`) and no driver options, so the suite runs all scenarios except `prefetch` and `warnings`, and `errorPaths` without `badColumnType` (see below). Tier smoke takes about 2½ minutes with `odbc_postgres` and about 1½ minutes with `odbc_mariadb`, tier nightly about 1½ hours and about ¾ hour (23 November 2026).
 
-**Scenarios and phases that run:** `cursorLifecycle` (all phases and `commitCursor`), `errorPaths` (`sqlError`, `fetchError`, `openError`, `stmtMisuse`, `useAfterClose`, `emptyStatement`), `connectionLifecycle` (all cases, with `connectionExit`) and `connectionLoss` (all cases except two, see below).
-
-**Skipped with ODBC for now:**
-
-| Scenario, phase or case | Reason |
-| ---- | ---- |
-| `stmtLifecycle`, `params`, `concurrency`, `threads`, `dataTypes`, `transactions`, `volume`, `soak` | no bind API (`conn:prepare` and `luasql.type`): they pass typed parameters. |
-| `errorPaths`, `executeError` | the same. |
-| `connectionLoss`, `killWithStmt` and `killStmtCursor` | the same. |
-| `errorPaths`, `badColumnType` | the backend has no `unsupportedTypeQuery` yet; not checked with the vendor drivers. |
-| `prefetch` | `luasql.odbc` has no driver options. |
-| `warnings` | no warnings of this kind (the backend has none of its keys). |
-
-**Connections:** through `SQLConnect` with the DSN, user and password (see [Preparing a Run](#odbc)). Host, port and database belong to the DSN, so the connects that must fail are an unknown user and an unknown DSN; there is no `closedPort` and no `unknownDatabase`.
+**Connections:** through `SQLConnect` with the DSN, user and password (see [Preparing a Run](#odbc)). Host, port and database belong to the DSN, so the connects that must fail are an unknown user and an unknown DSN; there is no `closedPort` and no `unknownDatabase`. The lanes of `threads` and `soak` connect through the same DSN.
 
 **The whole result on the client:** psqlODBC and Connector/ODBC give the whole result of a query to the client at the execute. An error in any row of a result comes at the execute, not at a fetch; a cursor reads on after `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)` (`cursorsSurviveEnd`), and after the session was killed it gives all its rows and ends normally (`resultOnClient`). The server keeps no cursor, so there is no server counter of open cursors.
 
-**What a connection holds:** the only server counter is `open tx`, the open transaction of the test session: with PostgreSQL the state in `pg_stat_activity` (`idle in transaction`, also `(aborted)`), with MariaDB `@@in_transaction` of the session, read on the test connection. With autocommit on it is 0 before every phase. A counter of prepared statements of the server is not read: whether the vendor drivers prepare on the server is not checked; it comes with `bindapi-odbc`.
+**What a connection holds:** the server counters are `open tx`, the open transaction of the test session (with PostgreSQL the state in `pg_stat_activity`, with MariaDB `@@in_transaction` of the session, read on the test connection; with autocommit on it is 0 before every phase), and `prepared`:
+
+- `odbc_postgres`: the rows of `pg_prepared_statements` of the test session, read on the test connection, without the query that counts, which is itself prepared while it runs. psqlODBC (`UseServerSidePrepare=1`, its default) prepares a statement on the server at its first execute and drops it at `stmt:close()` and when the garbage collector closes it; `conn:execute` leaves none behind.
+- `odbc_mariadb`: a bound, `prepared beyond cache`. Connector/ODBC prepares on the server at `SQLPrepare`, also for `conn:execute`, and keeps up to 250 freed statements per connection in its cache (see below), so there is no count per statement: the counter is what `Prepared_stmt_count` of the global status holds beyond 250 per session of the server, read on the admin connection; it must be 0 before every phase and may not grow.
 
 **Sessions:** counted by the name of the test user (no `application_name`: `SQLConnect` gives none), so a `psql` or `mariadb.exe` window of the test user counts as well; close such windows before the run.
+
+**The statement cache of Connector/ODBC:** Connector/ODBC keeps a statement in a cache of its connection after it is freed, also the statement of `conn:execute` (option `PSCACHESIZE`, "PS cache size" in the dialog of the DSN, 250 by default; the oldest one is closed when the cache is full). The suite runs with the default, as users get it. Connector/ODBC 3.2.10 has two faults after a query that fails while the driver stores its result, e.g. error 1242 (a subquery that gives two rows, the `fetchErrorQuery` of the backend); both give `Could not deallocate query` (probe `odbcprobe-pscache.lua`, 600 iterations with a new SQL text each):
+
+- A, with the cache on: the full cache no longer evicts. From then on every new SQL text fails, also `SELECT 1`, and every failed statement stays on the server (352 of 600 texts failed, `Prepared_stmt_count` 602 after 600). The round of `soak` runs a new text in every round, so with the failing query in it the scenario fails after about 250 rounds; the backend leaves the failing query out of the round (`soakLimits.fetchError`, a known limitation).
+- B, with the cache off (`PS cache size` 0): once a prepared statement of that text has run, the text cannot run again on the connection, neither through the statement nor through `conn:execute`; every attempt fails and leaves a statement on the server (599 of 600). In `errorPaths`, phase `fetchError` (the failing query in turn as a prepared statement and through `conn:execute`), the next prepare then broke the whole connection.
+
+Without such a failing query the cache stays at 250 without an error. `errorPaths` runs the failing query many times with one SQL text and passes with the default. These are faults of Connector/ODBC, not of `luasql.odbc`, which frees the statement with `SQLFreeHandle` and may execute a prepared statement again after a failed execute, as the ODBC specification allows. A program with more than 250 different SQL texts meets A after one such error.
+
+**Transactions:** psqlODBC (its default `Protocol`, a rollback per statement) sets a savepoint of its own (`_EXEC_SVP_...`) before each statement of a transaction and rolls back a failed statement to it, so the transaction goes on after an error: unlike with `luasql.postgres`, `errorKeepsWork` of `transactions`, `lockNowait` of `concurrency` and `deadlock` of `threads` need no limit. It releases that savepoint only before the next statement, and `RELEASE` also removes every savepoint set after it, so a `SAVEPOINT` of the user is lost (limit `savepoint`, seen in the server log of the run). With MariaDB the transactions are those of `luasql.mysql`: an ordinary error rolls back the statement only, a deadlock the whole transaction, DDL commits the open transaction. `luasql.odbc` cannot report a transaction that the DBMS has rolled back: after a deadlock the commit of the victim returns `true` (`luasql.mysql` returns `false`). `conn:setautocommit(true)` rolls back an open transaction, as in the other drivers of LuaSQL.
+
+**Parameters:** the placeholder is `?`, by position only; names are not supported. `luasql.odbc` binds an integer as `SQL_BIGINT`, a float as `SQL_DOUBLE`, a string as `SQL_VARCHAR` (above 8000 bytes `SQL_LONGVARCHAR`), a boolean as `SQL_BIT` (`1` or `0` in a text column), `luasql.type.binary` as `SQL_LONGVARBINARY` and `luasql.type.time` as text; the server converts the value to the type of its place, so the queries of the backends cast where they need one type. A string with a zero byte gives `nil` and a message of the driver with every vendor driver. `luasql.odbc` counts the placeholders (`SQLNumParams`), also for `conn:execute`: `conn:execute(sql)` without values for a statement with placeholders gives `LuaSQL: statement has 1 parameter, 0 given`.
 
 **After a lost connection:** the first call that ends a transaction with open work, `conn:commit()`, `conn:rollback()` or `conn:setautocommit(true)`, returns `false` and a message; `conn:execute` returns `nil` and a message. Without open work `commit` and `rollback` return `true`. The messages:
 
@@ -875,7 +877,7 @@ With MariaDB every later call that ends a transaction keeps failing, so `killThe
 
 **Empty statement:** `emptyStatement` is an empty text. psqlODBC accepts it and gives the row count -1 (`SQLRowCount`; `luasql.postgres` gives 0), also prepared. Connector/ODBC rejects it with `Syntax error or access violation`, through `conn:execute` and `conn:prepare`.
 
-**Messages:** the Driver Manager gives its own messages in the language of Windows, so the patterns look for its prefix `[Microsoft][ODBC Driver Manager]`; the SQLSTATE is not part of a message of `luasql.odbc`. The messages of the servers are those of the native drivers.
+**Messages:** the Driver Manager gives its own messages in the language of Windows, so the patterns look for its prefix `[Microsoft][ODBC Driver Manager]`; the SQLSTATE is not part of a message of `luasql.odbc`. The messages of the servers are those of the native drivers; Connector/ODBC puts its version and that of the server in front (`[ma-3.2.10][12.3.4-MariaDB]`).
 
 **Known limitations**, reported as "limit":
 
@@ -883,15 +885,24 @@ With MariaDB every later call that ends a transaction keeps failing, so `killThe
 | ---- | ---- | ---- |
 | `endAfterKill` | `connectionLoss`, `killThenAutocommit` (`odbc_postgres`) | After the first failed call psqlODBC takes the transaction of a lost connection as ended: `conn:setautocommit(true)`, `conn:rollback()` and `conn:commit()` return `true` without calling the server (probe `odbcprobe-kill2.lua`; the work is lost). |
 | `unknownUser` | `connectionLifecycle`, `unknownUser` (`odbc_postgres`) | psqlODBC Unicode gives no server text for a failed logon, only `Error: SqlState=08001`: PostgreSQL sends the message before the logon in the encoding of the server, and the Unicode driver drops text it cannot read as UTF-8. The case passes if the message is that one. |
+| memory | `connectionLifecycle`, `connectClose`, `connectGc`, `connectScoped`, `envCycle`; `threads`, `laneLoop`; `soak` (`odbc_mariadb`) | Connector/ODBC 3.2.10 on Windows leaks about 250 bytes per TLS connect inside Connector/C (Schannel, `ma_schannel_client_handshake` does not free the ClientHello buffer; MariaDB JIRA CONC-883, formerly ODBC-519). With `FORCETLS=1` this gives about +2.5 MB per 10 000 connects; `laneLoop` connects 8 times per iteration (+1.4 MB in nightly), and `soak` opens a second connection every 100 rounds (about +9.6 MB per hour). The phases carry a limit in `memoryLimits`, the soak in `soakLimits.memory` (`backend/odbc_mariadb.lua`); the Lua heap, the counters and the sessions stay judged. Without TLS (`FORCETLS` off) the phases and the soak are flat (24 November 2026). `connectionLoss`, `killLoop` and `killFetchLoop` connect too, but stay below the limit and are judged. Not `luasql.odbc`: the soak of `odbc_postgres` runs the same code without growth. |
+| `deadlock` | `threads`, `deadlock` (`odbc_mariadb`) | InnoDB rolls back the whole transaction of the victim of a deadlock, which frees its locks: the other session gets its row at once; `luasql.odbc` cannot report it, the commit of the victim returns `true`. |
+| `enableAutocommit` | `transactions`, `enableAutocommit` (both) | `setautocommit(true)` of `luasql.odbc` rolls back an open transaction, as the other drivers of LuaSQL; ODBC itself would commit it. |
+| `ddlCommits` | `transactions`, `ddlCommits` (`odbc_mariadb`) | MariaDB commits an open transaction implicitly at DDL, also with autocommit off. |
+| `fetchError` | `soak` (`odbc_mariadb`) | Fault A of Connector/ODBC 3.2.10: after a query that fails while its result is stored, the full statement cache no longer evicts and every new SQL text fails with `Could not deallocate query`. The round runs a new text in every round, so it leaves the failing query out (`soakLimits.fetchError`); `errorPaths` covers it. |
+| Faults A and B | not reported as a limit (`odbc_mariadb`) | Connector/ODBC 3.2.10 after a query that fails while its result is stored: A, with the statement cache on, the full cache no longer evicts and every new SQL text fails; B, with the cache off, the text cannot run again on the connection once a prepared statement of it has run. Both leave statements on the server. See the statement cache above; the suite runs with the default cache, where only A applies, and only to `soak`. |
+| `savepoint` | `transactions`, `savepoint` (`odbc_postgres`) | psqlODBC releases its own savepoint of a statement only before the next statement, and `RELEASE` also removes the savepoint of the user set after it: `ROLLBACK TO SAVEPOINT` gives `savepoint "luastress" does not exist`. |
+| types | `dataTypes`, 44 cases (`odbc_postgres`), 25 cases (`odbc_mariadb`) | As with the native drivers (column `n` is a double, years before Christ, lengths in characters, no NaN in MariaDB, `CHAR` without its spaces, duplicate keys in JSON, `BOOLEAN` of MariaDB an integer), and from the vendor drivers and `luasql.odbc`: psqlODBC gives a timestamp with time zone without its offset, `luasql.type.time` goes as text, a zero byte in text is refused; the lists are in [`doc/dataTypes-odbc_postgres.md`](doc/dataTypes-odbc_postgres.md) and [`doc/dataTypes-odbc_mariadb.md`](doc/dataTypes-odbc_mariadb.md). |
 
 **Behavior worth knowing**, checked but not reported as limit:
 
 - A message of `luasql.odbc` holds all diagnostic records of ODBC, separated by a line end: psqlODBC gives e.g. `ERROR: division by zero;` and `Error while executing the query` as two records.
 - A DDL statement gives the row count -1 with psqlODBC and 0 with Connector/ODBC.
-- `BIGINT UNSIGNED` and `DECIMAL` of MariaDB come as text.
+- `BIGINT UNSIGNED` and `DECIMAL` of MariaDB and `numeric` of PostgreSQL come as text.
+- With MariaDB an error of class `01` looks like success: in strict mode the server refuses a value it would have to cut (error 1265, SQLSTATE `01000`), Connector/ODBC takes it as a warning, and `luasql.odbc` drops warnings, so `execute` returns 0 rows without a message. The suite does not run into it: `connDml` of `params` sends a text that does not start with a digit (`x5`), which gives error 1366.
+- A compound statement of MariaDB (`BEGIN NOT ATOMIC ...; END`) runs through the prepare of Connector/ODBC.
 
-**Not covered with ODBC yet:** everything in the table of the skipped scenarios; the type cases of `dataTypes` per target (no files `doc/dataTypes-odbc_*.md` yet); `volume` with a full database; a counter of prepared statements.
-
+**Not covered with ODBC yet:** `prefetch` (`luasql.odbc` has no driver options), `warnings` (`luasql.odbc` drops warnings; the backends have none of its keys), the named parameters of `params` (ODBC has positions only), `badColumnType` of `errorPaths` (`luasql.odbc` reads every type, a type it does not read by type as the text of the vendor driver), the cases of `volume` with a full tablespace and `maxLength`, the WAL cases of `concurrency` (SQLite only), the cases of `dataTypes` for intervals, row ids, hex text in binary columns and unsupported types, and with MariaDB a timestamp with its own offset (see the files `doc/dataTypes-odbc_*.md`), the failing query in the round of `soak` with `odbc_mariadb` (fault A), the statement cache of Connector/ODBC turned off (fault B), and other vendor drivers.
 
 ## Annex
 

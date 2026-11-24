@@ -88,7 +88,9 @@ local function value(con, sql, ...)
    local cur, err = con:execute(sql, ...)
    if cur == nil then error(tostring(err), 0) end
    local v = cur:fetch()
-   if v ~= nil then cur:close() end
+   -- also when the value is NULL; after an empty result the cursor is
+   -- closed already and close only returns false
+   cur:close()
    return v
 end
 
@@ -144,6 +146,10 @@ local function count(con, where)
    local sql = "SELECT COUNT(*) FROM luasql_test"
    if where then sql = sql .. " WHERE " .. where end
    return value(con, sql)
+end
+
+local function count_bind(con, id)
+   return value(con, "SELECT COUNT(*) FROM luasql_bind WHERE id = " .. id)
 end
 
 ----------------------------------------------------------------------------
@@ -479,14 +485,16 @@ local function errors()
    end
 end
 
--- the statement of conn:execute and the bindings after a failure
+-- the statement of conn:execute and the values after a failure
 local function statements()
    local c = connect()
-   local res, err = c:execute("SELECT ?", print)
-   check("a parameter that cannot be bound: nil and a message",
-         res == nil, err)
-   res, err = c:execute("SELECT * FROM luasql_no_such_table")
+   check("a parameter that cannot be bound raises",
+         has(raised(c.execute, c, "SELECT ?", print), "cannot be bound"))
+   local res, err = c:execute("SELECT * FROM luasql_no_such_table")
    check("a failing conn:execute: nil and a message", res == nil, err)
+   res, err = c:execute("SELECT ?", "a\0b")
+   check("a failing binding in conn:execute: nil and a message",
+         res == nil, err)
    check("no statement of conn:execute stays open: close gives true",
          c:close() == true)
 
@@ -498,18 +506,315 @@ local function statements()
    local x, y = cur:fetch()
    cur:close()
    check("a prepared statement with two parameters", x == 1 and y == 2)
-   res, err = stmt:execute(3, print)
-   check("binding fails at the second parameter: nil and a message",
-         res == nil, err)
-   res, err = stmt:execute()
-   check("after it no parameter is bound: nil and a message",
-         res == nil, err)
-   if type(res) == "userdata" then res:close() end
+   check("a parameter that cannot be bound raises in stmt:execute",
+         raised(stmt.execute, stmt, 3, print) ~= nil)
+   cur = assert(stmt:execute())
+   x, y = cur:fetch()
+   cur:close()
+   check("after it the values given before are kept", x == 1 and y == 2,
+         tostring(x) .. " " .. tostring(y))
    cur = assert(stmt:execute(4, 5))
    x, y = cur:fetch()
    cur:close()
    check("the statement works again", x == 4 and y == 5)
+   cur = assert(c:execute(sql, 6, 7))
+   x, y = cur:fetch()
+   check("conn:execute with parameters gives a cursor", x == 6 and y == 7)
+   local ok, msg = c:close()
+   check("... whose hidden statement keeps the connection open",
+         ok == false, msg)
+   cur:close()
    stmt:close()
+   check("conn:close after the cursor: true", c:close() == true)
+end
+
+-- the table of the binding tests
+local function make_bind(con)
+   run(con, "DROP TABLE IF EXISTS luasql_bind")
+   if PG then
+      run(con, [[CREATE TABLE luasql_bind (id INTEGER PRIMARY KEY,
+         i8 BIGINT, nu NUMERIC(20,2), db DOUBLE PRECISION, bo BOOLEAN,
+         tx TEXT, bn BYTEA, dt DATE, ts TIMESTAMP(6), tm TIME(6))]])
+   else
+      run(con, [[CREATE TABLE luasql_bind (id INT PRIMARY KEY, i8 BIGINT,
+         nu DECIMAL(20,2), db DOUBLE, bo TINYINT(1), tx MEDIUMTEXT,
+         bn LONGBLOB, dt DATE, ts DATETIME(6), tm TIME(6))]])
+   end
+end
+
+-- the text of a column as the server writes it
+local function server_text(con, column, id)
+   return value(con, "SELECT CAST(" .. column .. " AS "
+                   .. (PG and "TEXT" or "CHAR") .. ") FROM luasql_bind "
+                   .. "WHERE id = " .. id)
+end
+
+-- the values of B2 and B5 through stmt:execute, checked on the server
+local function binding()
+   local con = ctx.con()
+   local T = luasql.type
+   make_bind(con)
+   local id = 0
+   -- inserts one value into a column; returns the id, or nil and the
+   -- message
+   local function put(column, v)
+      id = id + 1
+      local stmt = assert(con:prepare("INSERT INTO luasql_bind (id, "
+                                         .. column .. ") VALUES (?, ?)"))
+      local res, err = stmt:execute{ id, v }
+      stmt:close()
+      if res == nil then return nil, err end
+      return id
+   end
+   local function back(column, i)
+      return value(con, "SELECT " .. column .. " FROM luasql_bind WHERE id = "
+                      .. i)
+   end
+
+   local i = put("i8", 9007199254740993)
+   check("integer 2^53+1 into BIGINT exact", i and back("i8", i)
+            == 9007199254740993)
+   i = put("i8", math.mininteger)
+   check("integer -2^63 into BIGINT", i and back("i8", i) == math.mininteger)
+   i = put("nu", 42)
+   check("integer into NUMERIC/DECIMAL", i and back("nu", i) == "42.00",
+         i and back("nu", i))
+   i = put("db", 0.1)
+   check("float 0.1 into DOUBLE", i and back("db", i) == 0.1)
+   i = put("tx", 42)
+   check("integer into text: '42'", i and server_text(con, "tx", i) == "42",
+         i and server_text(con, "tx", i))
+   i = put("bo", true)
+   check("true into " .. (PG and "BOOLEAN" or "TINYINT(1)"),
+         i and back("bo", i) == (PG and true or 1), i and back("bo", i))
+   i = put("tx", true)
+   check("true into text: '1' (SQL_C_BIT)", i and server_text(con, "tx", i)
+            == "1", i and server_text(con, "tx", i))
+   -- SQL_VARCHAR up to 8000 bytes, SQL_LONGVARCHAR above
+   for _, n in ipairs{ 8000, 8001, 100000 } do
+      local s = string.rep("ä", n // 2) .. string.rep("x", n % 2)
+      i = put("tx", s)
+      check(#s .. " bytes of UTF-8 text", i and back("tx", i) == s
+               and stored_hex(con, "tx", "luasql_bind", "id = " .. i)
+                  == hex(s))
+   end
+   local res, err = put("tx", "a\0b")
+   check("a string with a zero byte: nil and a message", res == nil
+            and has(err, "parameter 2 contains a zero byte"), err)
+
+   for _, b in ipairs{ { "00 FF 41", "\0\255A" }, { "empty", "" },
+                       { "100000 bytes", string.rep("\1\0\255", 33334) } } do
+      i = put("bn", { b[2], T.binary })
+      check("T.binary " .. b[1] .. " kept exactly", i and back("bn", i)
+               == b[2], i and #tostring(back("bn", i)))
+   end
+   res, err = put("tx", { "\0A", T.binary })
+   if PG then
+      check("T.binary with a zero byte into text: the error of the server",
+            res == nil, err)
+   else
+      check("T.binary with a zero byte into text: kept (MariaDB)",
+            res and stored_hex(con, "tx", "luasql_bind", "id = " .. res)
+               == "0041", err)
+   end
+
+   i = put("dt", { "2026-11-22", T.date })
+   check("T.date into DATE", i and back("dt", i) == "2026-11-22",
+         i and back("dt", i))
+   i = put("ts", { "2026-11-22 01:02:03", T.date })
+   check("T.date with a time into TIMESTAMP", i and
+            tostring(back("ts", i)):sub(1, 19) == "2026-11-22 01:02:03",
+         i and back("ts", i))
+   i = put("ts", { "2026-11-22 12:34:56.123456789", T.timestamp })
+   check("T.timestamp: nine digits cut to six", i and back("ts", i)
+            == "2026-11-22 12:34:56.123456", i and back("ts", i))
+   i = put("ts", { "2026-11-22", T.timestamp })
+   check("T.timestamp without a time", i and
+            tostring(back("ts", i)):sub(1, 19) == "2026-11-22 00:00:00",
+         i and back("ts", i))
+   i = put("tm", { "12:34:56.789", T.time })
+   check("T.time with a fraction into TIME", i and back("tm", i)
+            == (PG and "12:34:56.789" or "12:34:56.789000"),
+         i and back("tm", i))
+   i = put("tx", { "12:34:56", T.time })
+   check("T.time into text", i and back("tx", i) == "12:34:56",
+         i and back("tx", i))
+   for _, bad in ipairs{ { "2026-02-30", T.date, "T.date" },
+                         { "2026-11-6", T.date, "T.date" },
+                         { "24:00:00", T.time, "T.time" },
+                         { "2026-13-01 00:00:00", T.timestamp,
+                           "T.timestamp" } } do
+      res, err = put("tx", { bad[1], bad[2] })
+      check("invalid " .. bad[3] .. " '" .. bad[1] .. "': nil and a message",
+            res == nil and has(err, "invalid " .. bad[3]), err)
+   end
+
+   local columns = { "i8", "nu", "db", "bo", "tx", "bn", "dt", "ts", "tm" }
+   local all = true
+   for _, column in ipairs(columns) do
+      for _, v in ipairs{ T.null, { T.null, T.int }, { T.null, T.number },
+                          { T.null, T.boolean }, { T.null, T.string },
+                          { T.null, T.binary }, { T.null, T.date },
+                          { T.null, T.timestamp }, { T.null, T.time } } do
+         i, err = put(column, v)
+         if not i or back(column, i) ~= nil then
+            all = false
+            info("NULL into " .. column .. ": " .. tostring(err))
+         end
+      end
+   end
+   check("NULL and every typed NULL into every column type", all)
+end
+
+-- counting, names, partial tables, reset (B1c, B3, B4)
+local function bind_api()
+   local con = ctx.con()
+   local sql = PG and "SELECT CAST(? AS INTEGER), CAST(? AS INTEGER)"
+      or "SELECT ?, ?"
+   local stmt = assert(con:prepare(sql))
+   local function row(...)
+      local cur, err = stmt:execute(...)
+      if not cur then return nil, err end
+      local a, b = cur:fetch()
+      cur:close()
+      return a, b
+   end
+   local res, err = stmt:execute(1)
+   check("too few arguments: nil and a message", res == nil
+            and has(err, "statement has 2 parameters, 1 given"), err)
+   res, err = stmt:execute(1, 2, 3)
+   check("too many arguments: nil and a message", res == nil
+            and has(err, "statement has 2 parameters, 3 given"), err)
+   res, err = stmt:execute{ [3] = 1 }
+   check("a position the statement does not have: nil and a message",
+         res == nil and has(err, "no position 3"), err)
+   res, err = stmt:execute{ 1 }
+   check("a placeholder without a value: nil and a message", res == nil
+            and has(err, "parameter 2 has no value"), err)
+   local a, b = row{ [2] = 20 }
+   check("a table changes only its positions", a == 1 and b == 20,
+         tostring(a) .. " " .. tostring(b))
+   a, b = row()
+   check("execute() runs with the values given last", a == 1 and b == 20)
+   check("names raise", has(raised(stmt.execute, stmt, { x = 1 }),
+                            "named parameters are not supported"))
+   check("mixed keys raise", raised(stmt.execute, stmt, { 1, x = 2 }) ~= nil)
+   check("reset: true", stmt:reset() == true)
+   res, err = stmt:execute()
+   check("after reset no value: nil and a message", res == nil
+            and has(err, "parameter 1 has no value"), err)
+   assert(row(7, 8))
+   stmt:execute(9, "a\0b")
+   a, b = row()
+   check("a failed execute takes over nothing", a == 7 and b == 8,
+         tostring(a) .. " " .. tostring(b))
+   stmt:close()
+
+   res, err = con:execute(sql, 1)
+   check("conn:execute with too few arguments: nil and a message",
+         res == nil and has(err, "2 parameters, 1 given"), err)
+   res, err = con:execute(sql)
+   check("conn:execute without arguments for a statement with markers",
+         res == nil and has(err, "2 parameters, 0 given"), err)
+   res, err = con:execute(sql, {})
+   check("conn:execute with an empty table: nil and a message",
+         res == nil and has(err, "parameter 1 has no value"), err)
+   check("conn:execute without markers and an empty table runs",
+         value(con, "SELECT 1", {}) == 1)
+   check("conn:execute with a table", value(con, sql, { 3, 4 }) == 3)
+   check("conn:execute: nil is NULL", value(con, PG
+            and "SELECT CAST(? AS INTEGER) IS NULL" or "SELECT ? IS NULL",
+            nil) == (PG and true or 1))
+
+   make_bind(con)
+   stmt = assert(con:prepare("INSERT INTO luasql_bind (id, i8, bo, tx, bn, "
+                                .. "dt) VALUES (?, ?, ?, ?, ?, ?)"))
+   local t, terr = stmt:getparamtypes()
+   info("getparamtypes: " .. (t and table.concat(t, ", ") or tostring(terr)))
+   if PG then
+      check("getparamtypes with psqlODBC: the types of the columns",
+            t and t[2] == "integer" and t[3] == "boolean"
+               and t[4] == "string" and t[5] == "binary", terr)
+   else
+      check("getparamtypes with Connector/ODBC: string for every parameter",
+            t and #t == 6 and t[2] == "string" and t[5] == "string", terr)
+   end
+   check("getparamtypes again gives the same table",
+         stmt:getparamtypes() == t)
+   stmt:close()
+end
+
+-- what the server makes of a value of another type (documented)
+local function conversions()
+   local con = ctx.con()
+   make_bind(con)
+   local stmt = assert(con:prepare("INSERT INTO luasql_bind (id, i8) "
+                                      .. "VALUES (?, ?)"))
+   local res, err = stmt:execute(1, "42")
+   check("the string '42' into BIGINT", res == 1, err)
+   res, err = stmt:execute(2, "12abc")
+   if PG then
+      check("'12abc' into BIGINT: nil and the message of the server",
+            res == nil, err)
+   else
+      check("'12abc' into BIGINT: looks like success with 0 rows "
+               .. "(MariaDB 1265, SQLSTATE 01000; documented)",
+            res == 0 and count_bind(con, 2) == 0, err)
+   end
+   res, err = stmt:execute(3, 2.5)
+   if PG then
+      check("2.5 into BIGINT: nil and the message of the server",
+            res == nil, err)
+   else
+      check("2.5 into BIGINT: the server converts it to 2", res == 1
+               and value(con, "SELECT i8 FROM luasql_bind WHERE id = 3") == 2,
+            err)
+   end
+   res, err = con:execute("INSERT INTO luasql_bind (id, i8) VALUES (?, ?)",
+                          4, 2.5)
+   if PG then
+      check("... the same through conn:execute", res == nil, err)
+   else
+      check("... the same through conn:execute", res == 1
+               and value(con, "SELECT i8 FROM luasql_bind WHERE id = 4") == 2,
+            err)
+   end
+   stmt:close()
+end
+
+-- statements on the server (psqlODBC: pg_prepared_statements)
+local function server_statements()
+   if not PG then
+      local con = ctx.con()
+      info("Prepared_stmt_count of the server: " .. tostring(value(con,
+         "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS "
+            .. "WHERE VARIABLE_NAME = 'PREPARED_STMT_COUNT'")))
+      skip("Connector/ODBC keeps up to 250 statements per connection in a "
+              .. "cache; there is no count per statement")
+      return
+   end
+   local c = connect()
+   -- the query that counts is itself prepared on the server while it
+   -- runs (conn:execute prepares every statement), so it leaves itself out
+   local function open()
+      return value(c, "SELECT count(*) FROM pg_prepared_statements "
+                      .. "WHERE statement NOT LIKE '%pg_prepared_statements%'")
+   end
+   local n = open()
+   check("none at the start", n == 0, n)
+   local stmt = assert(c:prepare("SELECT CAST(? AS INTEGER)"))
+   n = open()
+   check("none after conn:prepare (psqlODBC prepares at the first execute)",
+         n == 0, n)
+   assert(stmt:execute(1)):close()
+   n = open()
+   check("one after the first execute", n == 1, n)
+   assert(c:execute("SELECT CAST(? AS INTEGER) + 1", 1)):close()
+   n = open()
+   check("conn:execute with a parameter leaves none behind", n == 1, n)
+   stmt:close()
+   n = open()
+   check("none after stmt:close", n == 0, n)
    c:close()
 end
 
@@ -586,6 +891,10 @@ local scenarios = {
    { "text",           text },
    { "errors",         errors },
    { "statements",     statements },
+   { "binding",        binding },
+   { "bind_api",       bind_api },
+   { "conversions",    conversions },
+   { "server_statements", server_statements },
    { "collect",        collect },
    { "exit_open",      exit_open },
 }
@@ -624,7 +933,8 @@ if not args.keep and ctx.main then
    print("\n== Cleanup ==")
    for _, sql in ipairs{ "DROP TABLE IF EXISTS luasql_test",
                          "DROP TABLE IF EXISTS luasql_types",
-                         "DROP TABLE IF EXISTS luasql_long" } do
+                         "DROP TABLE IF EXISTS luasql_long",
+                         "DROP TABLE IF EXISTS luasql_bind" } do
       local ok, err = pcall(run, ctx.main, sql)
       print(ok and ("  " .. sql)
             or ("  [INFO] " .. sql .. ": " .. mask(err)))

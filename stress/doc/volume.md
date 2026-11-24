@@ -102,3 +102,7 @@ The tables have the types `integer`, `double precision` and `varchar`; `luastres
 ## MariaDB
 
 The tables are InnoDB tables with the types `INT`, `DOUBLE` and `VARCHAR`; `luastress_vollob` has a `LONGTEXT` column. `luastress_volbin` has a `LONGBLOB` column and no key; its rows are deleted before each insert (`backend.volBinaryDelete`), as MariaDB has no temporary table whose rows go at a commit. `luasql.mysql` reads the whole result of a query at the execute, so the fetch phases hold all rows of a query in the process for a moment; the memory must still not grow from round to round. A single value sent or read is limited by `max_allowed_packet` (16 MB by default). The tablespaces of InnoDB have no size limit of their own, so the cases with a full tablespace are skipped, and `maxLength` as well.
+
+## ODBC
+
+The tables are those of the native backends: `luastress_volbin` is a temporary table of the session whose rows go at each commit with `odbc_postgres`, and a table whose rows are deleted before each insert with `odbc_mariadb`. Both vendor drivers read the whole result of a query at the execute, so the fetch phases hold all rows of a query in the process for a moment. `luasql.odbc` binds a string above 8000 bytes as `SQL_LONGVARCHAR` and `luasql.type.binary` as `SQL_LONGVARBINARY`. The cases with a full tablespace and `maxLength` are skipped, as with the native backends.

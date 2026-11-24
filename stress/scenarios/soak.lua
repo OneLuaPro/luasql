@@ -20,6 +20,13 @@
 -- one line per sample. backend.soakLanes sets the number of lanes, 0
 -- for none (e.g. SQLite: one writer at a time for the whole file, and
 -- its counters see the locks of every connection).
+-- backend.soakLimits.fetchError (a reason) leaves the failing query out
+-- of the round (scenarios/soakRound.lua); the reason is shown as a known
+-- limitation. backend.soakLimits.memory (a reason) does the same for the
+-- process memory, if a vendor client library loses memory outside the
+-- driver (e.g. per TLS connect, see phases.lua): its growth over the
+-- limit is a known limitation, shown with the reason; the Lua heap, the
+-- server counters and the sessions are judged as before.
 
 local dbutil = require("dbutil")
 local memory = require("memory")
@@ -295,9 +302,10 @@ local function runLoop(state)
    end
 end
 
--- Prints the result of one memory series and returns true if it is
--- within its limit (always without a verdict).
-local function evaluateSeries(state, label, key, limit, problems)
+-- Prints the result of one memory series. Growth over the limit is a
+-- problem, or with reason (backend.soakLimits.memory) a known
+-- limitation: then it returns true.
+local function evaluateSeries(state, label, key, limit, problems, reason)
    local xs, ys = {}, {}
    local first, last
    for k = 1, state.count do
@@ -328,7 +336,11 @@ local function evaluateSeries(state, label, key, limit, problems)
    local slope = trend.theilSen(xs, ys, #xs, maxSlopeSamples) * 3600
    text = text .. string.format(", %+.0f KB per hour (limit %d)", slope,
                                 limit)
-   if slope > limit then
+   if slope > limit and reason then
+      report.print(prefix, "limit: " .. text .. "; not judged, " .. reason,
+                   "limit")
+      return true
+   elseif slope > limit then
       report.print(prefix, "FAILED: " .. text, "fail")
       problems[#problems + 1] = label .. " grows"
    else
@@ -434,6 +446,12 @@ function soak.run(ctx)
                    or ("no lanes: " .. lanesErr),
                 memory.label and ("memory as " .. memory.label)
                    or "no process memory"))
+   local soakLimits = backend.soakLimits or {}
+   local fetchErrorLimit = soakLimits.fetchError
+   if fetchErrorLimit then
+      report.print("  limit           ", "the round leaves the failing"
+                   .. " query out: " .. fetchErrorLimit, "limit")
+   end
 
    if ctx.csvPath then
       local file, err = io.open(ctx.csvPath, "w")
@@ -536,8 +554,11 @@ function soak.run(ctx)
                 useLanes and state.laneCount or 0,
                 math.floor(last.seconds / 6 + 0.5) / 10))
    local problems = {}
-   evaluateSeries(state, memory.label or "process", "process",
-                  processLimitKb, problems)
+   local limitCount = fetchErrorLimit and 1 or 0
+   if evaluateSeries(state, memory.label or "process", "process",
+                     processLimitKb, problems, soakLimits.memory) then
+      limitCount = limitCount + 1
+   end
    evaluateSeries(state, "lua", "lua", luaLimitKb, problems)
    evaluateSeries(state, "pga", "pga", pgaLimitKb, problems)
    evaluateCounters(state, problems)
@@ -552,6 +573,10 @@ function soak.run(ctx)
    end
    if #problems > 0 then
       return nil, table.concat(problems, "; ")
+   end
+   if limitCount > 0 then
+      return true, string.format("%d known limitation%s", limitCount,
+                                 limitCount > 1 and "s" or "")
    end
    return true
 end

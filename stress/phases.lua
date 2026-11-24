@@ -61,9 +61,12 @@
 -- only a trend over the limit in both rounds is a leak. A phase that
 -- cannot run twice (e.g. it inserts fixed ids) sets confirm = false.
 --
--- An embedded DBMS may keep the data of a phase in this process, e.g.
--- DuckDB the rows of a table that grows during the phase. Such a phase
--- cannot tell the data from a leak: the backend names it in
+-- The process memory of a phase can grow for a reason outside the
+-- driver: an embedded DBMS may keep the data of the phase in this
+-- process (e.g. DuckDB the rows of a table that grows during the
+-- phase), or a vendor client library may lose memory per connect or
+-- call (e.g. Connector/ODBC per TLS connect, CONC-883). Such a phase
+-- cannot tell this from a leak of the driver: the backend names it in
 -- memoryLimits, keyed "<scenario>.<phase>" (phases.scenario is set by
 -- the runner), with the reason. Its process memory over the limit is
 -- then a limit, shown with the reason; the Lua heap, the counters and
