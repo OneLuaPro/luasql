@@ -228,6 +228,21 @@ In a thread of its own, e.g. a lane of Lua Lanes, require luacom (and
 requires it. With luacom `ca4d26a` about 10 KB of private bytes stay in the
 process per lane that requires luacom (measured; the cause is open).
 
+Objects of `luasql.ado` are not sent between lanes: each lane requires the
+driver and opens its own environment and connection. Sent anyway, they
+behave as follows:
+
+- The environment is a Lua table, so a linda copies it instead of refusing
+  it. The copy shares no state with the original and keeps the count of
+  connections it had when it was sent: with a connection open at that time,
+  `close()` of the copy returns `false` and "There are open connections"
+  for good.
+- A lane that requires luacom in its body cannot receive the copy. The
+  error comes at the receive, not at the send: "'luacom' not found in main
+  destination transfer database".
+- Connections and cursors are refused by Lanes at the send, as with the
+  drivers written in C.
+
 ## Measured Times
 
 Measured on one machine (localhost, µs per operation), with `luasql.odbc` on

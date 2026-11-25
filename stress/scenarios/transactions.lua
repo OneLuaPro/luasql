@@ -25,10 +25,12 @@
 --                        library that loses the savepoint of the user)
 --   stmtAcrossCommit     a prepared statement stays usable across
 --                        commit() and rollback()
---   rowCounts            row counts of INSERT, UPDATE, DELETE, also 0
+--   rowCounts            row counts of INSERT, UPDATE, DELETE, also 0,
+--                        through conn:execute and prepared statements
 --   rowCountType         row counts are integers; floats with an
 --                        integral value are a limit if the backend says
---                        so (backend.rowCountFloat)
+--                        so (backend.rowCountFloat); from conn:execute
+--                        and from a prepared statement
 --   plsqlAutocommit      a PL/SQL block with DML is committed
 --   closeOpen            conn:close() with an open transaction rolls it
 --                        back
@@ -46,14 +48,19 @@
 --   insertRollback  insert, rollback
 --   toggleAuto      autocommit on and off in turn, with inserts
 --   errorRollback   failing insert, rollback
+-- The insert is a prepared statement, without the bind API the literal
+-- statement backend.txInsertLiteral through conn:execute.
 -- Each phase checks the number of rows at its end; the open
 -- transactions of the test session are an extra server counter
 -- (backend.transactionCounter), unless it is one of the server counters
 -- already. A precheck makes sure the counter sees an open transaction;
 -- otherwise the phases fail as invalid.
 --
--- Skipped if the driver has no bind API (conn:prepare and luasql.type)
--- or the backend has no transaction table.
+-- Skipped if the backend has no transaction table. Without the bind API
+-- (conn:prepare and luasql.type, e.g. luasql.ado) preparedFollowsMode
+-- and stmtAcrossCommit are skipped, rowCounts and rowCountType check
+-- conn:execute only, and the phases insert through the literal
+-- statement backend.txInsertLiteral instead of a prepared one.
 
 local dbutil = require("dbutil")
 local phases = require("phases")
@@ -353,6 +360,10 @@ local function rowCounts(ctx)
    expectRows("update none", exec(conn, backend.txUpdateNone), 0)
    expectRows("delete", exec(conn, string.format(backend.txDeleteAbove, 3)),
               3)
+   -- The prepared half needs the bind API.
+   if not dbutil.hasBindApi(ctx) then
+      return
+   end
    local insert = prepare(conn, backend.txInsert)
    local delete = prepare(conn, backend.txDeleteAboveBind)
    local ok, err = pcall(function()
@@ -372,16 +383,20 @@ local function rowCounts(ctx)
 end
 
 local function rowCountType(ctx)
-   local fromExecute = insertRow(ctx, ctx.testConn, 1)
-   local stmt = prepare(ctx.testConn, ctx.backend.txInsert)
-   local ok, fromStatement = pcall(executeStatement, stmt,
-                                   insertParams(ctx, 2))
-   closeStatement(stmt)
-   if not ok then
-      error(fromStatement, 0)
+   local counts = { insertRow(ctx, ctx.testConn, 1) }
+   -- The count of a prepared statement needs the bind API.
+   if dbutil.hasBindApi(ctx) then
+      local stmt = prepare(ctx.testConn, ctx.backend.txInsert)
+      local ok, fromStatement = pcall(executeStatement, stmt,
+                                      insertParams(ctx, 2))
+      closeStatement(stmt)
+      if not ok then
+         error(fromStatement, 0)
+      end
+      counts[2] = fromStatement
    end
    local floats = false
-   for _, value in ipairs({ fromExecute, fromStatement }) do
+   for _, value in ipairs(counts) do
       if math.type(value) == "float" and ctx.backend.rowCountFloat
          and math.tointeger(value) then
          floats = true
@@ -465,12 +480,12 @@ local caseList = {
    { name = "manualRollback", run = manualRollback },
    { name = "enableAutocommit", run = enableAutocommit },
    { name = "preparedFollowsMode", run = preparedFollowsMode,
-     needsAdmin = true },
+     needsAdmin = true, usesBindApi = true },
    { name = "errorKeepsWork", run = errorKeepsWork },
    { name = "errorThenRollback", run = errorThenRollback },
    { name = "ddlCommits", run = ddlCommits, needs = { "txDdl" } },
    { name = "savepoint", run = savepoint, needs = { "txSavepoint" } },
-   { name = "stmtAcrossCommit", run = stmtAcrossCommit },
+   { name = "stmtAcrossCommit", run = stmtAcrossCommit, usesBindApi = true },
    { name = "rowCounts", run = rowCounts },
    { name = "rowCountType", run = rowCountType },
    { name = "plsqlAutocommit", run = plsqlAutocommit, needsAdmin = true,
@@ -485,6 +500,9 @@ local caseList = {
 
 -- Returns why a case is skipped, or nil.
 local function skipReason(ctx, case)
+   if case.usesBindApi and not dbutil.hasBindApi(ctx) then
+      return dbutil.noBindApiReason
+   end
    if case.needsAdmin and not ctx.adminConn then
       return "no admin connection"
    end
@@ -551,25 +569,55 @@ local function runCases(ctx)
    return failed, limits
 end
 
--- Phases. The shared state holds the insert statement and the number of
--- rows that must be in the table at the end.
+-- Phases. The shared state holds the insert of the phase and the number
+-- of rows that must be in the table at the end.
+
+-- The insert of a phase: with the bind API the prepared statement
+-- backend.txInsert, otherwise the literal statement
+-- backend.txInsertLiteral through conn:execute. try(id) returns what
+-- the execute returns; close() frees the statement.
+local function newInsert(ctx)
+   if dbutil.hasBindApi(ctx) then
+      local stmt = prepare(ctx.testConn, ctx.backend.txInsert)
+      return {
+         try = function(id)
+            return stmt:execute(insertParams(ctx, id))
+         end,
+         close = function()
+            closeStatement(stmt)
+         end,
+      }
+   end
+   local conn, sql = ctx.testConn, ctx.backend.txInsertLiteral
+   return {
+      try = function(id)
+         return conn:execute(string.format(sql, id))
+      end,
+      close = function() end,
+   }
+end
+
+-- Inserts row id with the insert of the phase; returns the row count.
+local function insertWith(shared, id)
+   local result, err = shared.insert.try(id)
+   return check(result, err, "execute")
+end
 
 local function setupManual(ctx)
    setAutocommit(ctx.testConn, false)
-   return { stmt = prepare(ctx.testConn, ctx.backend.txInsert),
-            expected = 0 }
+   return { insert = newInsert(ctx), expected = 0 }
 end
 
 -- Row 0 is committed first; every iteration inserts it again.
 local function setupError(ctx)
-   local stmt = prepare(ctx.testConn, ctx.backend.txInsert)
-   executeStatement(stmt, insertParams(ctx, 0))
+   local shared = { insert = newInsert(ctx), expected = 1 }
+   insertWith(shared, 0)
    setAutocommit(ctx.testConn, false)
-   return { stmt = stmt, expected = 1 }
+   return shared
 end
 
 local function finishPhase(ctx, shared)
-   closeStatement(shared.stmt)
+   shared.insert.close()
    -- Rolls back what a failed step may have left open.
    setAutocommit(ctx.testConn, true)
    local rows = countAll(ctx)
@@ -580,13 +628,13 @@ local function finishPhase(ctx, shared)
 end
 
 local function insertCommitStep(ctx, i, shared)
-   executeStatement(shared.stmt, insertParams(ctx, i))
+   insertWith(shared, i)
    commit(ctx.testConn)
    shared.expected = shared.expected + 1
 end
 
 local function insertRollbackStep(ctx, i, shared)
-   executeStatement(shared.stmt, insertParams(ctx, i))
+   insertWith(shared, i)
    rollback(ctx.testConn)
 end
 
@@ -596,7 +644,7 @@ local function toggleAutoStep(ctx, i, shared)
    local conn = ctx.testConn
    local auto = i % 2 == 0
    setAutocommit(conn, auto)
-   executeStatement(shared.stmt, insertParams(ctx, i))
+   insertWith(shared, i)
    if auto then
       shared.expected = shared.expected + 1
    elseif i % 4 == 1 then
@@ -608,7 +656,7 @@ local function toggleAutoStep(ctx, i, shared)
 end
 
 local function errorRollbackStep(ctx, _, shared)
-   local result = shared.stmt:execute(insertParams(ctx, 0))
+   local result = shared.insert.try(0)
    expect(result == nil, "duplicate key not rejected")
    rollback(ctx.testConn)
 end
@@ -662,10 +710,6 @@ local phaseList = {
 function transactions.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
-   if not dbutil.hasBindApi(ctx) then
-      report.print("  ", "skipped: " .. dbutil.noBindApiReason, "skip")
-      return true
-   end
    if backend.txTableCreate == nil then
       report.print("  ", "skipped: backend has no transaction table", "skip")
       return true

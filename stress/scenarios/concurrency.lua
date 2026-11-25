@@ -16,7 +16,8 @@
 --   interleavedCursors   4 connections, one cursor each with values of
 --                        its own, fetched in turn
 --   interleavedStmts     prepared statements on 3 connections, executed
---                        in turn with different binds
+--                        in turn with different binds; skipped without
+--                        the bind API (conn:prepare and luasql.type)
 --   interleavedLobs      temporary CLOBs on 2 connections in turn
 --   readConsistency      a cursor keeps its rows while another session
 --                        deletes them and commits; a limit if the DBMS
@@ -54,7 +55,10 @@
 --   interleaveLoop  the test connection and 3 more, one prepared
 --                   statement each; per iteration all are executed and
 --                   their rows fetched in turn. The server counters see
---                   the test connection.
+--                   the test connection. Skipped without the bind API.
+--
+-- A driver without the bind API (e.g. luasql.ado) runs every other case;
+-- they use conn:execute with literal SQL only.
 --
 -- Uses the table backend.concTableCreate; skipped without it. The WAL
 -- cases use the database of backend.walChange (test settings to
@@ -493,7 +497,7 @@ end
 local caseList = {
    { name = "interleavedCursors", run = interleavedCursorsCase },
    { name = "interleavedStmts", run = interleavedStmtsCase,
-     usesPrepare = true },
+     usesBindApi = true },
    { name = "interleavedLobs", run = interleavedLobsCase,
      needs = "clobRowsLiteral" },
    { name = "readConsistency", run = readConsistencyCase },
@@ -534,8 +538,8 @@ local function runCases(ctx)
    for _, case in ipairs(caseList) do
       local prefix = string.format("    %-19s ", case.name)
       local reason
-      if case.usesPrepare and ctx.testConn.prepare == nil then
-         reason = "driver has no prepare()"
+      if case.usesBindApi and not dbutil.hasBindApi(ctx) then
+         reason = dbutil.noBindApiReason
       elseif case.needs and ctx.backend[case.needs] == nil then
          reason = "backend has no " .. case.needs
       end
@@ -610,8 +614,22 @@ end
 
 local phaseList = {
    { name = "interleaveLoop", setup = setupInterleave,
-     step = interleaveStep, finish = finishInterleave },
+     step = interleaveStep, finish = finishInterleave, usesBindApi = true },
 }
+
+-- The phases this driver can run; prints the others as skipped.
+local function runnablePhases(ctx)
+   local list = {}
+   for _, phase in ipairs(phaseList) do
+      if phase.usesBindApi and not dbutil.hasBindApi(ctx) then
+         report.print(string.format("  %-14s ", phase.name),
+                      "skipped: " .. dbutil.noBindApiReason, "skip")
+      else
+         list[#list + 1] = phase
+      end
+   end
+   return list
+end
 
 -- ctx: tier, driver, backend, testConn, adminConn (may be nil),
 -- openTestConnection
@@ -620,10 +638,6 @@ local phaseList = {
 function concurrency.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
-   if not dbutil.hasBindApi(ctx) then
-      report.print("  ", "skipped: " .. dbutil.noBindApiReason, "skip")
-      return true
-   end
    if backend.concTableCreate == nil then
       report.print("  ", "skipped: backend has no concurrency table",
                    "skip")
@@ -666,7 +680,8 @@ function concurrency.run(ctx)
    local phasesOk, phasesResult, phasesErr
    if casesOk then
       phasesOk, phasesResult, phasesErr = pcall(phases.run, concCtx,
-                                                phaseList, count)
+                                                runnablePhases(concCtx),
+                                                count)
    end
 
    ok, err = dbutil.exec(conn, backend.concTableDrop)

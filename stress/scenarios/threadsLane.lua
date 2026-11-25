@@ -318,11 +318,15 @@ function threadsLane.poolMember(spec, linda, tag, rounds)
 end
 
 -- Leaves a connection, a statement and a cursor open and raises an
--- error: closing the Lua state of the lane must release them.
+-- error: closing the Lua state of the lane must release them. A driver
+-- without the bind API (dbutil.hasBindApi) leaves no statement open.
 function threadsLane.errorWithOpen(spec)
    local link = open(spec)
-   local stmt = check("prepare",
-                      link.conn:prepare(link.backend.offsetBindQuery))
+   local stmt = "no statement"
+   if dbutil.hasBindApi({ testConn = link.conn, driver = link.driver }) then
+      stmt = check("prepare",
+                   link.conn:prepare(link.backend.offsetBindQuery))
+   end
    local cur = check("query", link.conn:execute(link.backend.multiRowQuery))
    cur:fetch()
    -- Keep the objects referenced up to the error.

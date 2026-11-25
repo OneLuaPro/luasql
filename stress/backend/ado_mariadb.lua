@@ -30,8 +30,11 @@
 --
 -- luasql.ado has no bind API (decision of 25 November 2026, see
 -- doc/ldoc/manual/10-ado.md): no conn:prepare, no luasql.type, and
--- conn:execute takes the SQL text only. The scenarios that need them are
--- skipped (dbutil.hasBindApi); the backend holds the keys of the others.
+-- conn:execute takes the SQL text only. The scenarios, cases and phases
+-- that need them are skipped (dbutil.hasBindApi); the backend holds
+-- the keys of the others. Since task stress-ado-literal, threads,
+-- concurrency and transactions run with literal SQL, without their
+-- cases and phases of prepared statements.
 --
 -- Connector/ODBC gives the whole result of a query to the client: an
 -- error in any row comes at the execute, and a cursor reads on after a
@@ -105,6 +108,15 @@ local options = ";OLE DB Services=-2"
 local function rowsUpTo(count)
    return " FROM seq_1_to_" .. count .. " ORDER BY seq"
 end
+
+-- The rows 1 .. count as column seq, in no order.
+local function rowsFrom(count)
+   return " FROM seq_1_to_" .. count
+end
+
+-- Error of a lock that is not free: NOWAIT, WAIT n and the lock wait
+-- timeout all give error 1205.
+local lockError = "Lock wait timeout exceeded"
 
 -- "DSN luatest_mariadb through ADO", for messages only.
 local function sourceName(values)
@@ -240,4 +252,116 @@ return {
    lossTableDrop = "DROP TABLE IF EXISTS luastress_loss",
    lossInsert = "INSERT INTO luastress_loss (id) VALUES (%d)",
    lossCount = "SELECT COUNT(*) FROM luastress_loss WHERE id = %d",
+   -- Values %d + 1 .. %d + second %d, in order (concurrency, threads).
+   offsetQuery = "SELECT %d + CAST(seq AS SIGNED)" .. rowsUpTo("%d"),
+   -- Used by the concurrency scenario (task stress-ado-literal), the
+   -- queries of backend/odbc_mariadb.lua: a table with concRows rows (%d
+   -- in concFill), row locks on id %d (WAIT: second %d in seconds) and
+   -- their error. interleavedStmts and interleaveLoop need the bind API
+   -- and are skipped.
+   concTableCreate = "CREATE TABLE luastress_conc (id INT PRIMARY KEY,"
+      .. " v VARCHAR(20)) ENGINE = InnoDB",
+   concTableDrop = "DROP TABLE IF EXISTS luastress_conc",
+   concFill = "INSERT INTO luastress_conc (id, v)"
+      .. " SELECT seq, CONCAT('row ', seq)" .. rowsFrom("%d"),
+   concRows = 100,
+   concSelectAll = "SELECT id, v FROM luastress_conc ORDER BY id",
+   concCount = "SELECT COUNT(*) FROM luastress_conc",
+   concDeleteAll = "DELETE FROM luastress_conc",
+   concLockNowait = "SELECT id FROM luastress_conc WHERE id = %d"
+      .. " FOR UPDATE NOWAIT",
+   concLockWait = "SELECT id FROM luastress_conc WHERE id = %d"
+      .. " FOR UPDATE WAIT %d",
+   lockBusyError = lockError,
+   lockTimeoutError = lockError,
+   -- Used by the threads scenario (task stress-ado-literal), the queries
+   -- of backend/odbc_mariadb.lua: a table with rows 1 and 2 (v = 0); set
+   -- v of a row (first %d the value, second one the id; waits for a lock
+   -- up to innodb_lock_wait_timeout); raise v of row %d by one; lock row
+   -- %d with WAIT (second %d in seconds); v of row %d. A deadlock gives
+   -- deadlockError to one session and rolls back its whole transaction,
+   -- which frees its locks (threadsLimits): as with luasql.odbc the
+   -- commit of the victim returns true (probe adoprobe-stress4.lua,
+   -- 2026-11-25: @@in_transaction 0 after the error, the first update
+   -- of the victim lost). SLEEP sleeps %d seconds on the server; session
+   -- %d: the first session blocking it (0 for none), and 1 while it
+   -- sleeps. parallelPrepared needs the bind API and is skipped. The
+   -- environment of luasql.ado goes through a linda as a copy
+   -- (threadsLimits; see the head comment of backend/ado_postgres.lua).
+   -- ADO cancels a command after Connection.CommandTimeout, 30 s by
+   -- default; no wait of the scenario comes near it unless a case hangs
+   -- (the sleep of killDuringCall is 20 s and is killed at once).
+   threadsTableCreate = "CREATE TABLE luastress_threads"
+      .. " (id INT PRIMARY KEY, v INT) ENGINE = InnoDB",
+   threadsTableDrop = "DROP TABLE IF EXISTS luastress_threads",
+   threadsFill = "INSERT INTO luastress_threads (id, v) SELECT seq, 0"
+      .. rowsFrom("2"),
+   threadsReset = "UPDATE luastress_threads SET v = 0",
+   threadsUpdate = "UPDATE luastress_threads SET v = %d WHERE id = %d",
+   threadsIncrement = "UPDATE luastress_threads SET v = v + 1"
+      .. " WHERE id = %d",
+   threadsLockWait = "SELECT v FROM luastress_threads WHERE id = %d"
+      .. " FOR UPDATE WAIT %d",
+   threadsValue = "SELECT v FROM luastress_threads WHERE id = %d",
+   deadlockError = "Deadlock found when trying to get lock",
+   threadsLimits = {
+      deadlock = {
+         error = "must keep its locks",
+         reason = "InnoDB rolls back the whole transaction of the victim"
+            .. " of a deadlock, which frees its locks: the other session"
+            .. " gets its row at once (luasql.ado cannot report it: the"
+            .. " commit of the victim returns true)",
+      },
+      envNotSendable = {
+         error = "sending an environment through a linda worked",
+         reason = "luasql.ado is written in Lua: a linda copies its"
+            .. " environment (a table) instead of refusing it; the copy"
+            .. " shares no state, and a lane that requires luacom cannot"
+            .. " receive it. Connections and cursors are refused",
+      },
+   },
+   sleepBlock = "SELECT SLEEP(%d)",
+   blockingSessionQuery = "SELECT COALESCE((SELECT b.trx_mysql_thread_id"
+      .. " FROM information_schema.INNODB_LOCK_WAITS w"
+      .. " JOIN information_schema.INNODB_TRX b"
+      .. " ON b.trx_id = w.blocking_trx_id"
+      .. " JOIN information_schema.INNODB_TRX r"
+      .. " ON r.trx_id = w.requesting_trx_id"
+      .. " WHERE r.trx_mysql_thread_id = %d LIMIT 1), 0)",
+   sleepingSessionQuery = "SELECT COUNT(*)"
+      .. " FROM information_schema.PROCESSLIST"
+      .. " WHERE ID = %d AND STATE = 'User sleep'",
+   -- Used by the transaction scenario (task stress-ado-literal), the
+   -- queries of backend/odbc_mariadb.lua without the bound ones; %d is
+   -- an id. The phases insert through txInsertLiteral. txCountOther
+   -- counts on the admin connection (autocommit on), in the same
+   -- database; its %s (the test user) is only a comment. DDL commits the
+   -- open transaction. txPlsqlInsert is a compound statement of MariaDB.
+   txTableCreate = "CREATE TABLE luastress_tx (id INT PRIMARY KEY,"
+      .. " v VARCHAR(100)) ENGINE = InnoDB",
+   txTableDrop = "DROP TABLE IF EXISTS luastress_tx",
+   txInsertLiteral = "INSERT INTO luastress_tx (id, v) VALUES (%d, 'x')",
+   -- Rows %d + 1 to %d + second %d.
+   txInsertSelect = "INSERT INTO luastress_tx (id, v) SELECT %d + seq, 'x'"
+      .. rowsFrom("%d"),
+   txUpdateAll = "UPDATE luastress_tx SET v = 'y'",
+   txUpdateNone = "UPDATE luastress_tx SET v = 'z' WHERE id < 0",
+   txDeleteAbove = "DELETE FROM luastress_tx WHERE id > %d",
+   txDeleteAll = "DELETE FROM luastress_tx",
+   txCount = "SELECT COUNT(*) FROM luastress_tx WHERE id = %d",
+   txCountAll = "SELECT COUNT(*) FROM luastress_tx",
+   txCountOther = "SELECT COUNT(*) FROM luastress_tx /* %s */"
+      .. " WHERE id = %d",
+   txPlsqlInsert = "BEGIN NOT ATOMIC INSERT INTO luastress_tx (id, v)"
+      .. " VALUES (%d, 'x'); END",
+   txSavepoint = "SAVEPOINT luastress",
+   txRollbackToSavepoint = "ROLLBACK TO SAVEPOINT luastress",
+   txDdl = "CREATE TABLE luastress_txddl (x INT) ENGINE = InnoDB",
+   txDdlUndo = "DROP TABLE IF EXISTS luastress_txddl",
+   transactionLimits = {
+      enableAutocommit = "setautocommit(true) rolls back an open"
+         .. " transaction (luasql.ado, as the other drivers of LuaSQL)",
+      ddlCommits = "MariaDB commits an open transaction implicitly at"
+         .. " DDL, also with autocommit off",
+   },
 }

@@ -29,8 +29,11 @@
 --
 -- luasql.ado has no bind API (decision of 25 November 2026, see
 -- doc/ldoc/manual/10-ado.md): no conn:prepare, no luasql.type, and
--- conn:execute takes the SQL text only. The scenarios that need them are
--- skipped (dbutil.hasBindApi); the backend holds the keys of the others.
+-- conn:execute takes the SQL text only. The scenarios, cases and phases
+-- that need them are skipped (dbutil.hasBindApi); the backend holds
+-- the keys of the others. Since task stress-ado-literal, threads,
+-- concurrency and transactions run with literal SQL, without their
+-- cases and phases of prepared statements.
 --
 -- MSDASQL reads through psqlODBC, which without Use Declare/Fetch reads
 -- the whole result at the execute: an error in any row comes at the
@@ -110,6 +113,11 @@ local sessionCountQuery = "SELECT a.c FROM (SELECT pg_sleep(0.1)::text"
 -- "%d".
 local function rowsUpTo(count)
    return " FROM generate_series(1, " .. count .. ") AS n ORDER BY n"
+end
+
+-- The rows 1 .. count as column n, in no order.
+local function rowsFrom(count)
+   return " FROM generate_series(1, " .. count .. ") AS n"
 end
 
 return {
@@ -193,4 +201,110 @@ return {
    lossTableDrop = "DROP TABLE IF EXISTS luastress_loss",
    lossInsert = "INSERT INTO luastress_loss (id) VALUES (%d)",
    lossCount = "SELECT count(*) FROM luastress_loss WHERE id = %d",
+   -- Values %d + 1 .. %d + second %d, in order (concurrency, threads).
+   offsetQuery = "SELECT %d::bigint + n" .. rowsUpTo("%d"),
+   -- Used by the concurrency scenario (task stress-ado-literal), the
+   -- queries of backend/odbc_postgres.lua: a table with concRows rows
+   -- (%d in concFill), the lock of row %d with NOWAIT, and with a wait of
+   -- lock_timeout (concLockWaitSetup, %d milliseconds, set with
+   -- autocommit on; concLockWait ignores its second %d); their errors.
+   -- psqlODBC rolls back a failed statement to its savepoint, so a lock
+   -- that is not free does not abort the transaction (no
+   -- conflictAborts). interleavedStmts and interleaveLoop need the bind
+   -- API and are skipped.
+   concTableCreate = "CREATE TABLE luastress_conc (id integer PRIMARY KEY,"
+      .. " v varchar(20))",
+   concTableDrop = "DROP TABLE IF EXISTS luastress_conc",
+   concFill = "INSERT INTO luastress_conc (id, v) SELECT n, 'row ' || n"
+      .. rowsFrom("%d"),
+   concRows = 100,
+   concSelectAll = "SELECT id, v FROM luastress_conc ORDER BY id",
+   concCount = "SELECT count(*) FROM luastress_conc",
+   concDeleteAll = "DELETE FROM luastress_conc",
+   concLockNowait = "SELECT id FROM luastress_conc WHERE id = %d"
+      .. " FOR UPDATE NOWAIT",
+   concLockWait = "SELECT id FROM luastress_conc WHERE id = %d FOR UPDATE",
+   concLockWaitSetup = "SET lock_timeout = %d",
+   lockBusyError = "could not obtain lock on row",
+   lockTimeoutError = "canceling statement due to lock timeout",
+   -- Used by the threads scenario (task stress-ado-literal), the queries
+   -- of backend/odbc_postgres.lua: a table with rows 1 and 2 (v = 0);
+   -- set v of a row (first %d the value, second one the id); raise v of
+   -- row %d by one; lock row %d (the second %d, a wait time, is set with
+   -- threadsLockSetup in milliseconds); v of row %d. A deadlock gives
+   -- deadlockError to the session that waited first; psqlODBC rolls back
+   -- its statement to the savepoint, so the transaction of the victim
+   -- goes on with its locks. pg_sleep sleeps %d seconds on the server;
+   -- process %d: the first process blocking it (0 for none), and 1 while
+   -- it sleeps in pg_sleep. parallelPrepared needs the bind API and is
+   -- skipped. The environment of luasql.ado goes through a linda as a
+   -- copy (threadsLimits): luasql.ado is written in Lua and its
+   -- environment is a table. The copy keeps the count of connections it
+   -- had, and a lane that requires luacom cannot receive it ("'luacom'
+   -- not found in main destination transfer database"); Lanes refuses
+   -- connections and cursors at the send (probe adoprobe-stress4.lua,
+   -- 2026-11-25; doc/ldoc/manual/10-ado.md, section Threads). ADO
+   -- cancels a command after Connection.CommandTimeout, 30 s by default;
+   -- no wait of the scenario comes near it unless a case hangs (the
+   -- sleep of killDuringCall is 20 s and is killed at once).
+   threadsTableCreate = "CREATE TABLE luastress_threads"
+      .. " (id integer PRIMARY KEY, v integer)",
+   threadsTableDrop = "DROP TABLE IF EXISTS luastress_threads",
+   threadsFill = "INSERT INTO luastress_threads (id, v) SELECT n, 0"
+      .. rowsFrom("2"),
+   threadsReset = "UPDATE luastress_threads SET v = 0",
+   threadsUpdate = "UPDATE luastress_threads SET v = %d WHERE id = %d",
+   threadsIncrement = "UPDATE luastress_threads SET v = v + 1"
+      .. " WHERE id = %d",
+   threadsLockWait = "SELECT v FROM luastress_threads WHERE id = %d"
+      .. " FOR UPDATE",
+   threadsLockSetup = "SET lock_timeout = %d",
+   threadsValue = "SELECT v FROM luastress_threads WHERE id = %d",
+   deadlockError = "deadlock detected",
+   threadsLimits = {
+      envNotSendable = {
+         error = "sending an environment through a linda worked",
+         reason = "luasql.ado is written in Lua: a linda copies its"
+            .. " environment (a table) instead of refusing it; the copy"
+            .. " shares no state, and a lane that requires luacom cannot"
+            .. " receive it. Connections and cursors are refused",
+      },
+   },
+   sleepBlock = "SELECT pg_sleep(%d)",
+   blockingSessionQuery = "SELECT coalesce((pg_blocking_pids(%d))[1], 0)",
+   sleepingSessionQuery = "SELECT count(*) FROM pg_stat_activity"
+      .. " WHERE pid = %d AND wait_event = 'PgSleep'",
+   -- Used by the transaction scenario (task stress-ado-literal), the
+   -- queries of backend/odbc_postgres.lua without the bound ones; %d is
+   -- an id. The phases insert through txInsertLiteral. txCountOther
+   -- counts on the admin connection (autocommit on), in the same
+   -- database and schema; its %s (the test user) is only a comment. DDL
+   -- is part of the transaction. txPlsqlInsert is a block of PL/pgSQL
+   -- (DO). A failed statement does not abort the transaction (psqlODBC
+   -- rolls back to its savepoint), so there is no limit errorAborts.
+   txTableCreate = "CREATE TABLE luastress_tx (id integer PRIMARY KEY,"
+      .. " v varchar(100))",
+   txTableDrop = "DROP TABLE IF EXISTS luastress_tx",
+   txInsertLiteral = "INSERT INTO luastress_tx (id, v) VALUES (%d, 'x')",
+   -- Rows %d + 1 to %d + second %d.
+   txInsertSelect = "INSERT INTO luastress_tx (id, v) SELECT %d + n, 'x'"
+      .. rowsFrom("%d"),
+   txUpdateAll = "UPDATE luastress_tx SET v = 'y'",
+   txUpdateNone = "UPDATE luastress_tx SET v = 'z' WHERE id < 0",
+   txDeleteAbove = "DELETE FROM luastress_tx WHERE id > %d",
+   txDeleteAll = "DELETE FROM luastress_tx",
+   txCount = "SELECT count(*) FROM luastress_tx WHERE id = %d",
+   txCountAll = "SELECT count(*) FROM luastress_tx",
+   txCountOther = "SELECT count(*) FROM luastress_tx /* %s */"
+      .. " WHERE id = %d",
+   txPlsqlInsert = "DO $$ BEGIN INSERT INTO luastress_tx (id, v)"
+      .. " VALUES (%d, 'x'); END $$",
+   txSavepoint = "SAVEPOINT luastress",
+   txRollbackToSavepoint = "ROLLBACK TO SAVEPOINT luastress",
+   txDdl = "CREATE TABLE luastress_txddl (x integer)",
+   txDdlUndo = "DROP TABLE IF EXISTS luastress_txddl",
+   transactionLimits = {
+      enableAutocommit = "setautocommit(true) rolls back an open"
+         .. " transaction (luasql.ado, as the other drivers of LuaSQL)",
+   },
 }

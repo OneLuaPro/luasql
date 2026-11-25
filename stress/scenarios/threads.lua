@@ -12,7 +12,8 @@
 --                     sums and integer types must be right
 --   parallelPrepared  the same with prepared statements and binds, and
 --                     cursors with temporary CLOBs; no temporary LOB
---                     may stay in an open session
+--                     may stay in an open session; skipped without the
+--                     bind API (conn:prepare and luasql.type)
 --   parallelConnect   N lanes connect and close in a loop at the same
 --                     time; the sessions must be gone afterwards
 --   parallelWriters   N lanes raise the value of the same row by one at
@@ -36,10 +37,12 @@
 --                     connection error at once, close must work
 --   laneErrorCleanup  a lane raises an error with a connection, a
 --                     statement and a cursor open: they must be released
---                     when its Lua state ends (no session left)
+--                     when its Lua state ends (no session left); without
+--                     the bind API without the statement
 --   laneEndCleanup    the same for a lane that ends normally
 --   envNotSendable    sending an environment through a linda must fail
---                     cleanly; the environment works on
+--                     cleanly; the environment works on (checked also
+--                     when the send worked, before the case fails)
 --
 -- Phase:
 --   laneLoop  a pool of N lanes; per iteration each connects, queries
@@ -61,9 +64,11 @@
 -- cannot change the row after the holder committed.
 --
 -- Skipped without Lanes, without ctx.laneSpec or without the queries
--- of the backend; lockWait and deadlock are skipped without the
--- threads table. Cases that count sessions or kill one need the admin
--- connection.
+-- of the backend (offsetQuery, multiRowQuery; with the bind API also
+-- offsetBindQuery and clobRowsQuery); lockWait and deadlock are
+-- skipped without the threads table. Cases that count sessions or kill
+-- one need the admin connection. A driver without the bind API (e.g.
+-- luasql.ado) runs every case except parallelPrepared, and the phase.
 
 local dbutil = require("dbutil")
 local phases = require("phases")
@@ -595,14 +600,15 @@ local function laneEndCleanupCase(ctx)
    expectSessionsBack(ctx, base, "after the lane ended")
 end
 
+-- A driver written in Lua (luasql.ado) has a table as environment,
+-- which a linda copies: the original must work on all the same, then
+-- the case fails (a limit of the backend, threadsLimits).
 local function envNotSendableCase(ctx)
    local env = check("new environment", ctx.newEnvironment())
    local ok, sent = pcall(ctx.linda.send, ctx.linda, "env", env)
-   if ok and sent then
+   local copied = ok and sent
+   if copied then
       pcall(ctx.linda.receive, ctx.linda, 0, "env")
-      env:close()
-      error("sending an environment through a linda worked, expected an"
-            .. " error", 0)
    end
    -- The environment works on.
    local conn = check("connect", ctx.openTestConnection(env))
@@ -610,6 +616,10 @@ local function envNotSendableCase(ctx)
    check("query", value, err)
    check("close connection", conn:close())
    check("close environment", env:close())
+   if copied then
+      error("sending an environment through a linda worked, expected an"
+            .. " error", 0)
+   end
 end
 
 -- Backend keys of the cases that use the threads table, and of the
@@ -619,7 +629,8 @@ local tableKeys = { "threadsTableCreate", "threadsTableDrop", "threadsFill",
 
 local caseList = {
    { name = "parallelQueries", run = parallelQueriesCase },
-   { name = "parallelPrepared", run = parallelPreparedCase },
+   { name = "parallelPrepared", run = parallelPreparedCase,
+     usesBindApi = true },
    { name = "parallelConnect", run = parallelConnectCase,
      needsAdmin = true, needsLeftovers = true },
    { name = "parallelWriters", run = parallelWritersCase, needsTable = true,
@@ -686,6 +697,9 @@ end
 
 -- Why a case is skipped, or nil.
 local function skipReason(ctx, case)
+   if case.usesBindApi and not dbutil.hasBindApi(ctx) then
+      return dbutil.noBindApiReason
+   end
    if case.needsAdmin and not ctx.adminConn then
       return "needs the admin connection"
    end
@@ -828,12 +842,13 @@ local phaseList = {
 function threads.run(ctx)
    local backend = ctx.backend
    local conn = ctx.testConn
-   if not dbutil.hasBindApi(ctx) then
-      report.print("  ", "skipped: " .. dbutil.noBindApiReason, "skip")
-      return true
+   -- The queries of the prepared tasks only with the bind API.
+   local required = { "offsetQuery", "multiRowQuery" }
+   if dbutil.hasBindApi(ctx) then
+      required[#required + 1] = "offsetBindQuery"
+      required[#required + 1] = "clobRowsQuery"
    end
-   for _, key in ipairs({ "offsetQuery", "offsetBindQuery", "clobRowsQuery",
-                          "multiRowQuery" }) do
+   for _, key in ipairs(required) do
       if backend[key] == nil then
          report.print("  ", "skipped: backend has no " .. key, "skip")
          return true
