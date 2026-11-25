@@ -65,3 +65,11 @@ Targets `odbc_postgres` and `odbc_mariadb`. psqlODBC and MariaDB Connector/ODBC 
 The queries are those of the native backends: `generate_series` for PostgreSQL, `seq_1_to_<n>` of the Sequence engine for MariaDB. The LOB phases read text and bytes of the result (`repeat`, `decode` or `REPEAT`, `UNHEX`); neither DBMS has temporary LOBs, so there is no check of the LOB queries (`backend.tempLobChecks`).
 
 `commitCursor` runs (`backend.cursorsSurviveEnd`): the result is on the client, so the cursor reads on after `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)`; checked with both vendor drivers (500 more rows after each). The 2000-row query is the one of the native backend.
+
+## ADO
+
+Targets `ado_postgres` and `ado_mariadb`: `luasql.ado` through the OLE DB provider for ODBC drivers (MSDASQL) with the DSNs of the ODBC targets, without session pooling (`OLE DB Services=-2`, see [`README.md`](../README.md#ado-2)). As with ODBC, psqlODBC and MariaDB Connector/ODBC give the whole result of a query to the client at the execute: the server keeps no cursor, so there is no server counter of open cursors, and a cursor that is not freed shows in the memory of the process only. The server counter is `open tx`, the open transaction of the test session, read as with ODBC (`pg_stat_activity` on the admin connection, `@@in_transaction` on the test connection); with autocommit on, the own mode of ADO, it must be 0 before every phase. There is no counter of prepared statements: MSDASQL runs a statement of `conn:execute` without a prepare on the server (none in `pg_prepared_statements`, `Com_stmt_prepare` 0, probe of 25 November 2026).
+
+The queries are those of the ODBC backends. The LOB phases read text and bytes of the result; for ADO both are long columns (`adLongVarWChar`, `adLongVarBinary`), which MSDASQL gave as NULL while the recordset kept more than one row in its cache (found and fixed in `luasql.ado` during task core-ado), so the phases check every value.
+
+`gcClose` lets the garbage collector close the recordset: the cursor object of `luasql.ado` closes it in its finalizer. `commitCursor` runs (`backend.cursorsSurviveEnd`): the result is on the client, so the cursor reads on after `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)`.

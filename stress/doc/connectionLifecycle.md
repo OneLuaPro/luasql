@@ -119,3 +119,20 @@ The connection goes through `env:connect(dsn, user, password)` with the system D
 The limit of `unknownUser` with `odbc_postgres`: psqlODBC Unicode gives no server text for a failed logon (wrong user, wrong password, unknown database), only `Error: SqlState=08001`: PostgreSQL sends the message before the logon in the encoding of the server, and the Unicode driver drops text it cannot read as UTF-8. The case passes if the message is that one and is reported as a known limitation. The test user is never used with a wrong password.
 
 With `odbc_mariadb` the process memory of the phases `connectClose`, `connectGc`, `connectScoped` and `envCycle` is a limit (`backend.memoryLimits`): Connector/ODBC 3.2.10 on Windows loses about 250 bytes per TLS connect inside Connector/C (Schannel, `ma_schannel_client_handshake` does not free the ClientHello buffer; MariaDB JIRA CONC-883, formerly ODBC-519), about +2.5 MB per 10 000 connects. The same holds for `laneLoop` of [`threads`](threads.md) and for [`soak`](soak.md). The Lua heap, the counters and the sessions are judged as before. Without TLS (a DSN with `FORCETLS` off, used for the probes) the phases are flat; the DSN of the suite keeps TLS on, so the leak stays visible.
+
+## ADO
+
+The connection goes through `env:connect(source, user, password)` with `Provider=MSDASQL;DSN=<dsn>;OLE DB Services=-2`, where the DSN is that of the ODBC target (`luatest_pg`, `luatest_mariadb`); user and password go to `Connection.Open` as arguments, never into the string. A session is counted as with ODBC: `pg_stat_activity` after a wait of 0.1 seconds for `ado_postgres`, `information_schema.PROCESSLIST` for `ado_mariadb`, by the name of the test user, so a `psql` or `mariadb.exe` window of the test user counts as well. The server counter is `open tx` (see [`cursorLifecycle`](cursorLifecycle.md)).
+
+`OLE DB Services=-2` turns off the session pooling of the OLE DB services, which ADO uses by default (decided by the user on 25 November 2026). With pooling, a closed connection keeps its session on the server as long as any `ADODB.Connection` object of the process exists, and the next connect with the same string gets it back: the sessions of the test user could then no longer tell a session the driver left open from one in the pool, and `manyOpen` and the sessions of the phases would differ from the expected counts. Without pooling every connect is a real logon (about 57 ms with psqlODBC, 17 ms with Connector/ODBC over TLS, instead of 2.5 and 1.2 ms with the pool), and the sessions come and go as with ODBC (probe of 25 November 2026). The pooling itself is checked by the functional test `checks/ado.lua` (scenario `pooling`).
+
+Connects that must fail:
+
+| Test          | Checks                                                  | Results                                                                                                                                  |
+| ------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `unknownUser` | Connects as a user `luastress_nouser` that does not exist. | MariaDB: `nil` and `[ma-3.2.10]Access denied for user ...`. PostgreSQL: `nil` and `Error: SqlState=08001`; this is a limit, as with `odbc_postgres` (see [ODBC](#odbc)). |
+| `unknownDsn`  | Connects to a DSN `luastress_nodsn` that does not exist. | Pass: `nil` and the message of the Driver Manager, in the language of Windows; the pattern is its prefix `[Microsoft][ODBC Driver Manager]`. |
+
+With `ado_mariadb` the process memory of the phases `connectClose`, `connectGc`, `connectScoped` and `envCycle` is a limit (`backend.memoryLimits`), as with `odbc_mariadb`: without pooling every connect is a TLS connect, and Connector/ODBC 3.2.10 on Windows loses about 250 bytes per TLS connect inside Connector/C (MariaDB JIRA CONC-883). The Lua heap, the counters and the sessions are judged as before.
+
+Skipped: `closeWithStmt` and `gcAll`, since `luasql.ado` has no `conn:prepare` yet (task bindapi-ado).

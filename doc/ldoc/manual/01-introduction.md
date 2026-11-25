@@ -289,6 +289,16 @@ code without an error message come first.
   (psqlODBC gives `0.1`).
 - **odbc: `conn:setautocommit(true)` rolls back an open transaction**, as
   the other drivers do; with LuaSQL ODBC commits it.
+- **ado: `conn:setautocommit(true)` rolls back an open transaction**, as the
+  other drivers do; LuaSQL commits it.
+- **ado: values are read by the type of the column** (`Field.Type`):
+  `NUMERIC`, `DECIMAL` and `CURRENCY` as exact text (`"12.30"`), `BIGINT` as
+  an exact integer, an unsigned `BIGINT` above 2^63 - 1 as text, an unsigned
+  `INT` as an integer, dates and times as text in ISO form by their type
+  (`2026-11-25`, `12:34:56`, `2026-11-25 12:34:56.789`); LuaSQL leaves the
+  conversion to luacom, which gives `NUMERIC` and `BIGINT` as floats (a large
+  value loses digits) and dates and times in the form of the user's locale
+  (e.g. `25.11.2026 12:34:56`).
 
 **Other changes**
 
@@ -543,6 +553,63 @@ code without an error message come first.
   the server, which `conn:prepare` and `conn:execute(sql, ...)` no longer
   make) and returns `nil` and a message if the vendor driver does not
   describe parameters; LuaSQL returns `nil` without a message then.
+- **ado: transactions:**
+    - With autocommit on the driver uses the autocommit of ADO: no transaction
+      is open, the provider commits every statement. LuaSQL begins a
+      transaction at the connect also with autocommit on and calls
+      `CommitTrans` and `BeginTrans` after every `execute`, two calls more per
+      statement.
+    - With autocommit off a transaction is always open: `setautocommit(false)`
+      begins it, and ADO begins the next one at every `commit` and `rollback`
+      (`adXactCommitRetaining`, `adXactAbortRetaining`).
+    - `commit` and `rollback` with autocommit on return `true` without calling
+      ADO; `setautocommit` with the mode the connection has returns `true` and
+      does nothing; LuaSQL commits or rolls back its own transaction and
+      begins the next one.
+    - `conn:setautocommit(true)` returns `false` and a message if the rollback
+      fails, and autocommit stays off.
+- **ado: closing:**
+    - `close` of a closed object, `env:close()` with open connections and
+      `conn:close()` with open cursors return `false` and a message; LuaSQL
+      returns `false` alone.
+    - `conn:close()` rolls back an open transaction and then closes. If ADO
+      still refuses to close (after a lost connection, MariaDB Connector/ODBC
+      cannot end the transaction), `close` returns `true`, the connection
+      counts as closed and the garbage collector releases it; LuaSQL raises
+      the error of ADO and leaves the environment with a connection it can
+      never close.
+    - The garbage collector closes a cursor or a connection nobody keeps (a
+      connection only without open cursors; a cursor keeps its connection, a
+      connection its environment); LuaSQL keeps every open cursor and
+      connection in a table of its parent, so a forgotten cursor keeps
+      `conn:close()` and `env:close()` from ever succeeding.
+- **ado: a closed object raises an error that starts with `LuaSQL:`** (e.g.
+  `LuaSQL: connection is closed`), without a position; LuaSQL raises
+  `Connection closed` with the position in `ado.lua`.
+- **ado: `conn:execute` with an SQL that is not a string raises an error**;
+  LuaSQL sends a number as text and returns the error of ADO for `nil`.
+- **ado: messages come from the error records of ADO** (`Connection.Errors`),
+  several records joined by one line end; ADO's own errors, which have no
+  record, give the text of ADO. LuaSQL returns the text of luacom with its
+  prefix `COM exception:(<file>,<line>):`.
+- **ado: the driver needs `luacom.config.abort_on_error = true`** (the default
+  of luacom): with `false` every function that calls COM raises an error. With
+  LuaSQL a failing call then returns no value and counts as a success, so a
+  syntax error gave 0, and with autocommit on the driver committed.
+- **ado: `cur:fetch()` after the last row closes the cursor and returns
+  `nil`**; LuaSQL returns `nil` and `"End of cursor reached"` and leaves the
+  cursor open.
+- **ado: the module returns its table** (`local luasql = require
+  "luasql.ado"`) and sets no global `luasql`; LuaSQL sets the global and
+  returns no table.
+- **ado: rows are read faster**: the cursor reads the field objects of ADO
+  once; LuaSQL asks ADO for every field of every row anew.
+- **ado: requirements and the behavior of ADO worth knowing:** the driver
+  needs luacom of OneLuaPro (`luacom.SetConversion`) and a UTF-8 ANSI code
+  page of the process, as `luasql.odbc`; ADO keeps closed connections in its
+  session pool, and MariaDB `TINYINT UNSIGNED` from 128 to 255 arrives as 0
+  without an error (`CAST(col AS SIGNED)` reads it); see the section on the
+  ADO driver in `README.md` until the ADO topic of this manual follows.
 
 **Extensions**
 
@@ -582,6 +649,9 @@ code without an error message come first.
   The other useful client flags are fields of the module too:
   `CLIENT_FOUND_ROWS`, `CLIENT_COMPRESS`, `CLIENT_IGNORE_SPACE`,
   `CLIENT_INTERACTIVE`, `CLIENT_MULTI_STATEMENTS`, `CLIENT_MULTI_RESULTS`.
+- The additions of ado: `luasql._CLIENTVERSION`, the version of ADO in the
+  form ADO gives it (e.g. `"10.0"`); objects for to-be-closed variables and
+  with `tostring`.
 - The additions of odbc in the @{09-odbc.md|ODBC topic}: `luasql.type` and
   typed parameters for the prepared statements of LuaSQL (`T.binary`, dates
   and times checked against the calendar, `{T.null, type}` with the SQL type

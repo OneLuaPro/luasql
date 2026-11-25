@@ -2,7 +2,7 @@
 
 The LuaSQL stress test suite exercises a LuaSQL driver under load: it opens and closes connections, cursors and prepared statements hundreds of thousands of times, provokes errors, kills sessions, uses the driver from several threads at once and runs for hours. It checks that the driver never crashes, never leaks memory, cursors, temporary LOBs (Large Objects) or sessions, never loses or changes data and never leaves a session blocked. Behavior of the client library or the DBMS (Database Management System) that a user might not expect is reported as a known limitation with its reason, without failing the run.
 
-The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver `luasql.firebird`, the PostgreSQL driver `luasql.postgres`, the MariaDB driver `luasql.mysql` and, for PostgreSQL and MariaDB, the ODBC driver `luasql.odbc` are implemented:
+The suite is written for several DBMS. Everything specific to one DBMS lives in a small configuration, backend and preparation module; the scenarios themselves only use the LuaSQL API. So far the Oracle driver `luasql.oci8`, the SQLite driver `luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver `luasql.firebird`, the PostgreSQL driver `luasql.postgres`, the MariaDB driver `luasql.mysql` and, for PostgreSQL and MariaDB, the ODBC driver `luasql.odbc` and the ADO driver `luasql.ado` are implemented:
 
 | Driver            | DBMS                    | Status    |
 | ----------------- | ----------------------- | --------- |
@@ -13,6 +13,7 @@ The suite is written for several DBMS. Everything specific to one DBMS lives in 
 | `luasql.duckdb`   | DuckDB                  | available |
 | `luasql.firebird` | Firebird                | available |
 | `luasql.odbc`     | PostgreSQL (psqlODBC), MariaDB (Connector/ODBC) | available |
+| `luasql.ado`      | PostgreSQL, MariaDB (ADO, MSDASQL and the ODBC drivers above) | available, without the bind API (task bindapi-ado) |
 
 Many scenarios depend on prepared statements (`conn:prepare`, `stmt:execute`), which most LuaSQL drivers do not offer yet. The suite detects this at run time and skips what it cannot test, so it can serve as the acceptance test for prepared statements once a driver gets them. The suite was written alongside the further development of [LuaSQL](https://github.com/OneLuaPro/luasql) for [OneLuaPro](https://github.com/OneLuaPro) and relies on its extensions (prepared statements, `stmt:reset()`, `conn:setoption()`); it does not necessarily work with the official LuaSQL release of the [Lunar Modules project](https://github.com/lunarmodules/luasql).
 
@@ -32,7 +33,7 @@ The suite needs only plain Lua and two common modules; further modules are optio
 
 ## Preparing a Run
 
-Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite, DuckDB, Firebird, PostgreSQL and MariaDB, each with its native driver, and PostgreSQL and MariaDB through ODBC are available; instructions for the other DBMS will follow when their backends are implemented.
+Each DBMS needs its own preparation: the client library, the connection data and the rights of the database users. So far Oracle, SQLite, DuckDB, Firebird, PostgreSQL and MariaDB, each with its native driver, and PostgreSQL and MariaDB through ODBC and through ADO are available; instructions for the other DBMS will follow when their backends are implemented.
 
 ### Oracle
 
@@ -407,6 +408,18 @@ Set them as shown for [PostgreSQL](#postgresql) and [MariaDB](#mariadb). The adm
 
 **Preparation:** the preparation step is that of the native driver of the DBMS: `prep/odbc_postgres.lua` and `prep/odbc_mariadb.lua` run `prep/postgres.lua` and `prep/mysql.lua` on the admin connection. They drop the tables of an aborted run and create the helper tables `luastress_err` and `luastress_dml` for `executeError` of `errorPaths` and `connDml` of `params`; without the admin connection these phases fail (see [`doc/prep.md`](doc/prep.md)).
 
+### ADO
+
+**Driver and client library:** `luasql.ado` is written in Lua on luacom (OneLuaPro/luacom `ca4d26a` or later) and uses ADO, part of Windows, with the OLE DB provider for ODBC drivers (MSDASQL) and the ODBC driver of the DBMS. The suite was tested with ADO 10.0 of Windows 10 and the ODBC drivers of the [ODBC](#odbc) targets: psqlODBC (Unicode) against PostgreSQL 18.7 and MariaDB Connector/ODBC 3.2.10 against MariaDB 12.3.4. ADO exists on Windows only. luacom needs `luacom.config.abort_on_error = true`, its default, and a UTF-8 ANSI code page of the process, which `lua.exe` of OneLuaPro has through its manifest.
+
+**Targets:** one backend per target, chosen by its name on the command line: `ado_postgres` and `ado_mariadb`.
+
+**Data source:** the system DSNs of the ODBC targets, `luatest_pg` and `luatest_mariadb` (see [ODBC](#odbc)); they are also the DSNs of the functional test `checks/ado.lua`. The suite connects with `env:connect("Provider=MSDASQL;DSN=<dsn>;OLE DB Services=-2", user, password)`: user and password go to `Connection.Open` as arguments, never into the string. `OLE DB Services=-2` turns off the session pooling of ADO, see [ADO](#ado-2) under DBMS-Specific Notes.
+
+**Connection data, rights, database:** as for [ODBC](#odbc): user and password from `POSTGRES_TEST_*` and `POSTGRES_ADMIN_*` for `ado_postgres`, from `MYSQL_TEST_*` and `MYSQL_ADMIN_*` for `ado_mariadb`; the variables for host, port and database are not read. The admin connection goes through the same DSN as the admin user.
+
+**Preparation:** there is no preparation step for ADO yet; the scenarios that run without the bind API need no helper tables (see [`doc/prep.md`](doc/prep.md)).
+
 ## Running
 
 The suite is started with the DBMS and a tier. It can be called from any directory with the path to `stress.lua`, e.g. `lua C:\misc\luasql\stress\stress.lua oracle smoke`; it finds its modules next to `stress.lua`. A relative path given to `--csv` is relative to the current directory.
@@ -463,6 +476,8 @@ Scenarios with slow steps use fewer iterations, e.g. one logon per iteration; ea
 | Quick check of the MariaDB driver                          | `lua stress.lua mysql smoke`                                |
 | Quick check of the ODBC driver on PostgreSQL               | `lua stress.lua odbc_postgres smoke`                        |
 | Quick check of the ODBC driver on MariaDB                  | `lua stress.lua odbc_mariadb smoke`                         |
+| Quick check of the ADO driver on PostgreSQL                | `lua stress.lua ado_postgres smoke`                         |
+| Quick check of the ADO driver on MariaDB                   | `lua stress.lua ado_mariadb smoke`                          |
 | Output without colors                                      | `set NO_COLOR=1` before the run                             |
 
 
@@ -555,6 +570,13 @@ Exit codes: 0 all scenarios passed (limits do not count), 1 a scenario or the cl
 - **`Could not deallocate query`** from `odbc_mariadb`: a fault of Connector/ODBC 3.2.10 after a query that fails while the driver stores its result (see [DBMS-Specific Notes](#odbc-2)); check that `PS cache size` of `luatest_mariadb` is 250 (with 0 `errorPaths` fails) and that the backend has `soakLimits.fetchError`.
 - **Other errors before the first scenario, `FAILED` with messages in another language, wrong numbers of sessions, a hang, an aborted run:** as for the native driver of the DBMS, see [PostgreSQL](#postgresql-1) and [MariaDB](#mariadb-1) above; the causes are the same.
 
+
+### ADO
+
+- **`LuaSQL: luasql.ado needs luacom with SetConversion`** before the first scenario: the luacom found is older than OneLuaPro/luacom `ca4d26a`.
+- **`LuaSQL: luasql.ado needs luacom.config.abort_on_error = true`**: something set this option of luacom to `false` in the process, e.g. through `LUA_INIT`.
+- **`Data source name not found`**, **`Error: SqlState=08001`**, **`Access denied for user ...`**: as for [ODBC](#odbc-1); the DSN must exist in the ODBC administrator of the bitness of the Lua interpreter.
+- **Messages in German or another language:** ADO's own errors (e.g. an empty command text) and the Driver Manager speak the language of Windows; the patterns of the suite do not depend on it.
 
 ## Scenarios
 
@@ -903,6 +925,31 @@ With MariaDB every later call that ends a transaction keeps failing, so `killThe
 - A compound statement of MariaDB (`BEGIN NOT ATOMIC ...; END`) runs through the prepare of Connector/ODBC.
 
 **Not covered with ODBC yet:** `prefetch` (`luasql.odbc` has no driver options), `warnings` (`luasql.odbc` drops warnings; the backends have none of its keys), the named parameters of `params` (ODBC has positions only), `badColumnType` of `errorPaths` (`luasql.odbc` reads every type, a type it does not read by type as the text of the vendor driver), the cases of `volume` with a full tablespace and `maxLength`, the WAL cases of `concurrency` (SQLite only), the cases of `dataTypes` for intervals, row ids, hex text in binary columns and unsupported types, and with MariaDB a timestamp with its own offset (see the files `doc/dataTypes-odbc_*.md`), the failing query in the round of `soak` with `odbc_mariadb` (fault A), the statement cache of Connector/ODBC turned off (fault B), and other vendor drivers.
+
+### ADO
+
+Tested with the targets `ado_postgres` (PostgreSQL 18.7, psqlODBC Unicode 18.00.0004) and `ado_mariadb` (MariaDB 12.3.4, MariaDB Connector/ODBC 3.2.10, TLS), each through ADO 10.0 and MSDASQL of Windows 10 with the `luasql.ado` of task core-ado. `luasql.ado` has no `conn:prepare`, no `luasql.type` and no driver options yet (the bind API comes with task bindapi-ado), so the suite runs `cursorLifecycle`, `errorPaths`, `connectionLifecycle` and `connectionLoss`, each without the cases and phases that need prepared statements; `stmtLifecycle`, `params`, `concurrency`, `threads`, `dataTypes`, `transactions`, `volume` and `soak` are skipped, as are `prefetch` and `warnings`.
+
+**Session pooling off:** ADO keeps a closed connection in the session pool of the OLE DB services by default, and the next connect with the same string gets the same session on the server, with its state; the sessions stay as long as any `ADODB.Connection` object of the process exists. The suite counts the sessions of the test user to find connections the driver leaves open, which a pool would hide, so the backends turn pooling off with `OLE DB Services=-2` in the connection string (decided by the user on 25 November 2026). Every connect is then a real logon: about 57 ms with psqlODBC and 17 ms with Connector/ODBC over TLS, instead of 2.5 and 1.2 ms with the pool (probe of 25 November 2026). The pooling itself is checked by `checks/ado.lua`.
+
+**The whole result on the client:** as with ODBC, both vendor drivers give the whole result of a query to the client at the execute: an error in any row comes at the execute, a cursor reads on after `conn:commit()`, `conn:rollback()` and `conn:setautocommit(true)` (`cursorsSurviveEnd`) and after a kill (`resultOnClient`). The server counter is `open tx`; there is no counter of prepared statements, since MSDASQL prepares nothing on the server for `conn:execute`.
+
+**Transactions:** with autocommit on, `luasql.ado` uses the own mode of ADO, so no transaction is open between statements; with autocommit off a transaction is always open (ADO begins the next one at every commit and rollback).
+
+**After a lost connection:** ADO does not notice it; the next call that needs the server fails. The first `conn:commit()` with open work returns `false` with both targets. With psqlODBC every later `setautocommit(true)`, `rollback` and `commit` returns `true` (limit `endAfterKill`, as with `odbc_postgres`); with Connector/ODBC they return `false` (`Server has gone away`). With MariaDB the first `conn:execute` gives `Connection* is closed`, every later one only the text of Windows for `E_FAIL` (`Unbekannter Fehler`, `Unspecified error`), the only error record ADO itself has then; the backend takes both languages of that text as a message of a lost connection.
+
+**Messages:** from the error records of ADO, several records joined by a line end; ADO's own errors, e.g. `emptyStatement`, an empty command text, come in the language of Windows.
+
+**Known limitations**, reported as "limit":
+
+| Limit | Scenario, case | Reason |
+| ---- | ---- | ---- |
+| `endAfterKill` | `connectionLoss`, `killThenAutocommit` (`ado_postgres`) | After the first failed call psqlODBC takes the transaction of a lost connection as ended: `conn:setautocommit(true)`, `conn:rollback()` and `conn:commit()` return `true` without calling the server (the work is lost), as with `odbc_postgres`. |
+| `unknownUser` | `connectionLifecycle`, `unknownUser` (`ado_postgres`) | psqlODBC Unicode gives no server text for a failed logon, only `Error: SqlState=08001`, as with `odbc_postgres`. |
+| memory | `connectionLifecycle`, `connectClose`, `connectGc`, `connectScoped`, `envCycle` (`ado_mariadb`) | CONC-883, as with `odbc_mariadb`: Connector/ODBC 3.2.10 on Windows loses about 250 bytes per TLS connect inside Connector/C; without pooling every connect is a TLS connect. |
+| memory | `connectionLoss`, `killLoop` (`ado_mariadb`) | MSDASQL with Connector/ODBC keeps about 22 KB per connection on which a call failed after the connection was lost (nightly +20 MB over 950 iterations). A probe of 25 November 2026 found the same through ADO with luacom alone, with or without reading the error records, once per connection however many calls fail; nothing for a failing call on a live connection; about 570 bytes with `luasql.odbc` on the same DSN and nothing with psqlODBC. So not `luasql.ado`. `killFetchLoop` has no failing call and is judged. |
+
+**Not covered with ADO yet:** everything that needs prepared statements or typed parameters (task bindapi-ado), `prefetch` and `warnings` (no driver options, no warnings), `badColumnType` of `errorPaths`, and ADO with session pooling.
 
 ## Annex
 
