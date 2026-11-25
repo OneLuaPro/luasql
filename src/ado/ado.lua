@@ -1,6 +1,57 @@
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 -- ADO driver implemented using LuaCOM
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
+
+--- The ADO driver of LuaSQL.
+--
+-- `luasql.ado` connects through ADO, the database interface of Windows,
+-- and an OLE DB provider; with `Provider=MSDASQL`, the OLE DB provider for
+-- ODBC drivers, it reaches every data source of ODBC. It is written in Lua
+-- on luacom and implements the common LuaSQL objects (@{environment},
+-- @{connection}, @{cursor}). It has been tested with psqlODBC (PostgreSQL)
+-- and MariaDB Connector/ODBC through MSDASQL on Windows.
+--
+-- `luasql.ado` on purpose has no prepared statements and binds no
+-- parameters, unlike the other drivers of this fork: `conn.prepare` is
+-- `nil`, and further arguments of @{connection:execute} raise an error.
+--
+-- A value comes back by the type ADO reports for its column: the integer
+-- types as integers (an unsigned `BIGINT` beyond a Lua integer as text),
+-- `NUMERIC`, `DECIMAL` and `CURRENCY` as exact text, dates and times as
+-- text in ISO form, binary types as bytes. The @{10-ado.md|ADO topic}
+-- describes the requirements, connecting, session pooling, the data types,
+-- transactions and the behavior of ADO and the ODBC drivers worth knowing.
+--
+-- All objects follow the same rules:
+--
+-- - A call that fails in the database returns `nil` (or `false`) and an
+--   error message, the error records of ADO; a message of the driver
+--   itself starts with `LuaSQL:`. A wrong use of the API raises an error
+--   instead: a closed object, an argument of the wrong type, a further
+--   argument of @{connection:execute}.
+-- - An object is closed by its `close` method, by a to-be-closed variable
+--   (`<close>`) or by the garbage collector.
+-- - An object can be closed only after the objects it created: an
+--   environment after its connections, a connection after its cursors.
+--
+-- Besides the function @{ado}, the module holds the strings `_VERSION`,
+-- `_COPYRIGHT`, `_DESCRIPTION` and `_CLIENTVERSION` (the version of ADO in
+-- the form ADO gives it, e.g. `"10.0"`).
+-- @module luasql.ado
+-- @usage
+-- local driver = require "luasql.ado"
+-- local env  = assert(driver.ado())
+-- local conn = assert(env:connect("Provider=MSDASQL;DSN=luatest_pg",
+--                                 os.getenv("POSTGRES_TEST_USER"),
+--                                 os.getenv("POSTGRES_TEST_PASSWORD")))
+-- local cur  = assert(conn:execute("SELECT id, name FROM fruit ORDER BY id"))
+-- local id, name = cur:fetch()
+-- while id do
+--   print(id, name)
+--   id, name = cur:fetch()
+-- end
+-- conn:close()
+-- env:close()
 
 local luacom = require"luacom"
 
@@ -10,9 +61,9 @@ if type(luacom) ~= "table" or type(luacom.SetConversion) ~= "function" then
           " (OneLuaPro/luacom ca4d26a or later)", 0)
 end
 
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 -- luasql table name
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 local luasql = {}
 
 local ADOTypes = {}
@@ -62,9 +113,9 @@ luasql._VERSION = "LuaSQL 2.8.1"
 -- the version of ADO, in the form ADO gives it (e.g. "10.0")
 luasql._CLIENTVERSION = adoVersion ~= nil and tostring(adoVersion) or nil
 
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 -- helpers
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 -- an API error: raised without a position, as the drivers written in C
 local function apierror(msg)
     error("LuaSQL: " .. msg, 0)
@@ -148,11 +199,18 @@ local postprocess = {
     end,
 }
 
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 -- function that returns an ADO environment
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 local createConnection, createCursor
 
+--- Creates an environment.
+-- The environment opens connections. Create one per Lua state and open any
+-- number of connections on it.
+-- @function ado
+-- @treturn environment the new environment
+-- @raise if `luacom.config.abort_on_error` is not `true`
+-- @usage local env = assert(require("luasql.ado").ado())
 function luasql.ado()
     checkluacom()
     local isClosed  = false
@@ -169,6 +227,19 @@ function luasql.ado()
         nconns = nconns - 1
     end
 
+    --- An environment, created by @{ado}.
+    -- It opens connections. It can be closed only after all of its
+    -- connections.
+    -- @type environment
+
+    --- Closes the environment.
+    -- An environment with open connections stays open. The garbage
+    -- collector and a to-be-closed variable call it as well.
+    -- @function close
+    -- @treturn[1] boolean `true`
+    -- @treturn[2] boolean `false` if connections are open or the
+    -- environment is already closed
+    -- @treturn[2] string error message
     function env:close()
         if self ~= env then apierror("environment expected") end
 
@@ -184,6 +255,22 @@ function luasql.ado()
         return true
     end
 
+    --- @type environment
+
+    --- Opens a connection.
+    -- The first argument is a connection string of ADO, e.g.
+    -- `"Provider=MSDASQL;DSN=luatest_pg"`; user and password go to
+    -- `Connection.Open` as arguments, so they need not be in the string.
+    -- A new connection is in autocommit mode.
+    -- @function connect
+    -- @tparam string sourcestr connection string of ADO
+    -- @tparam[opt] string user user name
+    -- @tparam[opt] string pass password
+    -- @tparam[opt] number opts a value of ADO's `ConnectOptionEnum`
+    -- @treturn[1] connection the new connection
+    -- @treturn[2] nil
+    -- @treturn[2] string error message
+    -- @raise if the environment is closed or an argument has the wrong type
     function env:connect(sourcestr, user, pass, opts)
         if self ~= env then apierror("environment expected") end
 
@@ -227,9 +314,9 @@ function luasql.ado()
 end
 
 
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 -- creates an ADO connection
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 function createConnection(conObj, env, closeFunc)
 
     local ncursors = 0
@@ -284,6 +371,22 @@ function createConnection(conObj, env, closeFunc)
         return failmessage(conObj, err)
     end
 
+    --- A connection to a data source, created by @{environment:connect}.
+    -- It runs SQL statements and controls transactions. It can be closed
+    -- only after all of its cursors.
+    -- @type connection
+
+    --- Closes the connection.
+    -- An open transaction is rolled back first. A connection with open
+    -- cursors stays open. After a lost connection ADO may refuse to close;
+    -- the connection then counts as closed all the same and the garbage
+    -- collector releases it. The garbage collector (for a connection
+    -- without open cursors) and a to-be-closed variable call it as well.
+    -- @function close
+    -- @treturn[1] boolean `true`
+    -- @treturn[2] boolean `false` if cursors are open or the connection is
+    -- already closed
+    -- @treturn[2] string error message
     function con:close()
         if self ~= con then apierror("connection expected") end
 
@@ -299,6 +402,16 @@ function createConnection(conObj, env, closeFunc)
         return true
     end
 
+    --- @type connection
+
+    --- Commits the current transaction.
+    -- With autocommit off ADO begins the next transaction at once. With
+    -- autocommit on there is no transaction, and `commit` returns `true`.
+    -- @function commit
+    -- @treturn[1] boolean `true`
+    -- @treturn[2] boolean `false`
+    -- @treturn[2] string error message
+    -- @raise if the connection is closed
     function con:commit()
         check(self)
 
@@ -315,11 +428,30 @@ function createConnection(conObj, env, closeFunc)
         return true
     end
 
-    function con:execute(sql)
+    --- @type connection
+
+    --- Executes an SQL statement.
+    -- A query returns a cursor, any other statement the number of rows it
+    -- changed (as the ODBC driver reports it for DDL, e.g. 0 or -1). The
+    -- driver binds no parameters: values go into the SQL text, and quoting
+    -- them is the job of the program.
+    -- @function execute
+    -- @tparam string sql the SQL statement
+    -- @treturn[1] cursor for a query
+    -- @treturn[2] integer the number of rows changed
+    -- @treturn[3] nil
+    -- @treturn[3] string error message
+    -- @raise if the connection is closed, `sql` is not a string or further
+    -- arguments are given
+    function con:execute(sql, ...)
         check(self)
 
         if type(sql) ~= "string" then
             apierror("SQL must be a string, got " .. type(sql))
+        end
+        if select("#", ...) > 0 then
+            apierror("luasql.ado binds no parameters (conn:execute takes"
+                     .. " the SQL text only)")
         end
 
         local cond, res, upcount = pcall(conObj.Execute, conObj, sql, nil,
@@ -349,6 +481,16 @@ function createConnection(conObj, env, closeFunc)
         return math.tointeger(upcount) or upcount
     end
 
+    --- @type connection
+
+    --- Rolls back the current transaction.
+    -- With autocommit off ADO begins the next transaction at once. With
+    -- autocommit on there is no transaction, and `rollback` returns `true`.
+    -- @function rollback
+    -- @treturn[1] boolean `true`
+    -- @treturn[2] boolean `false`
+    -- @treturn[2] string error message
+    -- @raise if the connection is closed
     function con:rollback()
         check(self)
 
@@ -365,6 +507,18 @@ function createConnection(conObj, env, closeFunc)
         return true
     end
 
+    --- @type connection
+
+    --- Turns autocommit on or off.
+    -- Autocommit is the mode of ADO, without a transaction. Turning it off
+    -- begins a transaction; with it off a transaction is always open.
+    -- Turning it on rolls back the open transaction.
+    -- @function setautocommit
+    -- @tparam boolean bool `true` for autocommit
+    -- @treturn[1] boolean `true`
+    -- @treturn[2] boolean `false` (the mode stays as it was)
+    -- @treturn[2] string error message
+    -- @raise if the connection is closed
     function con:setautocommit(bool)
         check(self)
 
@@ -402,9 +556,9 @@ function createConnection(conObj, env, closeFunc)
     return con
 end
 
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 -- creates an ADO cursor (recordset)
----------------------------------------------------------------------
+-- ------------------------------------------------------------------
 function createCursor(rs, con, closeFunc, fail)
 
     local isClosed = false
@@ -480,6 +634,18 @@ function createCursor(rs, con, closeFunc, fail)
         return true
     end
 
+    --- A cursor over the rows of a query, created by
+    -- @{connection:execute}. @{cursor:fetch} returns its rows one by one.
+    -- The cursor is closed automatically after its last row. With psqlODBC
+    -- and Connector/ODBC the whole result is read at the execute.
+    -- @type cursor
+
+    --- Closes the cursor before its last row.
+    -- The garbage collector and a to-be-closed variable call it as well.
+    -- @function close
+    -- @treturn[1] boolean `true`
+    -- @treturn[2] boolean `false` if the cursor is already closed
+    -- @treturn[2] string error message
     function res:close()
         if self ~= res then apierror("cursor expected") end
 
@@ -492,6 +658,23 @@ function createCursor(rs, con, closeFunc, fail)
         return true
     end
 
+    --- @type cursor
+
+    --- Returns the next row.
+    -- Without arguments it returns the values of the columns, in their
+    -- order. With a table it stores them there: with the column numbers as
+    -- keys (mode `"n"`, the default), the column names (`"a"`) or both
+    -- (`"na"`), and returns the table. NULL is `nil`. A value comes back by
+    -- the type ADO reports for its column, see the @{10-ado.md|ADO topic}.
+    -- After the last row the cursor is closed and `fetch` returns `nil`.
+    -- @function fetch
+    -- @tparam[opt] table tb table to store the values in
+    -- @tparam[opt] string modestring `"n"`, `"a"` or `"na"`
+    -- @return the values of the row, or the table
+    -- @treturn[2] nil after the last row
+    -- @treturn[3] nil
+    -- @treturn[3] string error message
+    -- @raise if the cursor is closed
     function res:fetch(tb, modestring)
         check(self)
         checkluacom()
@@ -539,12 +722,26 @@ function createCursor(rs, con, closeFunc, fail)
         return tb
     end
 
+    --- @type cursor
+
+    --- Returns the names of the columns.
+    -- @function getcolnames
+    -- @treturn table list of the names, in the order of the columns
+    -- @raise if the cursor is closed
     function res:getcolnames()
         check(self)
 
         return col_names
     end
 
+    --- @type cursor
+
+    --- Returns the types of the columns.
+    -- A type is the name of ADO's `DataTypeEnum` for the column, e.g.
+    -- `"adInteger"`, `"adVarWChar"` or `"adNumeric"`.
+    -- @function getcoltypes
+    -- @treturn table list of the type names, in the order of the columns
+    -- @raise if the cursor is closed
     function res:getcoltypes()
         check(self)
 

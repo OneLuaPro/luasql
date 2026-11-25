@@ -13,7 +13,7 @@ The suite is written for several DBMS. Everything specific to one DBMS lives in 
 | `luasql.duckdb`   | DuckDB                  | available |
 | `luasql.firebird` | Firebird                | available |
 | `luasql.odbc`     | PostgreSQL (psqlODBC), MariaDB (Connector/ODBC) | available |
-| `luasql.ado`      | PostgreSQL, MariaDB (ADO, MSDASQL and the ODBC drivers above) | available, without the bind API (task bindapi-ado) |
+| `luasql.ado`      | PostgreSQL, MariaDB (ADO, MSDASQL and the ODBC drivers above) | available; no bind API (decision of 25 November 2026) |
 
 Many scenarios depend on prepared statements (`conn:prepare`, `stmt:execute`), which most LuaSQL drivers do not offer yet. The suite detects this at run time and skips what it cannot test, so it can serve as the acceptance test for prepared statements once a driver gets them. The suite was written alongside the further development of [LuaSQL](https://github.com/OneLuaPro/luasql) for [OneLuaPro](https://github.com/OneLuaPro) and relies on its extensions (prepared statements, `stmt:reset()`, `conn:setoption()`); it does not necessarily work with the official LuaSQL release of the [Lunar Modules project](https://github.com/lunarmodules/luasql).
 
@@ -410,7 +410,7 @@ Set them as shown for [PostgreSQL](#postgresql) and [MariaDB](#mariadb). The adm
 
 ### ADO
 
-**Driver and client library:** `luasql.ado` is written in Lua on luacom (OneLuaPro/luacom `ca4d26a` or later) and uses ADO, part of Windows, with the OLE DB provider for ODBC drivers (MSDASQL) and the ODBC driver of the DBMS. The suite was tested with ADO 10.0 of Windows 10 and the ODBC drivers of the [ODBC](#odbc) targets: psqlODBC (Unicode) against PostgreSQL 18.7 and MariaDB Connector/ODBC 3.2.10 against MariaDB 12.3.4. ADO exists on Windows only. luacom needs `luacom.config.abort_on_error = true`, its default, and a UTF-8 ANSI code page of the process, which `lua.exe` of OneLuaPro has through its manifest.
+**Driver and client library:** `luasql.ado` is written in Lua on luacom (OneLuaPro/luacom `ca4d26a` or later) and has on purpose no prepared statements and binds no parameters (decision of 25 November 2026; see the ADO topic of the manual, [`doc/ldoc/manual/10-ado.md`](../doc/ldoc/manual/10-ado.md)). It uses ADO, part of Windows, with the OLE DB provider for ODBC drivers (MSDASQL) and the ODBC driver of the DBMS. The suite was tested with ADO 10.0 of Windows 10 and the ODBC drivers of the [ODBC](#odbc) targets: psqlODBC (Unicode) against PostgreSQL 18.7 and MariaDB Connector/ODBC 3.2.10 against MariaDB 12.3.4. ADO exists on Windows only. luacom needs `luacom.config.abort_on_error = true`, its default, and a UTF-8 ANSI code page of the process, which `lua.exe` of OneLuaPro has through its manifest.
 
 **Targets:** one backend per target, chosen by its name on the command line: `ado_postgres` and `ado_mariadb`.
 
@@ -418,7 +418,7 @@ Set them as shown for [PostgreSQL](#postgresql) and [MariaDB](#mariadb). The adm
 
 **Connection data, rights, database:** as for [ODBC](#odbc): user and password from `POSTGRES_TEST_*` and `POSTGRES_ADMIN_*` for `ado_postgres`, from `MYSQL_TEST_*` and `MYSQL_ADMIN_*` for `ado_mariadb`; the variables for host, port and database are not read. The admin connection goes through the same DSN as the admin user.
 
-**Preparation:** there is no preparation step for ADO yet; the scenarios that run without the bind API need no helper tables (see [`doc/prep.md`](doc/prep.md)).
+**Preparation:** there is no preparation step for ADO; the scenarios that run for ADO need no helper tables (see [`doc/prep.md`](doc/prep.md)).
 
 ## Running
 
@@ -928,7 +928,7 @@ With MariaDB every later call that ends a transaction keeps failing, so `killThe
 
 ### ADO
 
-Tested with the targets `ado_postgres` (PostgreSQL 18.7, psqlODBC Unicode 18.00.0004) and `ado_mariadb` (MariaDB 12.3.4, MariaDB Connector/ODBC 3.2.10, TLS), each through ADO 10.0 and MSDASQL of Windows 10 with the `luasql.ado` of task core-ado. `luasql.ado` has no `conn:prepare`, no `luasql.type` and no driver options yet (the bind API comes with task bindapi-ado), so the suite runs `cursorLifecycle`, `errorPaths`, `connectionLifecycle` and `connectionLoss`, each without the cases and phases that need prepared statements; `stmtLifecycle`, `params`, `concurrency`, `threads`, `dataTypes`, `transactions`, `volume` and `soak` are skipped, as are `prefetch` and `warnings`.
+Tested with the targets `ado_postgres` (PostgreSQL 18.7, psqlODBC Unicode 18.00.0004) and `ado_mariadb` (MariaDB 12.3.4, MariaDB Connector/ODBC 3.2.10, TLS), each through ADO 10.0 and MSDASQL of Windows 10 with the `luasql.ado` of the tasks core-ado and finish-ado. `luasql.ado` has on purpose no `conn:prepare` and no `luasql.type`, and `conn:execute` takes the SQL text only (decision of 25 November 2026, see [`doc/ldoc/manual/10-ado.md`](../doc/ldoc/manual/10-ado.md)); it has no driver options either. So the suite runs `cursorLifecycle`, `errorPaths`, `connectionLifecycle` and `connectionLoss`, each without the cases and phases that need prepared statements; `stmtLifecycle`, `params`, `concurrency`, `threads`, `dataTypes`, `transactions`, `volume` and `soak` are skipped, as are `prefetch` and `warnings`.
 
 **Session pooling off:** ADO keeps a closed connection in the session pool of the OLE DB services by default, and the next connect with the same string gets the same session on the server, with its state; the sessions stay as long as any `ADODB.Connection` object of the process exists. The suite counts the sessions of the test user to find connections the driver leaves open, which a pool would hide, so the backends turn pooling off with `OLE DB Services=-2` in the connection string (decided by the user on 25 November 2026). Every connect is then a real logon: about 57 ms with psqlODBC and 17 ms with Connector/ODBC over TLS, instead of 2.5 and 1.2 ms with the pool (probe of 25 November 2026). The pooling itself is checked by `checks/ado.lua`.
 
@@ -949,7 +949,7 @@ Tested with the targets `ado_postgres` (PostgreSQL 18.7, psqlODBC Unicode 18.00.
 | memory | `connectionLifecycle`, `connectClose`, `connectGc`, `connectScoped`, `envCycle` (`ado_mariadb`) | CONC-883, as with `odbc_mariadb`: Connector/ODBC 3.2.10 on Windows loses about 250 bytes per TLS connect inside Connector/C; without pooling every connect is a TLS connect. |
 | memory | `connectionLoss`, `killLoop` (`ado_mariadb`) | MSDASQL with Connector/ODBC keeps about 22 KB per connection on which a call failed after the connection was lost (nightly +20 MB over 950 iterations). A probe of 25 November 2026 found the same through ADO with luacom alone, with or without reading the error records, once per connection however many calls fail; nothing for a failing call on a live connection; about 570 bytes with `luasql.odbc` on the same DSN and nothing with psqlODBC. So not `luasql.ado`. `killFetchLoop` has no failing call and is judged. |
 
-**Not covered with ADO yet:** everything that needs prepared statements or typed parameters (task bindapi-ado), `prefetch` and `warnings` (no driver options, no warnings), `badColumnType` of `errorPaths`, and ADO with session pooling.
+**Not covered with ADO:** everything that needs prepared statements or parameters (ado has no bind API, decision of 25 November 2026), `prefetch` and `warnings` (no driver options, no warnings), `badColumnType` of `errorPaths`, and ADO with session pooling.
 
 ## Annex
 

@@ -300,6 +300,24 @@ local function api_errors()
    check("close works with any setting", closed)
 end
 
+-- luasql.ado binds no parameters and has no conn:prepare (decided by the
+-- user, task finish-ado)
+local function no_bind_api()
+   local c = connect()
+   check("conn.prepare is nil", c.prepare == nil)
+   local need = "LuaSQL: luasql.ado binds no parameters (conn:execute takes"
+      .. " the SQL text only)"
+   local msg = raised(c.execute, c, "SELECT ?", 5)
+   check("conn:execute(sql, 5) raises", msg == need, msg)
+   msg = raised(c.execute, c, "SELECT 1", nil)
+   check("conn:execute(sql, nil) raises", msg == need, msg)
+   msg = raised(c.execute, c, "SELECT 1", {})
+   check("conn:execute(sql, {}) raises", msg == need, msg)
+   check("conn:execute(sql) still works", value(c, "SELECT 1") == 1)
+   check("the type table luasql.type does not exist", luasql.type == nil)
+   check("close: true", c:close() == true)
+end
+
 local function transactions()
    local con = ctx.con()
    make_test(con)
@@ -865,6 +883,7 @@ local scenarios = {
    { "connect_info",    connect_info },
    { "closed_objects",  closed_objects },
    { "api_errors",      api_errors },
+   { "no_bind_api",     no_bind_api },
    { "transactions",    transactions },
    { "cursors",         cursors },
    { "values",          values },

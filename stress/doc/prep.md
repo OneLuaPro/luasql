@@ -82,4 +82,4 @@ There is no state file: no setting of the server is changed. With `--keep` the h
 
 ## ADO
 
-There is no module `prep/ado_postgres.lua` or `prep/ado_mariadb.lua`; the output shows `prep:   nothing to prepare for this DBMS`. The scenarios that run without the bind API need no helper tables, and they create their own tables themselves. The test database, the users and the system DSNs are those of ODBC, set up once by hand (see ADO under [Preparing a Run](../README.md#preparing-a-run)).
+There is no module `prep/ado_postgres.lua` or `prep/ado_mariadb.lua`; the output shows `prep:   nothing to prepare for this DBMS`. The scenarios that run for ADO, which has no bind API, need no helper tables, and they create their own tables themselves. The test database, the users and the system DSNs are those of ODBC, set up once by hand (see ADO under [Preparing a Run](../README.md#preparing-a-run)).

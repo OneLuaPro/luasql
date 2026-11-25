@@ -7,6 +7,8 @@ Prepared statements come from upstream pull request
 [#209](https://github.com/lunarmodules/luasql/pull/209) of LuaSQL; so far the
 Oracle, the SQLite, the DuckDB, the Firebird, the PostgreSQL, the MySQL and
 the ODBC driver offer them. `conn:execute` takes parameters in the same way.
+The ADO driver `luasql.ado` on purpose has no prepared statements and binds
+no parameters.
 
 ## Placeholders and Parameters
 

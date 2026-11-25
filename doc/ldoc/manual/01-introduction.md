@@ -10,9 +10,11 @@ project.
 So far it covers the Oracle driver `luasql.oci8`, the SQLite driver
 `luasql.sqlite3`, the DuckDB driver `luasql.duckdb`, the Firebird driver
 `luasql.firebird`, the PostgreSQL driver `luasql.postgres`, the MySQL driver
-`luasql.mysql` and the ODBC driver `luasql.odbc`, which have been reworked
-for OneLuaPro and tested in depth. The other drivers follow the same API;
-their documentation will be added here.
+`luasql.mysql`, the ODBC driver `luasql.odbc` and the ADO driver
+`luasql.ado`, which have been reworked for OneLuaPro and tested in depth.
+The ADO driver on purpose has no prepared statements and binds no
+parameters. The other drivers follow the same API; their documentation will
+be added here.
 
 ## Objects
 
@@ -20,7 +22,7 @@ Every driver works with the same four kinds of objects:
 
 <table>
 <tr><th>Object</th><th>Created by</th><th>Purpose</th></tr>
-<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code>, <code>driver.firebird()</code>, <code>driver.postgres()</code>, <code>driver.mysql()</code>, <code>driver.odbc()</code></td><td>holds the client library of the driver; opens connections</td></tr>
+<tr><td>environment</td><td><code>driver.oci8()</code>, <code>driver.sqlite3()</code>, <code>driver.duckdb()</code>, <code>driver.firebird()</code>, <code>driver.postgres()</code>, <code>driver.mysql()</code>, <code>driver.odbc()</code>, <code>driver.ado()</code></td><td>holds the client library of the driver; opens connections</td></tr>
 <tr><td>connection</td><td><code>env:connect(...)</code></td><td>a session on the database server; runs statements and controls transactions</td></tr>
 <tr><td>cursor</td><td><code>conn:execute(...)</code>, <code>stmt:execute(...)</code></td><td>the rows of a query, read one by one</td></tr>
 <tr><td>statement</td><td><code>conn:prepare(...)</code></td><td>a prepared statement, executed many times with parameters</td></tr>
@@ -588,6 +590,9 @@ code without an error message come first.
   `Connection closed` with the position in `ado.lua`.
 - **ado: `conn:execute` with an SQL that is not a string raises an error**;
   LuaSQL sends a number as text and returns the error of ADO for `nil`.
+- **ado: `conn:execute` with further arguments raises an error** (`LuaSQL:
+  luasql.ado binds no parameters (conn:execute takes the SQL text only)`),
+  also for `nil`; LuaSQL ignores them.
 - **ado: messages come from the error records of ADO** (`Connection.Errors`),
   several records joined by one line end; ADO's own errors, which have no
   record, give the text of ADO. LuaSQL returns the text of luacom with its
@@ -608,8 +613,8 @@ code without an error message come first.
   needs luacom of OneLuaPro (`luacom.SetConversion`) and a UTF-8 ANSI code
   page of the process, as `luasql.odbc`; ADO keeps closed connections in its
   session pool, and MariaDB `TINYINT UNSIGNED` from 128 to 255 arrives as 0
-  without an error (`CAST(col AS SIGNED)` reads it); see the section on the
-  ADO driver in `README.md` until the ADO topic of this manual follows.
+  without an error (`CAST(col AS SIGNED)` reads it); see the
+  @{10-ado.md|ADO topic}.
 
 **Extensions**
 
@@ -649,9 +654,9 @@ code without an error message come first.
   The other useful client flags are fields of the module too:
   `CLIENT_FOUND_ROWS`, `CLIENT_COMPRESS`, `CLIENT_IGNORE_SPACE`,
   `CLIENT_INTERACTIVE`, `CLIENT_MULTI_STATEMENTS`, `CLIENT_MULTI_RESULTS`.
-- The additions of ado: `luasql._CLIENTVERSION`, the version of ADO in the
-  form ADO gives it (e.g. `"10.0"`); objects for to-be-closed variables and
-  with `tostring`.
+- The additions of ado in the @{10-ado.md|ADO topic}: `luasql._CLIENTVERSION`,
+  the version of ADO in the form ADO gives it (e.g. `"10.0"`); objects for
+  to-be-closed variables and with `tostring`.
 - The additions of odbc in the @{09-odbc.md|ODBC topic}: `luasql.type` and
   typed parameters for the prepared statements of LuaSQL (`T.binary`, dates
   and times checked against the calendar, `{T.null, type}` with the SQL type

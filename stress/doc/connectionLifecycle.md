@@ -135,4 +135,4 @@ Connects that must fail:
 
 With `ado_mariadb` the process memory of the phases `connectClose`, `connectGc`, `connectScoped` and `envCycle` is a limit (`backend.memoryLimits`), as with `odbc_mariadb`: without pooling every connect is a TLS connect, and Connector/ODBC 3.2.10 on Windows loses about 250 bytes per TLS connect inside Connector/C (MariaDB JIRA CONC-883). The Lua heap, the counters and the sessions are judged as before.
 
-Skipped: `closeWithStmt` and `gcAll`, since `luasql.ado` has no `conn:prepare` yet (task bindapi-ado).
+Skipped: `closeWithStmt` and `gcAll`, since `luasql.ado` has no `conn:prepare` (ado has no bind API, decision of 25 November 2026; see [`doc/ldoc/manual/10-ado.md`](../../doc/ldoc/manual/10-ado.md)).

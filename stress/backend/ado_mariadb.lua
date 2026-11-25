@@ -28,9 +28,10 @@
 -- sessions come and go as with luasql.odbc. The pooling itself is
 -- checked by checks/ado.lua (scenario pooling).
 --
--- Task core-ado: luasql.ado has no conn:prepare and no luasql.type yet
--- (they come with bindapi-ado). The scenarios that need them are skipped
--- (dbutil.hasBindApi); the backend holds the keys of the others.
+-- luasql.ado has no bind API (decision of 25 November 2026, see
+-- doc/ldoc/manual/10-ado.md): no conn:prepare, no luasql.type, and
+-- conn:execute takes the SQL text only. The scenarios that need them are
+-- skipped (dbutil.hasBindApi); the backend holds the keys of the others.
 --
 -- Connector/ODBC gives the whole result of a query to the client: an
 -- error in any row comes at the execute, and a cursor reads on after a

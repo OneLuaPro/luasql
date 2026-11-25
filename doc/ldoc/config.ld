@@ -12,10 +12,10 @@ SQL statements and reads the results row by row. Start with the
 @{01-introduction.md|introduction}.
 ]]
 
-file = { '../../src/ls_oci8.c', '../../src/ls_sqlite3.c',
-         '../../src/ls_duckdb.c', '../../src/ls_firebird.c',
-         '../../src/ls_postgres.c', '../../src/ls_mysql.c',
-         '../../src/ls_odbc.c' }
+file = { '../../src/ado/ado.lua', '../../src/ls_oci8.c',
+         '../../src/ls_sqlite3.c', '../../src/ls_duckdb.c',
+         '../../src/ls_firebird.c', '../../src/ls_postgres.c',
+         '../../src/ls_mysql.c', '../../src/ls_odbc.c' }
 topics = {
    'manual/01-introduction.md',
    'manual/02-prepared-statements.md',
@@ -26,6 +26,7 @@ topics = {
    'manual/07-postgres.md',
    'manual/08-mysql.md',
    'manual/09-odbc.md',
+   'manual/10-ado.md',
 }
 examples = {
    'examples/oci8_basics.lua',
