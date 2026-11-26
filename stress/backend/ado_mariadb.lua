@@ -77,8 +77,12 @@
 -- ClientHello of the TLS handshake, about 250 bytes per TLS connect
 -- (MariaDB JIRA CONC-883, formerly ODBC-519; see
 -- backend/odbc_mariadb.lua). Without session pooling every connect is a
--- TLS connect, so the phases of connectionLifecycle carry a limit for
--- it (memoryLimits), as with odbc_mariadb.
+-- TLS connect, so the phases of connectionLifecycle and threads.laneLoop
+-- carry a limit for it (memoryLimits), as with odbc_mariadb. laneLoop
+-- connects 8 times per iteration: nightly of 2026-11-25/26 trend
+-- +1692 KB over 700 iterations, second round +2300 KB, about 300 to 420
+-- bytes per connect; ado_postgres, the same luacom and lanes without
+-- TLS, is flat.
 --
 -- Memory after a lost connection: a connection on which a call failed
 -- after the kill keeps about 22 KB in the process after Close (nightly
@@ -185,6 +189,7 @@ return {
       ["connectionLifecycle.connectScoped"] = tlsLeak,
       ["connectionLifecycle.envCycle"] = tlsLeak,
       ["connectionLoss.killLoop"] = lostLeak,
+      ["threads.laneLoop"] = tlsLeak,
    },
    -- Without binds for conn:execute: row k has k * the first %d
    -- characters 'x' (text) or bytes 0xAB (binary string); the second %d
