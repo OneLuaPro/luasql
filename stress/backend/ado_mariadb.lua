@@ -102,6 +102,8 @@
 -- en_US by default; the patterns are the English texts. ADO's own
 -- errors (e.g. an empty command text) come in the language of Windows.
 
+local dbutil = require("dbutil")
+
 -- The provider and the system DSN (see above).
 local provider = "Provider=MSDASQL;DSN="
 local dsn = "luatest_mariadb"
@@ -174,6 +176,9 @@ return {
    -- e.g. 12.3.4-MariaDB
    versionQuery = "SELECT CONCAT(VERSION(), ' (ADO, MSDASQL,"
       .. " Connector/ODBC)')",
+   -- The run header line "encryption:": TLS of the test connection,
+   -- set by the DSN (FORCETLS); see dbutil.lua.
+   encryption = dbutil.mariadbEncryption,
    -- Used by scenarios.
    singleRowQuery = "SELECT 1",
    multiRowQuery = "SELECT CAST(seq AS SIGNED) AS n" .. rowsUpTo("10"),

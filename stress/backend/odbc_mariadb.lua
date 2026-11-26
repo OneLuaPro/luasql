@@ -109,6 +109,8 @@
 -- Messages: the server gives them in the language of lc_messages,
 -- en_US by default; the patterns are the English texts.
 
+local dbutil = require("dbutil")
+
 -- The system DSN (see above).
 local dsn = "luatest_mariadb"
 
@@ -241,6 +243,9 @@ return {
    connectArgs = connectArgs,
    -- e.g. 12.3.4-MariaDB (Connector/ODBC)
    versionQuery = "SELECT CONCAT(VERSION(), ' (Connector/ODBC)')",
+   -- The run header line "encryption:": TLS of the test connection,
+   -- set by the DSN (FORCETLS); see dbutil.lua.
+   encryption = dbutil.mariadbEncryption,
    -- Used by scenarios.
    singleRowQuery = "SELECT 1",
    multiRowQuery = "SELECT CAST(seq AS SIGNED) AS n" .. rowsUpTo("10"),

@@ -47,6 +47,8 @@
 -- keeps 4 digits of a second, more are cut off. Checked with the probes
 -- fbprobe2.lua and fbprobe3.lua on 2026-11-15.
 
+local dbutil = require("dbutil")
+
 -- "host/port:database", the connection string of the client.
 local function sourceName(values)
    return string.format("%s/%d:%s", values.host, values.port, values.name)
@@ -193,10 +195,42 @@ local testName = os.getenv("FIREBIRD_TEST_NAME") or ""
 local missingFile = testName:gsub("[^/\\]*$", "")
    .. "luastress_no_such_file.fdb"
 
+-- The run header line "encryption:": the wire encryption of the
+-- attachment and its plugin, e.g. "TRUE" and "ChaCha64" with the
+-- defaults of Firebird 5 (WireCrypt Required on the server; isql and
+-- the client of luasql.firebird, 26 November 2026). In autocommit mode
+-- the transaction of the query ends with its cursor.
+local wireQuery = "SELECT rdb$get_context('SYSTEM', 'WIRE_ENCRYPTED'),"
+   .. " rdb$get_context('SYSTEM', 'WIRE_CRYPT_PLUGIN') FROM rdb$database"
+
+local function encryption(conn)
+   local rows, err = dbutil.queryRows(conn, wireQuery)
+   if not rows then
+      return nil, err
+   end
+   if #rows ~= 1 then
+      return nil, string.format("query returned %d rows", #rows)
+   end
+   local encrypted, plugin = rows[1][1], rows[1][2]
+   if encrypted == "FALSE" then
+      return "none"
+   end
+   if encrypted ~= "TRUE" then
+      return nil, "WIRE_ENCRYPTED is " .. tostring(encrypted)
+   end
+   if plugin == nil or plugin == "" then
+      return "wire encryption"
+   end
+   return "wire encryption " .. plugin
+end
+
 return {
    sourceName = sourceName,
    versionQuery = "SELECT 'Firebird '"
       .. " || rdb$get_context('SYSTEM', 'ENGINE_VERSION') FROM rdb$database",
+   -- The run header line "encryption:": wire encryption of the test
+   -- connection.
+   encryption = encryption,
    -- Used by scenarios.
    singleRowQuery = "SELECT 1 FROM rdb$database",
    multiRowQuery = tenRowsQuery,

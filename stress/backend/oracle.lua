@@ -1,6 +1,8 @@
 -- backend/oracle.lua
 -- Oracle specific functions for the stress test runner.
 
+local dbutil = require("dbutil")
+
 -- Builds an EZConnect string: host:port/service
 local function sourceName(settings)
    return string.format("%s:%d/%s", settings.host, settings.port, settings.name)
@@ -21,11 +23,64 @@ local emptyBinaryAsNull = {
    limitReason = "Oracle stores an empty binary value as NULL",
 }
 
+-- The run header line "encryption:". Over tcps USERENV gives the
+-- version and the cipher of TLS. Oracle gives TLS_CIPHERSUITE with a
+-- zero byte at the end (Len=23 for TLS_AES_256_GCM_SHA384 in DUMP,
+-- SQL*Plus, 26 November 2026); luasql.oci8 passes it on as it is, the
+-- query cuts it for the display only. Otherwise the adapters of Native
+-- Network Encryption from the banners of v$session_connect_info, e.g.
+-- "AES256 Encryption service adapter for 64-bit Windows: ...". The
+-- banners name the adapters loaded and show over tcps as well, hence
+-- TLS first. Reading them needs SELECT on v$session_connect_info (e.g.
+-- through SELECT_CATALOG_ROLE).
+local tlsQuery = "SELECT SYS_CONTEXT('USERENV', 'TLS_VERSION'),"
+   .. " RTRIM(SYS_CONTEXT('USERENV', 'TLS_CIPHERSUITE'), CHR(0))"
+   .. " FROM dual"
+local bannerQuery = "SELECT network_service_banner"
+   .. " FROM v$session_connect_info"
+   .. " WHERE sid = SYS_CONTEXT('USERENV', 'SID')"
+
+local function encryption(conn)
+   local rows, err = dbutil.queryRows(conn, tlsQuery)
+   if not rows then
+      return nil, err
+   end
+   local version = rows[1] and rows[1][1]
+   if version ~= nil and version ~= "" then
+      return dbutil.tlsText(version, rows[1][2])
+   end
+   local banners, bannerErr = dbutil.queryRows(conn, bannerQuery)
+   if not banners then
+      return nil, bannerErr
+   end
+   local cipher, checksum
+   for _, row in ipairs(banners) do
+      -- One banner is NULL over tcps.
+      local banner = row[1] or ""
+      cipher = cipher or banner:match("^(%S+) Encryption service adapter")
+      checksum = checksum
+         or banner:match("^(%S+) Crypto%-checksumming service adapter")
+   end
+   local names = {}
+   names[#names + 1] = cipher
+   names[#names + 1] = checksum
+   if #names == 0 then
+      return "none"
+   end
+   return "Native Network Encryption " .. table.concat(names, ", ")
+end
+
 return {
    sourceName = sourceName,
    -- Readable by every user, no extra privileges needed.
    versionQuery = "SELECT product || ' ' || version_full"
       .. " FROM product_component_version WHERE ROWNUM = 1",
+   -- The run header line "encryption:" (optional): a function of
+   -- the test connection that returns the encryption of the session
+   -- as text, "none" without, or nil and a reason; information
+   -- only, never a failure. Without the key the header has no line
+   -- (sqlite3, duckdb).
+   encryption = encryption,
    -- Used by scenarios.
    singleRowQuery = "SELECT 1 FROM dual",
    multiRowQuery = "SELECT level FROM dual CONNECT BY level <= 10",

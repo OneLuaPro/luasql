@@ -68,6 +68,8 @@
 -- the name only. Checked with psql and the probe pgprobe1.lua on
 -- 2026-11-16.
 
+local dbutil = require("dbutil")
+
 -- The application name of all connections of the suite.
 local appName = "luastress"
 
@@ -218,6 +220,10 @@ return {
    sourceName = sourceName,
    connectArgs = connectArgs,
    versionQuery = "SELECT 'PostgreSQL ' || current_setting('server_version')",
+   -- The run header line "encryption:": TLS of the test connection,
+   -- after sslmode of libpq (default prefer, PGSSLMODE); see
+   -- dbutil.lua.
+   encryption = dbutil.postgresEncryption,
    -- Used by scenarios.
    singleRowQuery = "SELECT 1",
    multiRowQuery = "SELECT n" .. rowsUpTo("10"),

@@ -420,6 +420,22 @@ local function runIsolated(options, uv, minutes)
    return true
 end
 
+-- The text of the run header line "encryption:" for the test
+-- connection conn: what backend.encryption(conn) returns, or
+-- "unknown (<reason>)" if it returns nil and a reason or raises an
+-- error. Information only, it never stops the run.
+local function encryptionText(backend, conn)
+   local ok, text, reason = pcall(backend.encryption, conn)
+   if not ok then
+      reason, text = text, nil
+   end
+   if text == nil then
+      reason = tostring(reason or "no reason given"):gsub("%s+$", "")
+      return string.format("unknown (%s)", reason)
+   end
+   return tostring(text)
+end
+
 -- Loads config, backend and driver, opens the connections and runs the
 -- prep step. Every opened handle is appended to 'handles', so the caller
 -- can close them in any case. A child process (--child) prints nothing
@@ -519,6 +535,10 @@ local function openSession(options, handles, cleanups)
       return nil, "cannot query server version: " .. tostring(versionErr)
    end
    say(string.format("server: %s", version))
+   -- Once, in the parent process only: a child would query for nothing.
+   if backend.encryption and not options.child then
+      say("encryption: " .. encryptionText(backend, testConn))
+   end
 
    -- Lets scenarios open more test connections without handing out the
    -- credentials.

@@ -88,6 +88,8 @@
 -- backend/postgres.lua). psqlODBC puts its own text after them as a
 -- further record.
 
+local dbutil = require("dbutil")
+
 -- The system DSN (see above).
 local dsn = "luatest_pg"
 
@@ -221,6 +223,10 @@ return {
    connectArgs = connectArgs,
    versionQuery = "SELECT 'PostgreSQL ' || current_setting('server_version')"
       .. " || ' (psqlODBC)'",
+   -- The run header line "encryption:": TLS of the test connection,
+   -- set by the DSN (SSLmode; PGSSLMODE does not matter); see
+   -- dbutil.lua.
+   encryption = dbutil.postgresEncryption,
    -- Used by scenarios.
    singleRowQuery = "SELECT 1",
    multiRowQuery = "SELECT n" .. rowsUpTo("10"),

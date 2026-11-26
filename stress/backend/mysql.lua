@@ -74,6 +74,8 @@
 -- Messages: the server gives them in the language of lc_messages,
 -- en_US by default; the patterns are the English texts.
 
+local dbutil = require("dbutil")
+
 -- The rows 1 .. count in order, as column n; count is SQL text, e.g.
 -- "%d".
 local function rowsUpTo(count)
@@ -183,6 +185,9 @@ return {
    connectArgs = connectArgs,
    -- e.g. 12.3.4-MariaDB
    versionQuery = "SELECT VERSION()",
+   -- The run header line "encryption:": TLS of the test connection
+   -- (see dbutil.lua).
+   encryption = dbutil.mariadbEncryption,
    -- Used by scenarios.
    singleRowQuery = "SELECT 1",
    multiRowQuery = "SELECT CAST(seq AS SIGNED) AS n" .. rowsUpTo("10"),

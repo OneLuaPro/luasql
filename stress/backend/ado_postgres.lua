@@ -72,6 +72,8 @@
 -- further record, which luasql.ado joins by a line end. ADO's own
 -- errors (e.g. an empty command text) come in the language of Windows.
 
+local dbutil = require("dbutil")
+
 -- The provider and the system DSN (see above).
 local provider = "Provider=MSDASQL;DSN="
 local dsn = "luatest_pg"
@@ -125,6 +127,10 @@ return {
    connectArgs = connectArgs,
    versionQuery = "SELECT 'PostgreSQL ' || current_setting('server_version')"
       .. " || ' (ADO, MSDASQL, psqlODBC)'",
+   -- The run header line "encryption:": TLS of the test connection,
+   -- set by the DSN (SSLmode; PGSSLMODE does not matter); see
+   -- dbutil.lua.
+   encryption = dbutil.postgresEncryption,
    -- Used by scenarios.
    singleRowQuery = "SELECT 1",
    multiRowQuery = "SELECT n" .. rowsUpTo("10"),
