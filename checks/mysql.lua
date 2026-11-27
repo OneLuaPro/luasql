@@ -41,7 +41,7 @@ end
 PORT = math.tointeger(tonumber(PORT))
 
 -- messages of the driver (not of the server)
-local MSG_ABORTED = "COMMIT rolled back the work since"
+local MSG_ABORTED = "COMMIT rolled back the work done since that error"
 local MSG_BUSY = "there are unread results of send_query"
 local MSG_LATER = "a later result of the previous statement failed, "
    .. "call not executed: "
@@ -1406,6 +1406,121 @@ local function long_values()
    check("the other connection works", value(con, "SELECT 15") == 15)
 end
 
+-- a result that fails while it is read (1242 in row 5) leaves the
+-- statement waiting in Connector/C 3.4.11, which then refuses to close
+-- other statements (MariaDB JIRA ODBC-530); the driver resets it. Three
+-- ways: a prepared SELECT, a prepared CALL whose second result fails
+-- read with nextresult, and the same drained by the next call.
+-- Prepared_stmt_count of the server is read on a second connection,
+-- after a call on the test connection, as the difference to its start.
+local function stuck_result()
+   local con = connect()
+   local mon = connect()
+   local failing = "SELECT CAST(t.seq AS SIGNED) AS n,"
+      .. " (SELECT s.seq FROM seq_1_to_2 s WHERE t.seq = 5) AS v"
+      .. " FROM seq_1_to_10 t ORDER BY t.seq"
+   local function server_stmts()
+      value(con, "SELECT 1")
+      return tonumber(value(mon, "SELECT VARIABLE_VALUE FROM "
+                            .. "information_schema.GLOBAL_STATUS WHERE "
+                            .. "VARIABLE_NAME = 'Prepared_stmt_count'"))
+   end
+   local function others(n)
+      local failed = 0
+      for i = 1, n do
+         local st = con:prepare("SELECT " .. i .. ", 'stuck_result'")
+         local cur = st and st:execute()
+         if cur then
+            cur:fetch()
+            cur:close()
+         end
+         if not (cur and st:close()) then
+            failed = failed + 1
+         end
+      end
+      return failed
+   end
+   run(con, "CREATE OR REPLACE PROCEDURE luasql_stuck() BEGIN "
+            .. "SELECT 1 AS a; " .. failing .. "; END")
+   local start = server_stmts()
+
+   -- A: a prepared SELECT
+   local before = assert(con:prepare("SELECT 'before'"))
+   local st = assert(con:prepare(failing))
+   local v, err = st:execute()
+   check("A: the failed execute gives the error of the server",
+         v == nil and has(err, "Subquery returns more than 1 row"), err)
+   check("A: a statement closed while it is open is gone at once",
+         before:close() == true and server_stmts() == start + 1,
+         server_stmts() - start)
+   check("A: 20 more statements leave nothing",
+         others(20) == 0 and server_stmts() == start + 1,
+         server_stmts() - start)
+   v, err = st:execute()
+   check("A: its next execute gives the error again",
+         v == nil and has(err, "Subquery returns more than 1 row"), err)
+   check("A: the connection works", value(con, "SELECT 17") == 17)
+   check("A: after its close nothing is left",
+         st:close() == true and server_stmts() == start,
+         server_stmts() - start)
+
+   -- B: a prepared CALL, read with nextresult
+   before = assert(con:prepare("SELECT 'before'"))
+   st = assert(con:prepare("CALL luasql_stuck()"))
+   local cur = assert(st:execute())
+   check("B: the first result of the CALL", cur:fetch() == 1)
+   local ok, no, msg = cur:nextresult()
+   check("B: nextresult of the failing result: false, 1242, msg",
+         ok == false and no == 1242
+            and has(msg, "Subquery returns more than 1 row"),
+         tostring(no) .. " " .. tostring(msg))
+   check("B: then fetch gives nil", cur:fetch() == nil)
+   check("B: a statement closed while it is open is gone at once",
+         before:close() == true and server_stmts() == start + 1,
+         server_stmts() - start)
+   check("B: 20 more statements leave nothing",
+         others(20) == 0 and server_stmts() == start + 1,
+         server_stmts() - start)
+   cur = assert(st:execute())
+   check("B: its next execute works", cur:fetch() == 1)
+   ok, no = cur:nextresult()
+   check("B: and fails again at nextresult", ok == false and no == 1242,
+         no)
+   cur:close()
+   check("B: after its close nothing is left",
+         st:close() == true and server_stmts() == start,
+         server_stmts() - start)
+
+   -- C: the same CALL, drained by the next call
+   before = assert(con:prepare("SELECT 'before'"))
+   st = assert(con:prepare("CALL luasql_stuck()"))
+   cur = assert(st:execute())
+   check("C: the first result of the CALL", cur:fetch() == 1)
+   v, err = con:execute("SELECT 18")
+   check("C: the next call returns the later error",
+         v == nil and has(err, MSG_LATER)
+            and has(err, "Subquery returns more than 1 row"), err)
+   check("C: the cursor has read its rows", cur:fetch() == nil)
+   check("C: a statement closed while it is open is gone at once",
+         before:close() == true and server_stmts() == start + 1,
+         server_stmts() - start)
+   check("C: 20 more statements leave nothing",
+         others(20) == 0 and server_stmts() == start + 1,
+         server_stmts() - start)
+   cur = assert(st:execute())
+   cur:close()
+   v, err = con:execute("SELECT 19")
+   check("C: its next execute fails again in the next call",
+         v == nil and has(err, "Subquery returns more than 1 row"), err)
+   check("C: after its close nothing is left",
+         st:close() == true and server_stmts() == start,
+         server_stmts() - start)
+
+   run(con, "DROP PROCEDURE luasql_stuck")
+   check("conn:close: true", con:close() == true)
+   mon:close()
+end
+
 local scenarios = {
    { "connect_info",   connect_info },
    { "values",         values },
@@ -1422,6 +1537,7 @@ local scenarios = {
    { "stmt_results",   stmt_results },
    { "stmt_async",     stmt_async },
    { "long_values",    long_values },
+   { "stuck_result",   stuck_result },
    { "kill",           kill },
    { "exit_open",      exit_open },
 }
@@ -1466,6 +1582,7 @@ if not args.keep and ctx.main then
                          "DROP TABLE IF EXISTS luasql_long",
                          "DROP PROCEDURE IF EXISTS luasql_two",
                          "DROP PROCEDURE IF EXISTS luasql_out",
+                         "DROP PROCEDURE IF EXISTS luasql_stuck",
                          "DROP PROCEDURE IF EXISTS luasql_sel",
                          "DROP PROCEDURE IF EXISTS luasql_fail",
                          "DROP PROCEDURE IF EXISTS luasql_abort",

@@ -177,9 +177,10 @@ MariaDB):
   transaction. After such an error the driver asks the server whether a
   transaction is still open; if not, `conn:commit()` rolls back the work
   done since and returns `false` and `LuaSQL: transaction was rolled back by
-  an earlier error, COMMIT rolled back the work since`. `conn:rollback()`
-  and `conn:setautocommit(true)` end this state. This holds for statements,
-  prepared statements and later results of a `CALL`.
+  an earlier error, COMMIT rolled back the work done since that error`.
+  `conn:rollback()` and `conn:setautocommit(true)` end this state. This
+  holds for statements, prepared statements and later results of a
+  `CALL`.
 - **Not detected**: a transaction ended by SQL (`COMMIT`, `ROLLBACK`, also in
   a procedure); with autocommit off use `conn:commit()` and
   `conn:rollback()`. And a failing DDL: DDL commits the open transaction
@@ -286,6 +287,18 @@ as they are:
   (`The number of parameters in bound buffers differs from number of
   columns in resultset`): prepare it again. The driver drops the rows the
   server sent, so the connection stays usable.
+- **A result that fails while it is read**, e.g. with an error of the
+  server in a later row (`Subquery returns more than 1 row` in row 5),
+  gives `nil` and the message of the server at the execute (or `false`,
+  the number and the message from `cur:nextresult()`), since the driver
+  reads the whole result there. Connector/C 3.4.11 then leaves the
+  statement waiting for its result, and while it waits it refuses to close
+  any other statement of the connection (MariaDB JIRA
+  [ODBC-530](https://jira.mariadb.org/browse/ODBC-530), whose core is in
+  Connector/C). The driver therefore resets the failed statement to its
+  state after the prepare (`mysql_stmt_reset`, one round trip, only after
+  such an error): it can run again, and the other statements close as
+  usual.
 - **Prepared statements on the server**: a statement closed by the garbage
   collector, or the statement of `conn:execute` with parameters whose cursor
   was collected, is closed on the server with the next call of its

@@ -217,7 +217,7 @@ detail.
 #define MSG_BUSY LUASQL_PREFIX"there are unread results of send_query " \
 	"(call get_result until it returns nil)"
 #define MSG_ABORTED LUASQL_PREFIX"transaction was rolled back by an " \
-	"earlier error, COMMIT rolled back the work since"
+	"earlier error, COMMIT rolled back the work done since that error"
 #define MSG_LATER "a later result of the previous statement failed, " \
 	"call not executed: "
 
@@ -537,6 +537,20 @@ static void cur_detach (lua_State *L, cur_data *cur);
 
 
 /*
+** Resets a statement whose result could not be read
+** (mysql_stmt_store_result failed, e.g. with an error of the server in a
+** later row). Connector/C 3.4.11 leaves such a statement waiting for its
+** result, and while it waits it refuses to close any other statement of
+** the connection (2014; MariaDB JIRA ODBC-530). The reset brings it back
+** to the state after the prepare (one round trip); its result does not
+** matter. The error must be read before.
+*/
+static void reset_failed (MYSQL_STMT *st) {
+	mysql_stmt_reset (st);
+}
+
+
+/*
 ** Reads and frees the further results of a prepared statement (a CALL)
 ** that were not read; an open cursor of its current result gets a copy
 ** of its rows first. Returns 0, or pushes the error as drain does.
@@ -558,8 +572,13 @@ static int drain_stmt (lua_State *L, conn_data *conn, int asfalse) {
 				mysql_stmt_free_result (st);
 				continue;
 			}
+			/* reading a later result failed */
+			my_fail (L, asfalse, MSG_LATER, mysql_stmt_error (st));
+			check_aborted (conn, in_trans, mysql_stmt_errno (st));
+			reset_failed (st);
+			return 2;
 		}
-		/* a later result failed, or reading it */
+		/* a later result failed */
 		my_fail (L, asfalse, MSG_LATER, mysql_stmt_error (st));
 		check_aborted (conn, in_trans, mysql_stmt_errno (st));
 		return 2;
@@ -1139,7 +1158,17 @@ static int stmt_next_result (lua_State *L, cur_data *cur) {
 			lua_pushliteral(L, "");
 			return 3;
 		}
-		if (mysql_stmt_store_result (st) == 0 && bind_columns (L, cur, st)) {
+		if (mysql_stmt_store_result (st) != 0) {
+			conn->results_of = NULL;
+			conn->results_cur = NULL;
+			lua_pushboolean(L, 0);
+			lua_pushinteger(L, mysql_stmt_errno(st));
+			lua_pushstring(L, mysql_stmt_error(st));
+			check_aborted (conn, in_trans, mysql_stmt_errno(st));
+			reset_failed (st);
+			return 3;
+		}
+		if (bind_columns (L, cur, st)) {
 			lua_pushboolean(L, 1);
 			return 1;
 		}
@@ -1631,7 +1660,15 @@ static int push_stmt_result (lua_State *L, stmt_data *stmt, int ci, int si,
 		lua_pushinteger (L, n);
 		return 1;
 	}
-	if (mysql_stmt_store_result (st) != 0 || !bind_columns (L, cur, st)) {
+	if (mysql_stmt_store_result (st) != 0) {
+		lua_pop (L, 1);
+		my_fail (L, 0, "error retrieving result. MySQL: ",
+		         mysql_stmt_error (st));
+		check_aborted (conn, in_trans, mysql_stmt_errno (st));
+		reset_failed (st);
+		return 2;
+	}
+	if (!bind_columns (L, cur, st)) {
 		luaL_unref (L, LUA_REGISTRYINDEX, cur->bufs);
 		cur->bufs = LUA_NOREF;
 		mysql_free_result (cur->my_res);
@@ -2659,9 +2696,9 @@ deadlock, see the @{08-mysql.md|MySQL topic}), InnoDB has rolled it back and
 the statements since then ran in a new transaction: the driver rolls that
 back too, and the result is `false` and
 `LuaSQL: transaction was rolled back by an earlier error, COMMIT rolled back
-the work since`. Results left of the previous statement are read first; if
-one of them is an error, it is the result and nothing is committed. Cursors
-stay readable.
+the work done since that error`. Results left of the previous statement are
+read first; if one of them is an error, it is the result and nothing is
+committed. Cursors stay readable.
 @function commit
 @treturn[1] boolean `true`
 @treturn[2] boolean `false`
