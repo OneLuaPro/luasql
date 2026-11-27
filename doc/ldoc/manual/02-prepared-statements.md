@@ -223,7 +223,8 @@ stmt:close()
 ```
 
 If an execute fails while binding in Oracle, e.g. with a date in a wrong
-format, the parameters bound before the error stay bound. Call `stmt:reset()`
+format, the parameters bound before the error stay bound, already with the
+new values of this call. Call `stmt:reset()`
 if a statement must start from a clean state. The SQLite, the DuckDB, the
 Firebird, the PostgreSQL, the MySQL and the ODBC driver check names,
 positions and dates of all parameters before they bind the first one, so

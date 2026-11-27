@@ -1,9 +1,14 @@
 -- checks/oci8.lua
 -- Short functional test of the luasql OCI8 driver against an Oracle database.
--- The password is never printed. Pass it as 3rd argument or, better, via the
--- environment variable ORACLE_TEST_PASSWORD.
+-- The password is never printed. It comes from the environment variable
+-- ORACLE_TEST_PASSWORD (a 3rd argument still works, but puts it into the
+-- command line). Connection and user default to the variables of the
+-- stress test: ORACLE_TEST_HOST, _PORT (1521), _NAME and ORACLE_TEST_USER;
+-- an argument given wins.
 --
 --   set ORACLE_TEST_PASSWORD=...
+--   lua checks/oci8.lua
+--   lua checks/oci8.lua tcps://DESKTOP-1HK25HF:2484/FREEPDB1
 --   lua checks/oci8.lua DESKTOP-1HK25HF:1521/FREEPDB1 luatest
 --
 -- Needs the Oracle Instant Client (oci.dll) in PATH.
@@ -12,10 +17,23 @@
 local argparse = require "argparse"
 
 local parser = argparse("checks/oci8.lua", "Functional test of the luasql OCI8 driver")
-parser:argument("connect", "Easy Connect string, e.g. host:1521/service")
-parser:argument("user", "Database user")
+parser:argument("connect", "Easy Connect string, e.g. host:1521/service"
+                .. " (default: ORACLE_TEST_HOST:_PORT/_NAME)"):args("?")
+parser:argument("user", "Database user (default: env ORACLE_TEST_USER)"):args("?")
 parser:argument("passwd", "Password (default: env ORACLE_TEST_PASSWORD)"):args("?")
 local args = parser:parse()
+if not args.connect and os.getenv("ORACLE_TEST_HOST") then
+  args.connect = os.getenv("ORACLE_TEST_HOST") .. ":"
+    .. (os.getenv("ORACLE_TEST_PORT") or "1521") .. "/"
+    .. (os.getenv("ORACLE_TEST_NAME") or "")
+end
+args.user = args.user or os.getenv("ORACLE_TEST_USER")
+if not args.connect or not args.user then
+  io.stderr:write("checks/oci8.lua: no connection or user; give them as"
+                  .. " arguments or set ORACLE_TEST_HOST, _PORT, _NAME"
+                  .. " and ORACLE_TEST_USER\n")
+  os.exit(1)
+end
 
 local passwd = args.passwd or os.getenv("ORACLE_TEST_PASSWORD")
 do
@@ -107,6 +125,8 @@ check("create table", r ~= nil, e)
 r, e = exec("INSERT INTO " .. TABLE .. " VALUES (1, '" .. TXT .. "', 3.5, DATE '2026-10-17', " ..
   "TIMESTAMP '2026-10-17 12:34:56')")
 check("insert returns 1", r == 1, e or r)
+check("row count of conn:execute is an integer", math.type(r) == "integer",
+      tostring(math.type(r)))
 r, e = exec("UPDATE " .. TABLE .. " SET num = num + 1 WHERE id = 1")
 check("update returns 1", r == 1, e or r)
 
@@ -155,6 +175,12 @@ conn:setautocommit(false)
 exec("INSERT INTO lt_oci8_def (id) VALUES (1)")
 exec("INSERT INTO lt_oci8_def (id) VALUES (1)")
 local cok, cerr = conn:commit()
+-- A commit, rollback or other call that OCI answers with
+-- OCI_SUCCESS_WITH_INFO counts as success. No normal call gives that
+-- warning, so this is checked once with a fault build (not in the
+-- repo), as are the paths of an unknown status in checkerr, a failed
+-- error handle in create_environment and a failed rollback in
+-- conn:close() (detach before the logoff).
 check("failing commit returns false and a message",
       cok == false and tostring(cerr):find("ORA%-") ~= nil, tostring(cerr))
 if cerr then info("failing commit", mask(cerr)) end
@@ -855,6 +881,8 @@ exec("CREATE TABLE lt_oci8_pv (id NUMBER, n NUMBER, f BINARY_DOUBLE,"
 local spv = assert(conn:prepare("INSERT INTO lt_oci8_pv VALUES (:1, :2, :3, :4, :5, :6)"))
 local rpv, epv = spv:execute(1, 9007199254740993, 0.1, TXT, true, nil)
 check("variable arguments of all Lua types", rpv == 1, epv)
+check("row count of stmt:execute is an integer", math.type(rpv) == "integer",
+      tostring(math.type(rpv)))
 rpv, epv = spv:execute{ 2, -7, 1.5, "", false, T.null }
 check("table of plain values", rpv == 1, epv)
 spv:close()

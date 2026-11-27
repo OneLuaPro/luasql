@@ -70,7 +70,10 @@ Over TLS, the Instant Client adds no Native Network Encryption, also when the
 server requires it.
 
 How a session is connected shows `SYS_CONTEXT('USERENV', 'NETWORK_PROTOCOL')`
-(`tcp` or `tcps`). The view `V$SESSION_CONNECT_INFO` names the algorithms of
+(`tcp` or `tcps`). Over `tcps`, `SYS_CONTEXT('USERENV', 'TLS_CIPHERSUITE')`
+ends with a zero byte (e.g. `TLS_AES_256_GCM_SHA384` plus `"\0"`, 23 bytes,
+as `DUMP` shows in SQL*Plus); the driver passes the value on as Oracle gives
+it. The view `V$SESSION_CONNECT_INFO` names the algorithms of
 Native Network Encryption, e.g. `AES256 Encryption service adapter`; reading it
 may need privileges:
 
@@ -203,6 +206,12 @@ rules are in the @{02-prepared-statements.md|topic on prepared statements}):
 
   Larger values for PL/SQL or SQL functions need a LOB object, which the
   driver does not offer.
+- **Two spellings of one name** in a table, e.g. `{a = 1, A = 2}`, both
+  bind to the placeholder `:a`, since Oracle ignores the case. Which value
+  wins is random (the order of a Lua table).
+- **If binding a value of a table fails** in OCI (`nil` and a message), the
+  values bound before it are already bound with their new values; the
+  others keep their old ones. `stmt:reset()` starts from a clean state.
 
 ## Large Results
 
@@ -248,7 +257,11 @@ Two consequences come from OCI and are kept as they are:
   transaction first, also with autocommit off. This is how Oracle works.
 - `conn:close()`, the garbage collector and a to-be-closed variable roll back
   an open transaction before logoff. Oracle itself would commit it; LuaSQL
-  keeps only what was committed explicitly, as its other drivers do.
+  keeps only what was committed explicitly, as its other drivers do. If
+  that rollback fails while the session still lives, the driver detaches
+  from the server before the logoff, so that the server rolls the
+  transaction back instead of committing it; the connection is closed all
+  the same.
 - A statement that fails rolls back only itself, not the transaction.
 - `conn:commit()`, `conn:rollback()` and `conn:setautocommit()` return
   `false` and the message of Oracle when they fail, e.g. `ORA-02091` for a
@@ -257,8 +270,9 @@ Two consequences come from OCI and are kept as they are:
 
 ## Warnings
 
-A statement that succeeds with a warning counts as success; the warning is
-not passed on. Examples:
+A call that succeeds with a warning (`OCI_SUCCESS_WITH_INFO`) counts as
+success, also `commit`, `rollback` and `setautocommit`; the warning is not
+passed on. Examples:
 
 - `ORA-24344`: `CREATE PROCEDURE` with compilation errors returns `0`. The
   procedure exists with status `INVALID`; its errors are in `USER_ERRORS`.

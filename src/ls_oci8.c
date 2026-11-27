@@ -309,8 +309,11 @@ typedef struct {
 } cur_data;
 
 
-int checkerr (lua_State *L, sword status, OCIError *errhp);
-#define ASSERT(L,exp,err) {sword s = exp; if (s) return checkerr (L, s, err);}
+static int checkerr (lua_State *L, sword status, OCIError *errhp);
+/* OCI_SUCCESS_WITH_INFO is a success: the call did its work, the warning
+   is not passed on (topic 4 of the decisions for all drivers) */
+#define OCI8_FAILED(s) ((s) != OCI_SUCCESS && (s) != OCI_SUCCESS_WITH_INFO)
+#define ASSERT(L,exp,err) {sword s = exp; if (OCI8_FAILED (s)) return checkerr (L, s, err);}
 
 
 /*
@@ -373,14 +376,11 @@ static env_data *getenvfromconn (lua_State *L, conn_data *conn) {
 
 
 /*
-** Push nil plus an error message.
+** Push nil plus an error message; always two values.
 */
-int checkerr (lua_State *L, sword status, OCIError *errhp) {
+static int checkerr (lua_State *L, sword status, OCIError *errhp) {
 	lua_pushnil (L);
 	switch (status) {
-		case OCI_SUCCESS:
-			lua_pushnil (L); /* !!!!!!!!!!!!! */
-			break;
 		case OCI_SUCCESS_WITH_INFO:
 			lua_pushstring (L, LUASQL_PREFIX"Success with info!");
 			break;
@@ -409,6 +409,12 @@ int checkerr (lua_State *L, sword status, OCIError *errhp) {
 			break;
 		case OCI_CONTINUE:
 			lua_pushstring (L, LUASQL_PREFIX"OCI_CONTINUE");
+			break;
+		default:
+			/* also OCI_SUCCESS: callers check for an error first, so it
+			   does not come here */
+			lua_pushfstring (L, LUASQL_PREFIX"unexpected OCI status %d",
+				(int)status);
 			break;
 	}
 	return 2;
@@ -798,7 +804,7 @@ static int read_lob (lua_State *L, cur_data *cur, conn_data *conn,
 	sword status;
 
 	status = OCILobGetLength2 (conn->svchp, cur->errhp, loc, &lob_len);
-	if (status)
+	if (OCI8_FAILED (status))
 		return checkerr (L, status, cur->errhp);
 	if (lob_len == 0) {
 		/* nothing to read; OCILobCharSetForm rejects locators from
@@ -809,7 +815,7 @@ static int read_lob (lua_State *L, cur_data *cur, conn_data *conn,
 
 	if (!binary) {
 		status = OCILobCharSetForm (env->envhp, cur->errhp, loc, &csfrm);
-		if (status)
+		if (OCI8_FAILED (status))
 			return checkerr (L, status, cur->errhp);
 	}
 	while (offset <= lob_len) {
@@ -882,8 +888,8 @@ static int push_number_exact (lua_State *L, cur_data *cur,
 	ASSERT (L, OCINumberIsInt (cur->errhp, num, &is_int), cur->errhp);
 	if (is_int) {
 		lua_Integer iv;
-		if (OCINumberToInt (cur->errhp, num, (uword)sizeof(iv),
-				OCI_NUMBER_SIGNED, (void *)&iv) == OCI_SUCCESS) {
+		if (!OCI8_FAILED (OCINumberToInt (cur->errhp, num, (uword)sizeof(iv),
+				OCI_NUMBER_SIGNED, (void *)&iv))) {
 			lua_pushinteger (L, iv);
 			return 1;
 		}
@@ -1411,7 +1417,7 @@ static int cur_getcoltypes (lua_State *L) {
 		lua_newtable (L);
 		for (i = 1; i <= cur->numcols; i++) {
 			column_data *col = &(cur->cols[i-1]);
-			lua_pushnumber (L, i);
+			lua_pushinteger (L, i);
 			lua_pushstring (L, getcolumntype (col));
 			lua_rawset (L, -3);
 		}
@@ -1427,7 +1433,10 @@ static int cur_getcoltypes (lua_State *L) {
 Closes the connection and logs off.
 
 An open transaction is rolled back first, so only explicitly committed
-changes remain (Oracle itself would commit at logoff). Fails while cursors or
+changes remain (Oracle itself would commit at logoff). If that rollback
+fails, the driver detaches from the server before the logoff, so that the
+server rolls the transaction back instead of committing it; the connection
+is closed all the same. Fails while cursors or
 statements of the connection are open. The garbage collector and a
 to-be-closed variable call it as well; a to-be-closed variable ignores the
 failure, so close cursors and statements before the end of the block.
@@ -1469,7 +1478,19 @@ static int conn_close (lua_State *L) {
 			   first, so that only explicitly committed changes are kept,
 			   as with the other LuaSQL drivers. Errors are ignored: close
 			   (and __gc) must not stop halfway. */
-			OCITransRollback (conn->svchp, conn->errhp, OCI_DEFAULT);
+			sword status = OCITransRollback (conn->svchp, conn->errhp,
+				OCI_DEFAULT);
+			if (OCI8_FAILED (status)) {
+				/* the logoff would commit what the rollback left: end the
+				   access path to the server first, so that the server
+				   rolls back (as at any end other than a logoff); the
+				   logoff then only frees the handles */
+				OCIServer *srvhp = NULL;
+				if (!OCI8_FAILED (OCIAttrGet ((dvoid *)conn->svchp,
+						OCI_HTYPE_SVCCTX, (dvoid *)&srvhp, (ub4 *)0,
+						OCI_ATTR_SERVER, conn->errhp)) && srvhp != NULL)
+					OCIServerDetach (srvhp, conn->errhp, OCI_DEFAULT);
+			}
 			OCILogoff (conn->svchp, conn->errhp);
 		}
 		else
@@ -1639,10 +1660,10 @@ static int conn_execute (lua_State *L) {
 	status = OCIStmtPrepare (stmthp, conn->errhp, (text *)statement,
 		(ub4) strlen(statement), (ub4) OCI_NTV_SYNTAX, (ub4) OCI_DEFAULT);
 	/* statement type */
-	if (status == OCI_SUCCESS)
+	if (!OCI8_FAILED (status))
 		status = OCIAttrGet ((dvoid *)stmthp, (ub4) OCI_HTYPE_STMT,
 			(dvoid *)&type, (ub4 *)0, (ub4)OCI_ATTR_STMT_TYPE, conn->errhp);
-	if (status != OCI_SUCCESS) {
+	if (OCI8_FAILED (status)) {
 		int ret = checkerr (L, status, conn->errhp);
 		OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
 		return ret;
@@ -1681,7 +1702,7 @@ static int conn_execute (lua_State *L) {
 		status = OCIAttrSet ((dvoid *)stmthp, (ub4)OCI_HTYPE_STMT,
 			(dvoid *)&conn->prefetch, (ub4)0, (ub4)OCI_ATTR_PREFETCH_ROWS,
 			conn->errhp);
-		if (status != OCI_SUCCESS) {
+		if (OCI8_FAILED (status)) {
 			int ret = checkerr (L, status, conn->errhp);
 			OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
 			if (binds_idx)
@@ -1721,7 +1742,7 @@ static int conn_execute (lua_State *L) {
 		status = OCIAttrGet ((dvoid *)stmthp, (ub4)OCI_HTYPE_STMT,
 			(dvoid *)&rows_affected, (ub4 *)0,
 			(ub4)OCI_ATTR_ROW_COUNT, conn->errhp);
-		if (status != OCI_SUCCESS) {
+		if (OCI8_FAILED (status)) {
 			int ret = checkerr (L, status, conn->errhp);
 			OCIHandleFree ((dvoid *)stmthp, OCI_HTYPE_STMT);
 			if (binds_idx)
@@ -1894,7 +1915,7 @@ static int conn_prepare (lua_State *L) {
 	{
 		sword s = OCIAttrGet ((dvoid *)stmthp, (ub4) OCI_HTYPE_STMT,
 			(dvoid *)&type, (ub4 *)0, (ub4)OCI_ATTR_STMT_TYPE, conn->errhp);
-		if (s) {
+		if (OCI8_FAILED (s)) {
 			OCIStmtRelease (stmthp, conn->errhp, NULL, 0, OCI_DEFAULT);
 			return checkerr (L, s, conn->errhp);
 		}
@@ -1905,7 +1926,7 @@ static int conn_prepare (lua_State *L) {
 		sword s = OCIHandleAlloc ((dvoid *)env->envhp,
 			(dvoid **)&errhp, (ub4) OCI_HTYPE_ERROR, (size_t) 0,
 			(dvoid **) 0);
-		if (s) {
+		if (OCI8_FAILED (s)) {
 			OCIStmtRelease (stmthp, conn->errhp, NULL, 0, OCI_DEFAULT);
 			return checkerr (L, s, conn->errhp);
 		}
@@ -2031,7 +2052,7 @@ static int bind_param (lua_State *L, bind_ctx *ctx, int key_idx, int val_idx) {
                     return luasql_faildirect(L, "missing environment handle for timestamp");
                 rc = OCIDescriptorAlloc(ctx->env->envhp, (dvoid **)&slot->val.datetime,
                                         OCI_DTYPE_TIMESTAMP, 0, (void **)0);
-                if (rc != OCI_SUCCESS)
+                if (OCI8_FAILED(rc))
                     return luasql_faildirect(L, "failed to allocate timestamp descriptor");
                 rc = OCIDateTimeFromText(
                     OCI8_DTHNDL(ctx->conn, ctx->env),
@@ -2043,7 +2064,7 @@ static int bind_param (lua_State *L, bind_ctx *ctx, int key_idx, int val_idx) {
                     NULL, 0,
                     slot->val.datetime
                 );
-                if (rc != OCI_SUCCESS) {
+                if (OCI8_FAILED(rc)) {
                     int ret = checkerr(L, rc, ctx->errhp);
                     free_bind_slot(slot);
                     return ret;
@@ -2070,7 +2091,7 @@ static int bind_param (lua_State *L, bind_ctx *ctx, int key_idx, int val_idx) {
                     NULL, 0,
                     &slot->val.date
                 );
-                if (rc != OCI_SUCCESS)
+                if (OCI8_FAILED(rc))
                     return luasql_faildirect(L, "invalid date format, expected YYYY-MM-DD [HH24:MI:SS]");
                 bind_ptr  = &slot->val.date;
                 bind_size = sizeof(OCIDate);
@@ -2102,7 +2123,7 @@ static int bind_param (lua_State *L, bind_ctx *ctx, int key_idx, int val_idx) {
                               (dvoid *)&slot->ind, (ub2 *)0, (ub2 *)0,
                               (ub4)0, (ub4 *)0, OCI_DEFAULT);
     }
-    if (status) {
+    if (OCI8_FAILED(status)) {
         int ret = checkerr(L, status, ctx->errhp);
         free_bind_slot(slot);
         return ret;
@@ -2164,7 +2185,7 @@ static int bind_args (lua_State *L, bind_ctx *ctx, int first, int last) {
     sword status = OCIAttrGet((dvoid *)ctx->stmthp, (ub4)OCI_HTYPE_STMT,
                               (dvoid *)&count, (ub4 *)0,
                               (ub4)OCI_ATTR_BIND_COUNT, ctx->errhp);
-    if (status)
+    if (OCI8_FAILED(status))
         return checkerr(L, status, ctx->errhp);
     if (count != (ub4)given) {
         lua_pushnil(L);
@@ -2225,13 +2246,13 @@ static int stmt_reset (lua_State *L) {
                              (const OraText *)NULL, (ub4)0,
                              (ub4)OCI_NTV_SYNTAX, (ub4)OCI_DEFAULT);
     lua_pop(L, 1);
-    if (status)
+    if (OCI8_FAILED(status))
         return checkerr(L, status, stmt->errhp);
     /* the driver uses no statement cache (OCILogon), so OCI_DEFAULT
        deallocates the old handle with its bindings and its cursor, as in
        stmt_close; OCI_STRLS_CACHE_DELETE is only valid with a cache */
     status = OCIStmtRelease(stmt->stmthp, stmt->errhp, NULL, 0, OCI_DEFAULT);
-    if (status) {
+    if (OCI8_FAILED(status)) {
         /* read the error first, then keep the statement as it was and
            drop the new handle */
         int ret = checkerr(L, status, stmt->errhp);
@@ -2358,7 +2379,7 @@ static int stmt_execute (lua_State *L) {
         status = OCIAttrSet((dvoid *)stmt->stmthp, (ub4)OCI_HTYPE_STMT,
                             (dvoid *)&conn->prefetch, (ub4)0,
                             (ub4)OCI_ATTR_PREFETCH_ROWS, stmt->errhp);
-        if (status != OCI_SUCCESS) {
+        if (OCI8_FAILED(status)) {
             lua_pop(L, 1); /* pop conn */
             return checkerr(L, status, stmt->errhp);
         }
@@ -2421,7 +2442,7 @@ Commits the current transaction.
 static int conn_commit (lua_State *L) {
 	conn_data *conn = getconnection (L);
 	sword status = OCITransCommit (conn->svchp, conn->errhp, OCI_DEFAULT);
-	if (status)   /* as ASSERT: everything but OCI_SUCCESS */
+	if (OCI8_FAILED (status))   /* with info the commit is done */
 		return checkerr_false (L, status, conn->errhp);
 /*
 	if (conn->auto_commit == 0)
@@ -2446,7 +2467,7 @@ Rolls back the current transaction.
 static int conn_rollback (lua_State *L) {
 	conn_data *conn = getconnection (L);
 	sword status = OCITransRollback (conn->svchp, conn->errhp, OCI_DEFAULT);
-	if (status)   /* as ASSERT: everything but OCI_SUCCESS */
+	if (OCI8_FAILED (status))   /* with info the rollback is done */
 		return checkerr_false (L, status, conn->errhp);
 /*
 	if (conn->auto_commit == 0)
@@ -2485,7 +2506,7 @@ static int conn_setautocommit (lua_State *L) {
 		/* Undo active transaction; autocommit is on only if that worked */
 		sword status = OCITransRollback (conn->svchp, conn->errhp,
 			OCI_DEFAULT);
-		if (status)   /* as ASSERT: everything but OCI_SUCCESS */
+		if (OCI8_FAILED (status))   /* with info the rollback is done */
 			return checkerr_false (L, status, conn->errhp);
 		conn->auto_commit = 1;
 	}
@@ -2682,9 +2703,9 @@ static int env_connect (lua_State *L) {
 	conn->loggedon = 1;
 	/* the session that OCILogon created; without it the datetime
 	   conversions fall back to the environment handle */
-	if (OCIAttrGet ((dvoid *)conn->svchp, (ub4)OCI_HTYPE_SVCCTX,
+	if (OCI8_FAILED (OCIAttrGet ((dvoid *)conn->svchp, (ub4)OCI_HTYPE_SVCCTX,
 			(dvoid *)&conn->authp, (ub4 *)0, (ub4)OCI_ATTR_SESSION,
-			conn->errhp) != OCI_SUCCESS)
+			conn->errhp)))
 		conn->authp = NULL;
 
 	return 1;
@@ -2759,10 +2780,29 @@ static int create_environment (lua_State *L) {
 			(ub2) 873, (ub2) 873);
 	if (status != OCI_SUCCESS && status != OCI_SUCCESS_WITH_INFO)
 		return luasql_faildirect (L, "couldn't create environment");
-	/* error handler */
-	ASSERT (L, OCIHandleAlloc((dvoid *) env->envhp,
-		(dvoid **) &(env->errhp), /* !!! */
-		(ub4) OCI_HTYPE_ERROR, (size_t) 0, (dvoid **) 0), env->errhp);
+	/* error handler; without it the error is read from the environment
+	   handle */
+	status = OCIHandleAlloc ((dvoid *) env->envhp,
+		(dvoid **) &(env->errhp),
+		(ub4) OCI_HTYPE_ERROR, (size_t) 0, (dvoid **) 0);
+	if (OCI8_FAILED (status)) {
+		text errbuf[OCI_ERROR_MAXMSG_SIZE2];
+		sb4 errcode = 0;
+		errbuf[0] = '\0';
+		env->errhp = NULL;
+		/* errcode 0 (ORA-00000) means the handle holds no error */
+		if (OCIErrorGet ((dvoid *)env->envhp, (ub4) 1, (text *) NULL,
+				&errcode, errbuf, (ub4) sizeof (errbuf), OCI_HTYPE_ENV)
+				!= OCI_SUCCESS)
+			errcode = 0;
+		lua_pushnil (L);
+		if (errcode != 0)
+			lua_pushfstring (L, LUASQL_PREFIX"%s", (const char *)errbuf);
+		else
+			lua_pushfstring (L, LUASQL_PREFIX"couldn't create the error "
+				"handle (OCI status %d)", (int)status);
+		return 2;
+	}
 	return 1;
 }
 
