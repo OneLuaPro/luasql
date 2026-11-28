@@ -26,12 +26,12 @@ Besides the usual server counters the phases count the open transactions of the 
 
 Before `lobFetch` the scenario reads one CLOB, before `binaryInsert` it writes and reads one row of `luastress_volbin`, and before `vectorBind` one row of the vector table, so that what the DBMS opens on the first LOB read of a table does not count as a leak of the phase. `binaryInsert` writes real BLOBs, up to 1 MB per row, without filling the database.
 
-After the phases a line shows the throughput of each phase in rows per second. It is information, not a check. From a nightly run (Oracle, local VM, prefetch 100, network encryption):
+After the phases a line shows the throughput of each phase in rows per second. It is information, not a check. From a nightly run on 27 November 2026 (Oracle, local VM, prefetch 100, Native Network Encryption, `luasql.oci8` as committed in `6661a76`, task `ext-oci8`):
 
 ```
-  throughput: bulkInsert 4617 rows/s, fetchExecute 69563 rows/s, fetchPrepared 70404 rows/s,
-              fetchReuse 62886 rows/s, bigRollback 4430 rows/s, lobInsert 1204 rows/s,
-              lobFetch 1437 rows/s
+  throughput: bulkInsert 4776 rows/s, fetchExecute 72274 rows/s, fetchPrepared 72277 rows/s,
+              fetchReuse 63339 rows/s, bigRollback 4597 rows/s, lobInsert 1269 rows/s,
+              lobFetch 1483 rows/s, binaryInsert 173 rows/s, vectorBind 456 rows/s
 ```
 
 ## Cases
