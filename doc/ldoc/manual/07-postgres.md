@@ -30,6 +30,9 @@ the string. What is given nowhere comes from the environment variables of
 libpq (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, ...), from the password
 file of libpq or from its defaults. Keep passwords out of the source code,
 e.g. in an environment variable. A new connection is in autocommit mode.
+A connect that fails returns `nil` and a message; a message of the server
+before the logon, e.g. for a wrong password, may not be UTF-8 (see
+[Behavior Worth Knowing](#Behavior_Worth_Knowing)).
 
 ## Character Set and DateStyle
 
@@ -221,10 +224,21 @@ they are:
   database (`ALTER DATABASE ... SET lc_messages = 'C'`). The messages of
   libpq itself, e.g. for a lost connection, are always English. A message
   can have several lines.
-- **A connect that the server refuses** (unknown user or database, wrong
-  password) gets its message in the language and the encoding of the
-  server, before `client_encoding` and the settings of the database apply:
-  it may not be valid UTF-8.
+- **Messages before the logon** come in the language and the encoding of
+  the server, not in UTF-8: a wrong password, an unknown user or an
+  unknown database. The server sends them before the logon is done, so
+  before `client_encoding` (UTF8, set by the driver) and the settings of
+  the database, such as its `lc_messages`, apply; it writes them with the
+  `lc_messages` of `postgresql.conf` in the encoding of that locale. With a
+  German server on Windows this is WIN1252: `für` comes with the byte
+  `0xFC`, the quotes `»` and `«` as `0xBB` and `0xAB`. The driver passes
+  the bytes unchanged. The parts of libpq itself, e.g.
+  `connection to server at ... failed`, are English, and a message may
+  hold the text of several attempts of libpq, one per line. Every message
+  after the logon is UTF-8. A program that needs UTF-8 can check the
+  message with `utf8.len(msg)` and convert it from the encoding of the
+  server, which it has to know; or the server gets `lc_messages = 'C'` in
+  `postgresql.conf`, so that these messages are English and pure ASCII.
 - **After a lost connection** a statement returns `nil` and the message of
   libpq; a cursor reads on, as its result is on the client.
   `conn:commit()` returns `false` and a message, `conn:rollback()` and
