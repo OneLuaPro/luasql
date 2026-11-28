@@ -23,6 +23,12 @@ local emptyBinaryAsNull = {
    limitReason = "Oracle stores an empty binary value as NULL",
 }
 
+-- Text of a vector of n dimensions that all hold the same value, as
+-- Oracle writes it, e.g. vectorOf(3, "1.0E+000").
+local function vectorOf(n, item)
+   return "[" .. string.rep(item .. ",", n - 1) .. item .. "]"
+end
+
 -- The run header line "encryption:". Over tcps USERENV gives the
 -- version and the cipher of TLS. Oracle gives TLS_CIPHERSUITE with a
 -- zero byte at the end (Len=23 for TLS_AES_256_GCM_SHA384 in DUMP,
@@ -168,6 +174,26 @@ return {
    -- entry for phase jsonRead.
    jsonQuery = "SELECT JSON_OBJECT('t' VALUE RPAD(TO_CLOB(:1), :2, :3)"
       .. " RETURNING JSON) FROM dual",
+   -- Phase vectorRead: one row each, read natively by luasql.oci8. The
+   -- texts are those of VECTOR_SERIALIZE (SQL*Plus, 27 November 2026);
+   -- fixed, since VECTOR_SERIALIZE ... RETURNING CLOB in the query would
+   -- give a temporary LOB per execute.
+   vectorValues = {
+      { query = "SELECT TO_VECTOR('[1.5,-2,0.25]', 3, FLOAT32) FROM dual",
+        text = "[1.5E+000,-2.0E+000,2.5E-001]" },
+      { query = "SELECT TO_VECTOR('[0.1,-2.5,1e-300,3]', *, FLOAT64)"
+           .. " FROM dual",
+        text = "[1.0000000000000001E-001,-2.5E+000,1.0E-300,3.0E+000]" },
+      { query = "SELECT TO_VECTOR('[1,-2,127,-128]', 4, INT8) FROM dual",
+        text = "[1,-2,127,-128]" },
+      { query = "SELECT TO_VECTOR('[255,1]', 16, BINARY) FROM dual",
+        text = "[255,1]" },
+      { query = "SELECT TO_VECTOR('[10,[1,3],[1.5,-2]]', 10, FLOAT32,"
+           .. " SPARSE) FROM dual",
+        text = "[10,[1,3],[1.5E+000,-2.0E+000]]" },
+      { query = "SELECT TO_VECTOR(NULL, 3, FLOAT32) FROM dual" },
+   },
+   vectorColumnType = "vector",
    -- Checked before a LOB phase: 1 if the expression of its query gives
    -- temporary LOBs, so the phase tests their release. Keys are phase
    -- names (clobRows and blobRows in cursorLifecycle and stmtLifecycle,
@@ -376,6 +402,22 @@ return {
    volBinaryTableDrop = "DROP TABLE IF EXISTS luastress_volbin PURGE",
    volBinaryInsert = "INSERT INTO luastress_volbin (id, b) VALUES (:1, :2)",
    volBinarySelect = "SELECT b FROM luastress_volbin WHERE id = :1",
+   -- Phase vectorBind: vectors bound as text (at most 32767 bytes in
+   -- luasql.oci8) into a temporary table; the texts read back are those
+   -- of VECTOR_SERIALIZE (SQL*Plus, 27 November 2026: 16383 ones as
+   -- FLOAT64 are 147448 characters).
+   volVectorTableCreate = "CREATE GLOBAL TEMPORARY TABLE luastress_volvec"
+      .. " (id NUMBER, v VECTOR(*, FLOAT64)) ON COMMIT DELETE ROWS",
+   volVectorTableDrop = "DROP TABLE IF EXISTS luastress_volvec PURGE",
+   volVectorInsert = "INSERT INTO luastress_volvec (id, v) VALUES (:1, :2)",
+   volVectorSelect = "SELECT v FROM luastress_volvec WHERE id = :1",
+   volVectorValues = {
+      { bind = "[4,5,6]", text = "[4.0E+000,5.0E+000,6.0E+000]" },
+      { bind = "[0.1,-2.5,1e-300,3]",
+        text = "[1.0000000000000001E-001,-2.5E+000,1.0E-300,3.0E+000]" },
+      -- 32767 bytes, the longest text luasql.oci8 binds.
+      { bind = vectorOf(16383, "1"), text = vectorOf(16383, "1.0E+000") },
+   },
    -- Full tablespace cases; %s (twice) is the small tablespace. fullFill
    -- inserts %d rows of 4000 bytes; it runs up to fullFillSteps times.
    fullTableCreate = "CREATE TABLE luastress_full (id NUMBER,"
@@ -449,12 +491,15 @@ return {
       .. " bd BINARY_DOUBLE, ch CHAR(10 CHAR), nch NCHAR(10), r UROWID,"
       .. " rw RAW(2000), bl BLOB, iym INTERVAL YEAR TO MONTH,"
       .. " ids INTERVAL DAY TO SECOND, iym4 INTERVAL YEAR(4) TO MONTH,"
-      .. " ids3 INTERVAL DAY(3) TO SECOND(2), js JSON)",
+      .. " ids3 INTERVAL DAY(3) TO SECOND(2), js JSON,"
+      .. " v3 VECTOR(3, FLOAT32), v64 VECTOR(*, FLOAT64),"
+      .. " vi8 VECTOR(4, INT8), vbin VECTOR(16, BINARY),"
+      .. " vsp VECTOR(10, FLOAT32, SPARSE))",
    typesTableDrop = "DROP TABLE IF EXISTS luastress_types PURGE",
    typesColumns = {
       "n", "s", "d", "ts", "tstz", "tsltz", "b", "c", "ns", "nc",
       "bf", "bd", "ch", "nch", "r", "rw", "bl", "iym", "ids", "iym4",
-      "ids3", "js",
+      "ids3", "js", "v3", "v64", "vi8", "vbin", "vsp",
    },
    -- Column types as luasql.oci8 reports them (cur:getcoltypes()); the
    -- names are driver specific. rowid is the ROWID pseudo column.
@@ -465,7 +510,8 @@ return {
       bd = "number", ch = "string", nch = "string", r = "string",
       rw = "binary", bl = "binary", iym = "interval", ids = "interval",
       iym4 = "interval", ids3 = "interval", js = "json",
-      rowid = "string",
+      v3 = "vector", v64 = "vector", vi8 = "vector", vbin = "vector",
+      vsp = "vector", rowid = "string",
    },
    -- Column types luasql.oci8 does not support on purpose: reading such
    -- a column must fail with an error matching errorPattern. Each one
@@ -516,6 +562,16 @@ return {
    rawAsHex = "RAWTOHEX(%s)",
    -- %s is a JSON column; its compact text on the server.
    jsonAsText = "JSON_SERIALIZE(%s RETURNING CLOB)",
+   -- %s is a vector column; its text on the server, as luasql.oci8
+   -- reads it.
+   vectorAsText = "VECTOR_SERIALIZE(%s RETURNING CLOB)",
+   -- Errors of the vector cases (SQL*Plus, 27 November 2026): a wrong
+   -- number of dimensions; a dimension that is no number ("[1,2,x]";
+   -- ORA-51804 is text that is no vector at all, e.g. "abc"); a text
+   -- bind over 32767 bytes.
+   vectorDimensionError = "ORA%-51803",
+   vectorSyntaxError = "ORA%-51805",
+   vectorTooLongError = "ORA%-01461",
    -- ROWID cases; %s is the table. Rows of the index organized table
    -- have logical ROWIDs.
    typesTable = "luastress_types",
@@ -579,6 +635,10 @@ return {
       jsonLiteral = "JSON('{\"x\" : [true, false]}')",
       jsonLarge = "JSON_OBJECT('t' VALUE RPAD(TO_CLOB('ab'), 20000,"
          .. " 'cd') RETURNING JSON)",
+      -- 65535 ones as FLOAT64, 589816 characters of text (SQL*Plus,
+      -- 27 November 2026).
+      vecLarge = "TO_VECTOR(TO_CLOB('[') || RPAD(TO_CLOB('1'), 131069,"
+         .. " ',1') || ']', 65535, FLOAT64)",
    },
    -- Oracle converts a string bound for a RAW or BLOB column from hex
    -- text (implicit HEXTORAW); the cases with hex text check that.
@@ -615,6 +675,7 @@ return {
       -- A difference of timestamps is an interval.
       dsDifference = { columnType = "interval" },
       jsonEmpty = emptyAsNull,
+      vecEmpty = emptyAsNull,
       -- The TIMESTAMP bind has no time zone (ORA-01830).
       tsBindZone = {
          limitError = "ORA%-01830",

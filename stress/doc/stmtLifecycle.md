@@ -24,16 +24,19 @@ Iterations per phase: smoke 500, standard 10 000, nightly 100 000.
 | `blobRead`     | as `clobRead`, with temporary BLOBs (Binary Large Objects) of 4 to 2000 bytes                                                                            | the same                                                                                      |
 | `blobRows`     | as `clobRows`, with temporary BLOBs                                                                                                                      | the same                                                                                      |
 | `jsonRead`     | as `clobRead`, with a JSON object that holds the CLOB                                                                                                    | the JSON text is wrong, or a counter or the memory grows                                      |
+| `vectorRead`   | executes the statements of the vector queries of the backend in turn (`backend.vectorValues`, one row each, e.g. several formats and NULL)               | the text read differs from the entry, or a counter or the memory grows                        |
 
 The LOB phases are where the heap scatters most: values of up to 90 KB leave a varying amount of memory with the heap after each garbage collection. The measurement takes 60 samples per round for this reason (see [Phases](../README.md#phases)).
 
-A LOB phase first checks that its query really gives temporary LOBs (`backend.tempLobChecks`); if not, it fails as invalid, because it would test nothing. `jsonRead` has no such check; it guards against JSON fetches that pile up memory. A phase is skipped if the backend has no query for it.
+A LOB phase first checks that its query really gives temporary LOBs (`backend.tempLobChecks`); if not, it fails as invalid, because it would test nothing. `jsonRead` has no such check; it guards against JSON fetches that pile up memory. `vectorRead` runs every entry of `backend.vectorValues` once before the phase and checks the column type the driver reports against `backend.vectorColumnType`, if the backend gives one; an entry is `{ query = ..., text = ... }`, the query without placeholders, `text` the value read, `nil` for NULL. The entries are fixed texts, not the text of the server for each query, which might create a temporary LOB per query (Oracle `VECTOR_SERIALIZE ... RETURNING CLOB`). A phase is skipped if the backend has no query for it.
 
 The counters before and after a phase cannot show a cursor that keeps something after its close, as long as the next execute of the same statement or its close at the end of the phase releases it; `closeRelease` checks this while the statement is open.
 
 ## Oracle
 
 The server counters are the open cursors and the temporary LOBs of the test session. `luasql.oci8` reads JSON through a CLOB define that leaves no temporary LOB on the server.
+
+`vectorRead` reads six vectors made with `TO_VECTOR` in the query: `FLOAT32`, `FLOAT64`, `INT8`, `BINARY`, a sparse `FLOAT32` vector and NULL. `luasql.oci8` reads them natively, into a `VECTOR` descriptor of OCI that it converts to text on the client; no temporary LOB is involved. The expected texts are those of `VECTOR_SERIALIZE`, written into the backend once. OCI fetches a row with a vector on its own, so each query has one row.
 
 ## SQLite
 

@@ -144,6 +144,11 @@ code without an error message come first.
   Oracle, which commits it at logoff.
 - **oci8: text is always UTF-8.** The client character set is AL32UTF8,
   independent of `NLS_LANG`; LuaSQL uses the character set of `NLS_LANG`.
+- **oci8: `env:connect` without user and password logs on with external
+  credentials** (the operating system user or a wallet entry) if Oracle Net
+  is set up for it; LuaSQL fails with `ORA-01017` (`OCILogon`). A program
+  whose variables for user and password are both missing therefore
+  connects instead of failing.
 - **sqlite3: a wrong number of parameters and an unknown parameter name
   return `nil` and a message**; LuaSQL raises an error. Code that does not
   check the result goes on without noticing.
@@ -317,6 +322,9 @@ code without an error message come first.
       closed.
 - **oci8: `conn:execute(sql, ...)` binds further arguments as parameters**;
   LuaSQL ignores them.
+- **oci8: the messages of logon errors come in the language of the
+  client** (`OCISessionBegin`), e.g. German on a German Windows; LuaSQL
+  gives them in English (`OCILogon`). The `ORA-` code is the same.
 - **sqlite3: transactions:**
     - The message of an error with which SQLite rolls back the whole
       transaction ends with `(LuaSQL: SQLite rolled back the transaction)`.
@@ -626,7 +634,8 @@ code without an error message come first.
 - Plain Lua values and variable arguments as parameters, also for
   `conn:execute`.
 - The additions of oci8 in the @{03-oracle.md|Oracle topic}: options
-  `numbers` and `prefetch`, data types, threads.
+  `numbers`, `prefetch` and `calltimeout`, data types (also `VECTOR`),
+  logon with external credentials (operating system, wallet), threads.
 - The additions of sqlite3 in the @{04-sqlite3.md|SQLite topic}: the
   functions of sqlean on every connection, names of parameters without a
   prefix (`id` for `:id`) and `?NNN` as a name, dates and times checked

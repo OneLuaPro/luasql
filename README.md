@@ -38,6 +38,7 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 
 - **oci8: `conn:close()` rolls back an open transaction**, also when called by the garbage collector or a to-be-closed variable. LuaSQL leaves it to Oracle, which commits it at logoff.
 - **oci8: text is always UTF-8.** The client character set is AL32UTF8, independent of `NLS_LANG`; LuaSQL uses the character set of `NLS_LANG`.
+- **oci8: `env:connect` without user and password logs on with external credentials** (the operating system user or a wallet entry) if Oracle Net is set up for it; LuaSQL fails with `ORA-01017` (`OCILogon`). A program whose variables for user and password are both missing therefore connects instead of failing.
 - **sqlite3: a wrong number of parameters and an unknown parameter name return `nil` and a message**; LuaSQL raises an error. Code that does not check the result goes on without noticing.
 - **sqlite3: `true` is bound as 1**; LuaSQL binds it as 0.
 - **sqlite3: with autocommit off, statements after an error with which SQLite rolls back the whole transaction** (e.g. `database or disk is full`, `ON CONFLICT ROLLBACK`) **need `conn:commit()`**, and so do statements after a commit that fails for this reason: the driver begins a new transaction. LuaSQL goes on without a transaction, so each following statement is committed at once and cannot be rolled back.
@@ -86,6 +87,7 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
   - `commit`, `rollback` and `setautocommit` return `false` and a message on failure (LuaSQL: partly `nil`); code that tests for `nil` misses it.
   - `close` returns `false` and a message only if the object is already closed or still has open objects of its own. An error of the client library while releasing an object is ignored, and the object is closed.
 - **oci8: `conn:execute(sql, ...)` binds further arguments as parameters**; LuaSQL ignores them.
+- **oci8: the messages of logon errors come in the language of the client** (`OCISessionBegin`), e.g. German on a German Windows; LuaSQL gives them in English (`OCILogon`). The `ORA-` code is the same.
 - **sqlite3: transactions:**
   - The message of an error with which SQLite rolls back the whole transaction ends with `(LuaSQL: SQLite rolled back the transaction)`.
   - `conn:rollback()` with autocommit off returns `true` if SQLite has already rolled back; LuaSQL returns `nil` and a message.
@@ -184,7 +186,7 @@ Where the fork behaves differently from LuaSQL of lunarmodules (branch `master`)
 - Prepared statements for oci8, sqlite3, duckdb, firebird, postgres and mysql: `conn:prepare`, statement objects with `execute`, `reset` and `close` (upstream pull request [#209](https://github.com/lunarmodules/luasql/pull/209), extended).
 - `luasql.type` with the pairs `{value, type}`, `T.null` (a special value), `T.binary`, fixed forms for dates and times, `{T.null, type}`.
 - Plain Lua values and variable arguments as parameters, also for `conn:execute`.
-- The additions of oci8 described [below](#oracle-driver-luasqloci8): options `numbers` and `prefetch`, data types, threads.
+- The additions of oci8 described [below](#oracle-driver-luasqloci8): options `numbers`, `prefetch` and `calltimeout`, data types (also `VECTOR`), logon with external credentials (operating system, wallet), threads.
 - The additions of sqlite3 described [below](#sqlite-driver-luasqlsqlite3): the functions of sqlean on every connection, names of parameters without a prefix (`id` for `:id`) and `?NNN` as a name, dates and times checked against the calendar.
 - The additions of duckdb described [below](#duckdb-driver-luasqlduckdb): parameters (also `conn:execute(sql, ...)`), `luasql.type`, names of parameters without `$`, `":memory:name"`, the extensions built into OneLuaPro.
 - The additions of firebird: prepared statements, parameters (also `conn:execute(sql, ...)`), `luasql.type`, long values as temporary `BLOB`s, and `luasql._CLIENTVERSION`, the version of the Firebird client library; see the topic Firebird of the manual (`doc/ldoc/manual/06-firebird.md`).
@@ -203,6 +205,9 @@ Tested with Oracle AI Database 26ai Free 23.26.3 and Oracle Instant Client 23 on
 - **Threads:** the OCI environment is created with `OCI_THREADED`. Several Lua states, e.g. the lanes of [Lua Lanes](https://github.com/LuaLanes/lanes), may use the driver at the same time, each with its own environment and connection. Objects of the driver must not be shared between threads.
 - **Session time zone:** date and time conversions use the user session, so `TIMESTAMP WITH LOCAL TIME ZONE` values come in the session time zone, also after `ALTER SESSION SET TIME_ZONE`.
 - **Failed connects** free everything they allocated. A logon that succeeds with a warning (e.g. a password in its grace period) counts as success.
+- **Logon without a password:** `env:connect(source)` without user and password (both `nil` or `""`) logs on with external credentials, as Oracle Net is configured: the Windows user (a user `OPS$...` identified externally and `SQLNET.AUTHENTICATION_SERVICES = (NTS)` in the `sqlnet.ora` the client finds) or a wallet with the password stored for the connect string (`WALLET_LOCATION`, `SQLNET.WALLET_OVERRIDE = TRUE`; then no operating system logon). A program whose variables for user and password are both missing therefore logs on that way instead of failing. The driver uses `OCIServerAttach` and `OCISessionBegin` for every connection.
+- **Proxy:** a user name `"proxy[user]"` logs on as `user` with the password of `proxy`, if the server grants `CONNECT THROUGH`.
+- **Oracle Net files:** `sqlnet.ora` and `tnsnames.ora` are read from `TNS_ADMIN`, else from `network\admin` of `ORACLE_HOME`, so a set `ORACLE_HOME` brings in the files of that home. A net service name that is not found fails with `ORA-12154` only after about two minutes (also in SQL*Plus). Logon errors come in the language of the client; compare the code, not the text.
 
 ### Data Types
 
@@ -222,9 +227,10 @@ Values read from a cursor, and the names `cur:getcoltypes()` returns for them:
 | `TIMESTAMP WITH TIME ZONE`                      | `"YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM"`                                    | `timestamp` |
 | `INTERVAL YEAR TO MONTH`, `INTERVAL DAY TO SECOND` | Oracle's text, as `TO_CHAR` gives it, e.g. `"+01 02:03:04.500000"`     | `interval`  |
 | `JSON`                                          | JSON text, to be decoded e.g. with `lua-cjson` or `dkjson`               | `json`      |
+| `VECTOR`                                        | text as `VECTOR_SERIALIZE` gives it, e.g. `"[1.0E+000,2.0E+000]"`, any length | `vector`    |
 | any type, NULL                                  | `nil`                                                                    |             |
 
-Years before Christ get a minus sign, e.g. `"-4712-01-01 00:00:00"`. Not supported: `LONG` and `LONG RAW` (deprecated; use `CLOB` and `BLOB`), `BFILE`, `VECTOR`, `XMLTYPE` and object types; they give an error with the type code and the number of the column. In SQL they can be converted to a supported type first, e.g. with `TO_CHAR` or `TO_CLOB`.
+Years before Christ get a minus sign, e.g. `"-4712-01-01 00:00:00"`. Not supported: `LONG` and `LONG RAW` (deprecated; use `CLOB` and `BLOB`), `BFILE`, `XMLTYPE` and object types; they give an error with the type code and the number of the column. In SQL they can be converted to a supported type first, e.g. with `TO_CHAR` or `TO_CLOB`.
 
 ### Options
 
@@ -233,7 +239,8 @@ Years before Christ get a minus sign, e.g. `"-4712-01-01 00:00:00"`. Not support
 | Option    | Values                          | Meaning                                                                                                                                                                     |
 | --------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `numbers` | `"float"` (default), `"exact"`  | How `NUMBER` columns are read. `"float"`: as a float, converted by OCI, as before. `"exact"`: integral values in the integer range as Lua integers, all others as correctly rounded floats. Affects cursors opened afterwards. |
-| `prefetch` | integer 0 … 2147483647, default `100` | Rows OCI fetches ahead per round trip to the server; the default of OCI itself is very small. Affects queries executed afterwards, also by prepared statements. 100 000 rows are read about 25 times faster than with the OCI default. OCI allocates the buffer for that many rows at every query, so very large values fail with `ORA-01019`, and the cursor of such a query stays open on the server until the connection is closed; 100 to a few thousand are sensible. When a query fails in the middle of its result, the rows fetched ahead with the failing row are not delivered. |
+| `prefetch` | integer 0 … 2147483647, default `100` | Rows OCI fetches ahead per round trip to the server; the default of OCI itself is very small. Affects queries executed afterwards, also by prepared statements. 100 000 rows are read about 25 times faster than with the OCI default. OCI allocates the buffer for that many rows at every query, so very large values fail with `ORA-01019`, and the cursor of such a query stays open on the server until the connection is closed; 100 to a few thousand are sensible. When a query fails in the middle of its result, the rows fetched ahead with the failing row are not delivered. With a `CLOB` or `VECTOR` column OCI fetches each row on its own anyway. |
+| `calltimeout` | integer 0 … 4294967295 (ms), default `0` (no limit) | Time limit of each later call to the server (`OCI_ATTR_CALL_TIMEOUT`). A call over the limit fails with `ORA-03156`; if the server does not stop it within another limit, OCI closes the connection (`ORA-03114` afterwards, the open transaction is rolled back). |
 
 ### Parameters of Prepared Statements
 
@@ -257,7 +264,7 @@ The number of variable arguments must be the number of placeholders, else the re
 | `int`                        | 64-bit integer, exact; also a float with an integral value                                                          |
 | `number`                     | double; OCI keeps 15 significant digits. Infinity and NaN go as `BINARY_DOUBLE`: exact into `BINARY_DOUBLE` columns, an error (`ORA-01426`, `ORA-03087`) for `NUMBER` |
 | `string`                     | text of any length, also into `CLOB` columns; embedded `\0` is kept                                                  |
-| `boolean`                    | the text `'1'` or `'0'`                                                                                              |
+| `boolean`                    | the text `'1'` or `'0'`; into `BOOLEAN`, `NUMBER` and text columns, not into a `BOOLEAN` parameter of a PL/SQL block (`PLS-00306`) |
 | `date`                       | `"YYYY-MM-DD"` or `"YYYY-MM-DD HH24:MI:SS"`, also with a minus sign for years before Christ                          |
 | `timestamp`                  | `"YYYY-MM-DD HH24:MI:SS"` with optional fraction, e.g. `".500000"`; without time zone                                |
 | `time`                       | `"HH24:MI:SS"`, bound as text (Oracle has no `TIME` type)                                                            |
@@ -274,7 +281,7 @@ Values as read from a `DATE` or `TIMESTAMP` column can be bound back unchanged. 
 
 ### Transactions and Results
 
-- `conn:close()`, the garbage collector and a to-be-closed variable roll back an open transaction before logoff (Oracle itself would commit it), so only explicitly committed changes stay, as with the other LuaSQL drivers.
+- `conn:close()`, the garbage collector and a to-be-closed variable roll back an open transaction before the session ends (Oracle itself would commit it), so only explicitly committed changes stay, as with the other LuaSQL drivers.
 - `conn:setautocommit(true)` rolls back an open transaction, as upstream does. DDL commits implicitly, as always in Oracle.
 - Row counts of `conn:execute` and `stmt:execute` are integers.
 - A statement or fetch that succeeds with a warning (`OCI_SUCCESS_WITH_INFO`, e.g. `ORA-24347` NULL in an aggregate, `ORA-24344` compilation error) counts as success; the warning is not passed on. A truncated column value is an error.
@@ -319,7 +326,7 @@ Tested with DuckDB 1.5.6 and Lua 5.5 on Windows, built with DuckDB and its exten
 
 - `tests/test.lua` is the test bench of upstream LuaSQL, e.g. `lua test.lua oci8 <source> <user> <password>` in `tests/`; for firebird, postgres and mysql, `lua test.lua firebird`, `lua test.lua postgres` and `lua test.lua mysql` take the connection from the variables `FIREBIRD_TEST_*`, `POSTGRES_TEST_*` and `MYSQL_TEST_*` of `checks/`; for ado, `lua test.lua ado` with `ADO_TEST_TARGET` set to `pg` or `mariadb` connects through `Provider=MSDASQL` to the DSN `luatest_pg` or `luatest_mariadb` with the user and password of `POSTGRES_TEST_*` or `MYSQL_TEST_*`.
 - [`stress/`](stress/README.md) holds the stress test suite.
-- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD`, `lua checks/sqlite3.lua [<database file>]`, `lua checks/duckdb.lua [<database file>]`, `lua checks/firebird.lua` with the connection in `FIREBIRD_TEST_SOURCE`, `FIREBIRD_TEST_USER` and `FIREBIRD_TEST_PASSWORD`, `lua checks/postgres.lua` with the connection in `POSTGRES_TEST_HOST`, `POSTGRES_TEST_PORT`, `POSTGRES_TEST_NAME`, `POSTGRES_TEST_USER` and `POSTGRES_TEST_PASSWORD`, or `lua checks/mysql.lua` with the connection in `MYSQL_TEST_HOST`, `MYSQL_TEST_PORT`, `MYSQL_TEST_NAME`, `MYSQL_TEST_USER` and `MYSQL_TEST_PASSWORD`; so far for `luasql.oci8`, `luasql.sqlite3`, `luasql.duckdb`, `luasql.firebird`, `luasql.postgres` and `luasql.mysql`; `lua checks/ado.lua pg|mariadb` tests `luasql.ado` through the DSNs `luatest_pg` and `luatest_mariadb` with the user and password of `POSTGRES_TEST_*` or `MYSQL_TEST_*`. `checks/bench_oci8.lua` measures short queries and large results, e.g. to compare values of the option `prefetch` (`-p`).
+- `checks/` holds functional tests of the drivers, one file per driver, e.g. `lua checks/oci8.lua <source> <user>` with the password in `ORACLE_TEST_PASSWORD` (and, if set, `ORACLE_TEST_EXTERNAL`, `ORACLE_TEST_PROXY_USER` and `ORACLE_TEST_PROXY_PASSWORD` for the logon without a password and by proxy), `lua checks/sqlite3.lua [<database file>]`, `lua checks/duckdb.lua [<database file>]`, `lua checks/firebird.lua` with the connection in `FIREBIRD_TEST_SOURCE`, `FIREBIRD_TEST_USER` and `FIREBIRD_TEST_PASSWORD`, `lua checks/postgres.lua` with the connection in `POSTGRES_TEST_HOST`, `POSTGRES_TEST_PORT`, `POSTGRES_TEST_NAME`, `POSTGRES_TEST_USER` and `POSTGRES_TEST_PASSWORD`, or `lua checks/mysql.lua` with the connection in `MYSQL_TEST_HOST`, `MYSQL_TEST_PORT`, `MYSQL_TEST_NAME`, `MYSQL_TEST_USER` and `MYSQL_TEST_PASSWORD`; so far for `luasql.oci8`, `luasql.sqlite3`, `luasql.duckdb`, `luasql.firebird`, `luasql.postgres` and `luasql.mysql`; `lua checks/ado.lua pg|mariadb` tests `luasql.ado` through the DSNs `luatest_pg` and `luatest_mariadb` with the user and password of `POSTGRES_TEST_*` or `MYSQL_TEST_*`. `checks/bench_oci8.lua` measures short queries and large results, e.g. to compare values of the option `prefetch` (`-p`).
 
 ### Stress Test Suite
 

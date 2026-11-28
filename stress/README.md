@@ -655,7 +655,7 @@ Tested with Oracle AI Database 26ai Free 23.26.3 on Windows 10, with the `luasql
 | `dataTypes`    | float mode: `intMax`, `intMin`, `floatTiny`, `floatHuge`, `floatPi`, `litPi`, `litSum`, `litE`, `litThird` | with `numbers = "float"`, OCI converts `NUMBER` to double, not always correctly rounded; use `numbers = "exact"`; see driver option `numbers` below |
 | `dataTypes`    | `tsBindZone`                                                 | timestamp binds have no time zone; a `TIMESTAMP WITH TIME ZONE` value as read cannot be bound back |
 | `dataTypes`    | `timeInDate`                                                 | `luasql.type.time` is bound as a string; Oracle has no `TIME` type and converts it with `NLS_DATE_FORMAT` |
-| `dataTypes`    | `emptyString`, `charEmpty`, `jsonEmpty`                      | Oracle stores an empty string as NULL, also in `CHAR` and `JSON` columns |
+| `dataTypes`    | `emptyString`, `charEmpty`, `jsonEmpty`, `vecEmpty`          | Oracle stores an empty string as NULL, also in `CHAR`, `JSON` and `VECTOR` columns |
 | `dataTypes`    | `rawEmpty`                                                   | Oracle stores an empty `RAW` as NULL                         |
 | `dataTypes`    | `long`, `longRaw`                                            | `LONG` and `LONG RAW` are not supported by `luasql.oci8` (deprecated types); use `CLOB` and `BLOB` |
 

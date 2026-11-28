@@ -84,7 +84,8 @@ so a misspelled type is found at once. The
 significant digits. Infinity and NaN are bound as `BINARY_DOUBLE`
 @field string a string of any length, also into `CLOB` columns; an embedded
 `"\0"` is kept
-@field boolean `true` or `false`, bound as the text `'1'` or `'0'`
+@field boolean `true` or `false`, bound as the text `'1'` or `'0'`; not
+accepted by a `BOOLEAN` parameter in a PL/SQL block (`PLS-00306`)
 @field date a string `"YYYY-MM-DD"` or `"YYYY-MM-DD HH24:MI:SS"`, with a
 leading minus sign for years before Christ
 @field time a string `"HH24:MI:SS"`, bound as text: Oracle has no `TIME`
@@ -202,7 +203,11 @@ typedef struct {
 	int           env;                /* reference to environment */
 	OCISvcCtx    *svchp;              /* service handle */
 	OCIError     *errhp;              /* !!! */
-	OCISession   *authp;              /* user session of svchp, NULL if unknown */
+	OCIServer    *srvhp;              /* server handle (OCIServerAttach) */
+	OCISession   *authp;              /* user session (OCISessionBegin) */
+#ifdef OCI_ATTR_CALL_TIMEOUT
+	ub4           calltimeout;        /* OCI_ATTR_CALL_TIMEOUT in ms, 0 = none */
+#endif
 } conn_data;
 
 /*
@@ -241,6 +246,9 @@ typedef union {
 #endif
 #ifdef SQLT_INTERVAL_YM
 	OCIInterval *interval;
+#endif
+#ifdef SQLT_VEC
+	OCIVector *vector;
 #endif
 } column_value;
 
@@ -623,6 +631,27 @@ static int define_column (lua_State *L, cur_data *cur, int i, OCIParam *param) {
 					(ub2 *)0, (ub4) OCI_DEFAULT), cur->errhp);
 			}
 			break;
+#ifdef SQLT_VEC
+		case SQLT_VEC: {
+			/* VECTOR (Oracle 23ai): fetched natively into a descriptor and
+			   converted to text on the client (push_column); fetched as
+			   CLOB it would cost a temporary LOB per row */
+			env_data *env;
+			conn_data *conn;
+			lua_rawgeti (L, LUA_REGISTRYINDEX, cur->conn);
+			conn = (conn_data *)lua_touserdata (L, -1);
+			lua_pop (L, 1);
+			env = getenvfromconn (L, conn);
+			ASSERT (L, OCIDescriptorAlloc (env->envhp,
+				(dvoid **)&(col->val.vector), OCI_DTYPE_VECTOR,
+				(size_t)0, (dvoid **)0), cur->errhp);
+			ASSERT (L, OCIDefineByPos (cur->stmthp, &(col->define),
+				cur->errhp, (ub4)i, &(col->val.vector),
+				(sb4)sizeof(OCIVector *), SQLT_VEC, (dvoid *)&(col->null),
+				(ub2 *)0, (ub2 *)0, OCI_DEFAULT), cur->errhp);
+			break;
+		}
+#endif
 #ifdef SQLT_JSON
 		case SQLT_JSON:
 #endif
@@ -748,6 +777,12 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 				OCIDescriptorFree (col->val.interval, OCI_DTYPE_INTERVAL_DS);
 			break;
 #endif
+#ifdef SQLT_VEC
+		case SQLT_VEC:
+			if (col->val.vector)
+				OCIDescriptorFree (col->val.vector, OCI_DTYPE_VECTOR);
+			break;
+#endif
 #ifdef SQLT_JSON
 		case SQLT_JSON:
 #endif
@@ -793,6 +828,50 @@ static void free_column_buffers (lua_State *L, cur_data *cur, int i) {
 ** holds the requested amount, so Oracle never switches to polling mode.
 ** Returns 1 on success, otherwise 2 (nil + message), like pushvalue.
 */
+#ifdef SQLT_VEC
+/*
+** Pushes the text of a VECTOR value, as Oracle writes it (the same text as
+** VECTOR_SERIALIZE), converted on the client by OCIVectorToText.
+** OCI does not tell the length of the text beforehand; the buffer is
+** estimated from the number of dimensions (VECTOR_TEXT_BYTES per
+** dimension covers a FLOAT64 value with its comma and, for a SPARSE
+** vector, its index) and enlarged if the conversion still fails.
+** Returns 1, or 2 (nil and message) on error.
+*/
+#define VECTOR_TEXT_BYTES 40
+#define VECTOR_TEXT_TRIES 3
+static int push_vector (lua_State *L, cur_data *cur, OCIVector *vec) {
+	ub4 dim = 0;
+	size_t cap;
+	char *buf = NULL;
+	sword status = OCI_ERROR;
+	int tries;
+
+	if (OCI8_FAILED (OCIAttrGet ((dvoid *)vec, OCI_DTYPE_VECTOR,
+			(dvoid *)&dim, (ub4 *)0, OCI_ATTR_VECTOR_DIMENSION, cur->errhp)))
+		dim = 0;
+	cap = (size_t)dim * VECTOR_TEXT_BYTES + 64;
+	for (tries = 0; tries < VECTOR_TEXT_TRIES; tries++, cap *= 4) {
+		ub4 len;
+		if (cap > (size_t)UB4MAXVAL)
+			break;
+		buf = (char *)malloc (cap);
+		if (buf == NULL)
+			return out_of_memory (L);
+		len = (ub4)cap;
+		status = OCIVectorToText (vec, cur->errhp, (OraText *)buf, &len,
+			OCI_DEFAULT);
+		if (!OCI8_FAILED (status)) {
+			lua_pushlstring (L, buf, (size_t)len);
+			free (buf);
+			return 1;
+		}
+		free (buf);
+	}
+	return checkerr (L, status, cur->errhp);
+}
+#endif
+
 static int read_lob (lua_State *L, cur_data *cur, conn_data *conn,
                      env_data *env, OCILobLocator *loc, int binary) {
 	oraub8 lob_len = 0;      /* length in characters (CLOB) or bytes (BLOB) */
@@ -1019,6 +1098,10 @@ static int pushvalue (lua_State *L, cur_data *cur, int i) {
 			lua_pushlstring (L, (char *)buf, len);
 			break;
 		}
+#endif
+#ifdef SQLT_VEC
+		case SQLT_VEC:
+			return push_vector (L, cur, col->val.vector);
 #endif
 #ifdef SQLT_JSON
 		case SQLT_JSON:
@@ -1380,6 +1463,10 @@ static char *getcolumntype (column_data *col) {
 #endif
 		case SQLT_CLOB:
 			return "string";
+#ifdef SQLT_VEC
+		case SQLT_VEC:
+			return "vector";
+#endif
 #ifdef SQLT_IBFLOAT
 		case SQLT_IBFLOAT:
 		case SQLT_IBDOUBLE:
@@ -1430,13 +1517,13 @@ static int cur_getcoltypes (lua_State *L) {
 
 /*** @type connection */
 /***
-Closes the connection and logs off.
+Closes the connection: ends the session and detaches from the server.
 
 An open transaction is rolled back first, so only explicitly committed
-changes remain (Oracle itself would commit at logoff). If that rollback
-fails, the driver detaches from the server before the logoff, so that the
-server rolls the transaction back instead of committing it; the connection
-is closed all the same. Fails while cursors or
+changes remain (Oracle itself would commit when the session ends). If that
+rollback fails, the driver detaches from the server without ending the
+session, so that the server rolls the transaction back instead of committing
+it; the connection is closed all the same. Fails while cursors or
 statements of the connection are open. The garbage collector and a
 to-be-closed variable call it as well; a to-be-closed variable ignores the
 failure, so close cursors and statements before the end of the block.
@@ -1474,28 +1561,33 @@ static int conn_close (lua_State *L) {
 	conn->closed = 1;
 	if (conn->svchp) {
 		if (conn->loggedon) {
-			/* Oracle commits an open transaction at logoff; roll it back
-			   first, so that only explicitly committed changes are kept,
-			   as with the other LuaSQL drivers. Errors are ignored: close
-			   (and __gc) must not stop halfway. */
+			/* Oracle commits an open transaction when the session ends;
+			   roll it back first, so that only explicitly committed
+			   changes are kept, as with the other LuaSQL drivers. Errors
+			   are ignored: close (and __gc) must not stop halfway. */
 			sword status = OCITransRollback (conn->svchp, conn->errhp,
 				OCI_DEFAULT);
 			if (OCI8_FAILED (status)) {
-				/* the logoff would commit what the rollback left: end the
-				   access path to the server first, so that the server
-				   rolls back (as at any end other than a logoff); the
-				   logoff then only frees the handles */
-				OCIServer *srvhp = NULL;
-				if (!OCI8_FAILED (OCIAttrGet ((dvoid *)conn->svchp,
-						OCI_HTYPE_SVCCTX, (dvoid *)&srvhp, (ub4 *)0,
-						OCI_ATTR_SERVER, conn->errhp)) && srvhp != NULL)
-					OCIServerDetach (srvhp, conn->errhp, OCI_DEFAULT);
+				/* ending the session would commit what the rollback
+				   left: detach from the server instead, so that the
+				   server rolls back (as at any end other than ending the
+				   session) */
+				OCIServerDetach (conn->srvhp, conn->errhp, OCI_DEFAULT);
+			} else {
+				OCISessionEnd (conn->svchp, conn->errhp, conn->authp,
+					OCI_DEFAULT);
+				OCIServerDetach (conn->srvhp, conn->errhp, OCI_DEFAULT);
 			}
-			OCILogoff (conn->svchp, conn->errhp);
 		}
-		else
-			OCIHandleFree ((dvoid *)conn->svchp, OCI_HTYPE_SVCCTX);
+		OCIHandleFree ((dvoid *)conn->svchp, OCI_HTYPE_SVCCTX);
 	}
+	if (conn->authp)
+		OCIHandleFree ((dvoid *)conn->authp, OCI_HTYPE_SESSION);
+	if (conn->srvhp)
+		OCIHandleFree ((dvoid *)conn->srvhp, OCI_HTYPE_SERVER);
+	conn->svchp = NULL;
+	conn->authp = NULL;
+	conn->srvhp = NULL;
 	if (conn->errhp)
 		OCIHandleFree ((dvoid *)conn->errhp, OCI_HTYPE_ERROR);
 	/* Decrement connection counter on environment object */
@@ -2248,7 +2340,8 @@ static int stmt_reset (lua_State *L) {
     lua_pop(L, 1);
     if (OCI8_FAILED(status))
         return checkerr(L, status, stmt->errhp);
-    /* the driver uses no statement cache (OCILogon), so OCI_DEFAULT
+    /* the driver uses no statement cache (a cached handle would keep
+       its bindings, against stmt:reset and B4), so OCI_DEFAULT
        deallocates the old handle with its bindings and its cursor, as in
        stmt_close; OCI_STRLS_CACHE_DELETE is only valid with a cache */
     status = OCIStmtRelease(stmt->stmthp, stmt->errhp, NULL, 0, OCI_DEFAULT);
@@ -2541,10 +2634,22 @@ that many rows at every query, whatever the size of the result; very large
 values fail with `ORA-01019`. Values from 100 to a few thousand are
 sensible; 0 fetches each row on its own. When a query fails in the middle of
 its result, the rows fetched ahead with the failing row are not delivered.
+With a `CLOB` or `VECTOR` column in the result OCI fetches each row on
+its own, whatever the option.
+
+Option `calltimeout` limits the time of each later call to the server
+(execute, fetch, commit and so on), in milliseconds, an integer from 0 to
+4294967295; 0 (default) means no limit. A call over the limit fails with
+`ORA-03156`. OCI then has another `calltimeout` to clean up: if the server
+stops the call in time (e.g. a loop in PL/SQL), the connection stays usable
+and an open transaction stays open; if not (e.g. `DBMS_SESSION.SLEEP`), OCI
+closes the connection, later calls fail with `ORA-03114` and the server rolls
+the open transaction back. Close such a connection and open a new one.
 
 @function setoption
 @tparam string name name of the option
 @param value new value: a string for `numbers`, an integer for `prefetch`
+and `calltimeout`
 @treturn boolean `true`
 @raise for an unknown option or an invalid value
 @usage
@@ -2553,6 +2658,7 @@ local cur = conn:execute("SELECT COUNT(*) FROM emp")
 print(math.type(cur:fetch()))   --> integer
 cur:close()
 assert(conn:setoption("prefetch", 1000))   -- for a large result
+assert(conn:setoption("calltimeout", 5000))   -- no call longer than 5 s
 */
 /*
 ** Set a driver option of the connection. Affects cursors created afterwards.
@@ -2571,6 +2677,25 @@ static int conn_setoption (lua_State *L) {
 		lua_pushboolean (L, 1);
 		return 1;
 	}
+#ifdef OCI_ATTR_CALL_TIMEOUT
+	if (strcmp (name, "calltimeout") == 0) {
+		lua_Number n = lua_tonumber (L, 3);
+		ub4 ms;
+		sword status;
+		if (lua_type (L, 3) != LUA_TNUMBER || n != floor (n)
+				|| n < 0 || n > (lua_Number) UB4MAXVAL)
+			return luaL_error (L, LUASQL_PREFIX"invalid value for option 'calltimeout', "
+				"expected an integer from 0 to 4294967295");
+		ms = (ub4) n;
+		status = OCIAttrSet ((dvoid *)conn->svchp, (ub4)OCI_HTYPE_SVCCTX,
+			(dvoid *)&ms, (ub4)0, (ub4)OCI_ATTR_CALL_TIMEOUT, conn->errhp);
+		if (OCI8_FAILED (status))
+			return checkerr (L, status, conn->errhp);
+		conn->calltimeout = ms;
+		lua_pushboolean (L, 1);
+		return 1;
+	}
+#endif
 	if (strcmp (name, "numbers") == 0) {
 		const char *value = luaL_checkstring (L, 3);
 		int i;
@@ -2611,6 +2736,12 @@ static int conn_getoption (lua_State *L) {
 		lua_pushinteger (L, (lua_Integer) conn->prefetch);
 		return 1;
 	}
+#ifdef OCI_ATTR_CALL_TIMEOUT
+	if (strcmp (name, "calltimeout") == 0) {
+		lua_pushinteger (L, (lua_Integer) conn->calltimeout);
+		return 1;
+	}
+#endif
 	return luaL_error (L, LUASQL_PREFIX"unknown option '%s'", name);
 }
 
@@ -2619,24 +2750,37 @@ static int conn_getoption (lua_State *L) {
 /***
 Opens a connection to an Oracle database.
 
+Without user and password (both `nil` or empty) the driver logs on with
+external credentials, which Oracle Net takes from its configuration: the
+operating system user (Windows with `SQLNET.AUTHENTICATION_SERVICES = (NTS)`
+and a user `OPS$...` identified externally) or a wallet with the stored
+password for the connect string. A missing user or password variable thus
+does not fail by itself; see the
+@{03-oracle.md|topic on Oracle} for the setup and the risk. A user name
+`"proxy[user]"` logs on as `user` with the password of `proxy`.
+
 A failing connect frees everything it allocated. A logon that succeeds with a
 warning, e.g. a password in its grace period, counts as success. A connect
-that cannot reach the server can take a few seconds.
+that cannot reach the server can take a few seconds; a net service name that
+`tnsnames.ora` does not have can take about two minutes before `ORA-12154`.
 
 @function connect
 @tparam string source the database: an Easy Connect string
 `"host[:port]/service"`, e.g. `"dbhost:1521/FREEPDB1"`, a net service name
 of `tnsnames.ora` or a full connect descriptor
-@tparam string user user name
-@tparam string password password of the user
+@tparam[opt] string user user name; without user and password: external
+credentials
+@tparam[opt] string password password of the user
 @treturn[1] connection the new connection, in autocommit mode
 @treturn[2] nil
 @treturn[2] string error message, e.g. with `ORA-01017` (invalid user name or
-password) or `ORA-12541` (no listener)
+password) or `ORA-12541` (no listener); the text of logon errors is in the
+language of the client
 @usage
 local conn, err = env:connect("dbhost:1521/FREEPDB1", "scott",
                               os.getenv("ORACLE_PASSWORD"))
 if not conn then error(err) end
+local ext = assert(env:connect("LSQ_FREEPDB1"))   -- wallet or OS user
 */
 /*
 ** Connects to a data source.
@@ -2665,35 +2809,84 @@ static int env_connect (lua_State *L) {
 	conn->loggedon = 0;
 	conn->svchp = NULL;
 	conn->errhp = NULL;
+	conn->srvhp = NULL;
 	conn->authp = NULL;
+#ifdef OCI_ATTR_CALL_TIMEOUT
+	conn->calltimeout = 0;
+#endif
 
 	/* error handler */
 	ASSERT (L, OCIHandleAlloc((dvoid *) env->envhp,
 		(dvoid **) &(conn->errhp), /* !!! */
 		(ub4) OCI_HTYPE_ERROR, (size_t) 0, (dvoid **) 0), env->errhp);
-	/* service handler */
-	/*ASSERT (L, OCIHandleAlloc((dvoid *) env->envhp,
-		(dvoid **) &(conn->svchp),
-		(ub4) OCI_HTYPE_SVCCTX, (size_t) 0, (dvoid **) 0), conn->errhp);
-*/
-	/* login */
+	/* server, service context and session: explicit handles, so that
+	   close can detach from the server (conn_close); without user and
+	   password the session uses external credentials (OCI_CRED_EXT) */
 	{
-		sword s = OCILogon(env->envhp, conn->errhp, &(conn->svchp),
-			(CONST text*)username, userlen,
-			(CONST text*)password, passlen,
-			(CONST text*)sourcename, snlen);
+		OCIServer *srvhp = NULL;
+		OCISvcCtx *svchp = NULL;
+		OCISession *usrhp = NULL;
+		int attached = 0, begun = 0;
+		ub4 cred = (userlen == 0 && passlen == 0) ? OCI_CRED_EXT
+		                                          : OCI_CRED_RDBMS;
+		sword s = OCIHandleAlloc ((dvoid *)env->envhp, (dvoid **)&srvhp,
+			(ub4)OCI_HTYPE_SERVER, (size_t)0, (dvoid **)0);
+		if (!OCI8_FAILED (s)) {
+			s = OCIServerAttach (srvhp, conn->errhp, (CONST text *)sourcename,
+				(sb4)snlen, (ub4)OCI_DEFAULT);
+			attached = !OCI8_FAILED (s);
+		}
+		if (!OCI8_FAILED (s))
+			s = OCIHandleAlloc ((dvoid *)env->envhp, (dvoid **)&svchp,
+				(ub4)OCI_HTYPE_SVCCTX, (size_t)0, (dvoid **)0);
+		if (!OCI8_FAILED (s))
+			s = OCIAttrSet ((dvoid *)svchp, (ub4)OCI_HTYPE_SVCCTX,
+				(dvoid *)srvhp, (ub4)0, (ub4)OCI_ATTR_SERVER, conn->errhp);
+		if (!OCI8_FAILED (s))
+			s = OCIHandleAlloc ((dvoid *)env->envhp, (dvoid **)&usrhp,
+				(ub4)OCI_HTYPE_SESSION, (size_t)0, (dvoid **)0);
+		if (!OCI8_FAILED (s) && cred == OCI_CRED_RDBMS)
+			s = OCIAttrSet ((dvoid *)usrhp, (ub4)OCI_HTYPE_SESSION,
+				(dvoid *)username, (ub4)userlen, (ub4)OCI_ATTR_USERNAME,
+				conn->errhp);
+		if (!OCI8_FAILED (s) && cred == OCI_CRED_RDBMS)
+			s = OCIAttrSet ((dvoid *)usrhp, (ub4)OCI_HTYPE_SESSION,
+				(dvoid *)password, (ub4)passlen, (ub4)OCI_ATTR_PASSWORD,
+				conn->errhp);
 		/* OCI_SUCCESS_WITH_INFO (e.g. ORA-28002, password expires soon)
 		   is a successful logon */
-		if (s != OCI_SUCCESS && s != OCI_SUCCESS_WITH_INFO) {
+		if (!OCI8_FAILED (s)) {
+			s = OCISessionBegin (svchp, conn->errhp, usrhp, cred,
+				(ub4)OCI_DEFAULT);
+			begun = !OCI8_FAILED (s);
+		}
+		if (!OCI8_FAILED (s))
+			s = OCIAttrSet ((dvoid *)svchp, (ub4)OCI_HTYPE_SVCCTX,
+				(dvoid *)usrhp, (ub4)0, (ub4)OCI_ATTR_SESSION, conn->errhp);
+		if (OCI8_FAILED (s)) {
 			/* read the error first, then free what this connect made;
 			   the connection stays closed, so its finalizer does
 			   nothing more */
 			int ret = checkerr (L, s, conn->errhp);
+			if (begun)
+				OCISessionEnd (svchp, conn->errhp, usrhp, OCI_DEFAULT);
+			if (attached)
+				OCIServerDetach (srvhp, conn->errhp, OCI_DEFAULT);
+			if (usrhp)
+				OCIHandleFree ((dvoid *)usrhp, OCI_HTYPE_SESSION);
+			if (svchp)
+				OCIHandleFree ((dvoid *)svchp, OCI_HTYPE_SVCCTX);
+			if (srvhp)
+				OCIHandleFree ((dvoid *)srvhp, OCI_HTYPE_SERVER);
 			OCIHandleFree ((dvoid *)conn->errhp, OCI_HTYPE_ERROR);
 			conn->errhp = NULL;
-			conn->svchp = NULL;
 			return ret;
 		}
+		conn->srvhp = srvhp;
+		conn->svchp = svchp;
+		/* the session handle also serves the datetime conversions
+		   (OCI8_DTHNDL) */
+		conn->authp = usrhp;
 	}
 	/* only a logged on connection keeps its environment alive */
 	lua_pushvalue (L, 1);
@@ -2701,12 +2894,6 @@ static int env_connect (lua_State *L) {
 	conn->closed = 0;
 	env->conn_counter++;
 	conn->loggedon = 1;
-	/* the session that OCILogon created; without it the datetime
-	   conversions fall back to the environment handle */
-	if (OCI8_FAILED (OCIAttrGet ((dvoid *)conn->svchp, (ub4)OCI_HTYPE_SVCCTX,
-			(dvoid *)&conn->authp, (ub4 *)0, (ub4)OCI_ATTR_SESSION,
-			conn->errhp)))
-		conn->authp = NULL;
 
 	return 1;
 }

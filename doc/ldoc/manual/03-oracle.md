@@ -3,7 +3,7 @@
 The driver `luasql.oci8` connects to Oracle databases through OCI, the
 Oracle Call Interface. It has been tested with Oracle AI Database 26ai Free
 23.26.3 and Oracle Instant Client 23 on Windows; the data types `BOOLEAN`
-and `JSON` need Oracle 23ai or 21c respectively.
+and `VECTOR` need Oracle 23ai, `JSON` needs 21c.
 
 ## Setup
 
@@ -16,7 +16,12 @@ works as well. Without them, `require "luasql.oci8"` fails with:
 luasql.oci8: Oracle Instant Client not found (oci.dll, error 126). ...
 ```
 
-No other installation is needed: no `ORACLE_HOME`, no `NLS_LANG`.
+No other installation is needed: no `ORACLE_HOME`, no `NLS_LANG`. Files of
+Oracle Net (`sqlnet.ora`, `tnsnames.ora`) are optional; the client looks for
+them in the folder given by `TNS_ADMIN`, else in `network\admin` of
+`ORACLE_HOME`. So on a computer where `ORACLE_HOME` is set, e.g. with an
+Oracle database installed, the driver uses the files of that home unless
+`TNS_ADMIN` names another folder.
 
 ## Connecting
 
@@ -39,11 +44,71 @@ Keep passwords out of the source code, e.g. in an environment variable:
 `os.getenv("ORACLE_PASSWORD")`. Oracle locks an account after several failed
 logons (10 with the default profile).
 
+A net service name that `tnsnames.ora` does not have is also tried as a host
+name; the connect then fails with `ORA-12154` only after about two minutes
+(measured on Windows, the same in SQL*Plus).
+
+The messages of logon errors come from the server in the language of the
+client (e.g. German on a German Windows), like the other errors of the
+server; the Basic Light package has only English texts for the errors of
+the client itself, such as `ORA-12154`. Programs should look at the code
+(`ORA-01017`), not at the text.
+
+### Without a Password
+
+Without user and password, `env:connect(source)` (also with `nil` or `""`
+for both) logs on with **external credentials**. Oracle Net decides what
+they are; measured with Oracle 23ai on Windows:
+
+- **Operating system** (Windows): the server knows a user named after the
+  Windows user with the prefix `OPS$` (parameter `OS_AUTHENT_PREFIX`), e.g.
+  `CREATE USER "OPS$DESKTOP-1\JOHN DOE" IDENTIFIED EXTERNALLY`, and the
+  `sqlnet.ora` the client finds says `SQLNET.AUTHENTICATION_SERVICES = (NTS)`.
+  Without that line, e.g. without any `sqlnet.ora`, the logon fails with
+  `ORA-01017`.
+- **Wallet** (secure external password store): a wallet holds a user and
+  password for a connect string, created with `mkstore` of an Oracle home:
+
+  ```
+  mkstore -wrl C:\oracle\wallet -create
+  mkstore -wrl C:\oracle\wallet -createCredential SALES scott
+  ```
+
+  `mkstore` asks for the passwords. The `sqlnet.ora` of the client names the
+  wallet:
+
+  ```
+  WALLET_LOCATION = (SOURCE = (METHOD = FILE)
+    (METHOD_DATA = (DIRECTORY = C:\oracle\wallet)))
+  SQLNET.WALLET_OVERRIDE = TRUE
+  ```
+
+  Then `env:connect("SALES")` logs on as `scott`. The connect string must
+  match the entry, here the net service name `SALES`. With
+  `SQLNET.WALLET_OVERRIDE = TRUE` the operating system logon is no longer
+  used: a connect string without an entry in the wallet fails with
+  `ORA-01017`. The Basic Light package reads such wallets.
+
+A user without a password fails with `ORA-01005`, as before.
+
+**Take care:** a program that reads user and password from environment
+variables and finds neither does not fail with `ORA-01017` but logs on as
+the Windows user or through a wallet entry, if the setup allows it. Check
+the variables before the connect if that matters.
+
+### Proxy
+
+A user name `"proxy[user]"` logs on as `user` with the password of `proxy`,
+if the server allows it (`ALTER USER user GRANT CONNECT THROUGH proxy`).
+`SYS_CONTEXT('USERENV', 'PROXY_USER')` then names `proxy`. This is a feature
+of Oracle; the driver passes the name on.
+
 ## Encryption
 
 The driver needs no setting of its own for an encrypted connection: OCI and
 the configuration of Oracle Net do it. Oracle offers two ways; both work with
-the Instant Client without a wallet or a `sqlnet.ora` on the client.
+the Instant Client without a wallet or a `sqlnet.ora` on the client (checked
+with `ORACLE_HOME` unset and an empty `TNS_ADMIN` folder).
 
 **Native Network Encryption** encrypts a normal connection such as
 `"dbhost:1521/FREEPDB1"`. It is switched on in the `sqlnet.ora` of the
@@ -73,9 +138,11 @@ How a session is connected shows `SYS_CONTEXT('USERENV', 'NETWORK_PROTOCOL')`
 (`tcp` or `tcps`). Over `tcps`, `SYS_CONTEXT('USERENV', 'TLS_CIPHERSUITE')`
 ends with a zero byte (e.g. `TLS_AES_256_GCM_SHA384` plus `"\0"`, 23 bytes,
 as `DUMP` shows in SQL*Plus); the driver passes the value on as Oracle gives
-it. The view `V$SESSION_CONNECT_INFO` names the algorithms of
-Native Network Encryption, e.g. `AES256 Encryption service adapter`; reading it
-may need privileges:
+it. The view `V$SESSION_CONNECT_INFO` names the services of Oracle Net that
+the session loaded, e.g. `AES256 Encryption service adapter` for Native
+Network Encryption; it lists that adapter over `tcps` as well, where no
+Native Network Encryption runs, so it shows what is loaded, not proof of what
+is active. Reading it may need privileges:
 
 ```lua
 local cur = assert(conn:execute([[
@@ -122,16 +189,16 @@ Values read by `cur:fetch()`, and the names `cur:getcoltypes()` returns:
 <tr><td><code>TIMESTAMP WITH LOCAL TIME ZONE</code></td><td><code>"YYYY-MM-DD HH24:MI:SS.FF6"</code>, in the session time zone</td><td><code>timestamp</code></td></tr>
 <tr><td><code>INTERVAL YEAR TO MONTH</code>, <code>INTERVAL DAY TO SECOND</code></td><td>text as <code>TO_CHAR</code> gives it, e.g. <code>"+01 02:03:04.500000"</code></td><td><code>interval</code></td></tr>
 <tr><td><code>JSON</code></td><td>JSON text</td><td><code>json</code></td></tr>
+<tr><td><code>VECTOR</code></td><td>text as Oracle writes it, e.g. <code>"[1.0E+000,2.0E+000,3.0E+000]"</code> (see below)</td><td><code>vector</code></td></tr>
 <tr><td>any type, NULL</td><td><code>nil</code></td><td></td></tr>
 </table>
 
 Years before Christ get a minus sign, e.g. `"-4712-01-01 00:00:00"`.
 
 Not supported are `LONG` and `LONG RAW` (deprecated by Oracle), `BFILE`,
-`VECTOR`, `XMLTYPE` and object types; a query that returns them fails with
-the type code and the number of the column. Convert them in SQL, e.g.
-`TO_LOB` while copying a `LONG` column, `XMLSERIALIZE` or
-`VECTOR_SERIALIZE`.
+`XMLTYPE` and object types; a query that returns them fails with the type
+code and the number of the column. Convert them in SQL, e.g. `TO_LOB` while
+copying a `LONG` column, or `XMLSERIALIZE`.
 
 ### Numbers
 
@@ -165,6 +232,43 @@ cur:close()
 A JSON column is written by binding the text, as a plain string or as
 `T.string`.
 
+### Vectors
+
+A `VECTOR` value arrives as the text Oracle writes for it, the same as
+`VECTOR_SERIALIZE` gives: `"[1.0E+000,2.0E+000,3.0E+000]"` (`FLOAT32` and
+`FLOAT64` in exponent form, with the precision of the format, e.g.
+`1.00000001E-001` for 0.1 as `FLOAT32`), `"[1,-2,127,-128]"` (`INT8`),
+`"[255,1]"` (`BINARY`, one number per byte) and
+`"[10,[2,5],[1.5E+000,2.5E+000]]"` (`SPARSE`: dimensions, indexes counted
+from 0, values).
+The driver fetches the vector itself and converts it on the client
+(`OCIVectorToText`), so there is no limit of length; 65535 `FLOAT64` values,
+1.6 MB of text, arrive whole. This needs a driver built with an Instant
+Client SDK that knows `VECTOR` (23.4 or later; OneLuaPro builds with 23.26);
+built with an older one, a `VECTOR` column is not supported.
+
+With a `VECTOR` column in the result OCI fetches each row on its own, one
+round trip per row, whatever the option `prefetch`. For many small vectors
+`VECTOR_SERIALIZE` in the SQL is much faster, as long as the text fits into
+a `VARCHAR2` (4000 bytes with `MAX_STRING_SIZE = STANDARD`): 2000 rows of
+three dimensions took 0.18 ms per row directly and 0.005 ms through
+`VECTOR_SERIALIZE` (measured on a local server).
+
+A vector is written by binding its text as a plain string; Oracle converts
+it for the column:
+
+```lua
+assert(conn:execute("INSERT INTO docs (id, emb) VALUES (:id, :emb)",
+                    {id = 1, emb = "[0.12,-0.5,0.33]"}))
+```
+
+The text can have at most 32767 bytes; longer text fails with `ORA-01461`.
+This is enough for about 1900 `FLOAT32` values at full precision (1536
+values were 26 KB of text, 3072 were 52 KB). A wrong number of dimensions
+fails with `ORA-51803`, a value that is no number (e.g. `"[1,2,x]"`) with
+`ORA-51805`, text that is no vector at all (e.g. `"abc"`) with `ORA-51804`;
+an empty string is NULL.
+
 ### Time Zones
 
 `TIMESTAMP WITH LOCAL TIME ZONE` values are shown in the time zone of the
@@ -184,7 +288,13 @@ rules are in the @{02-prepared-statements.md|topic on prepared statements}):
 
 - **Booleans** are bound as the text `'1'` or `'0'`. Oracle converts them
   for the column: a `BOOLEAN` column gets `TRUE` or `FALSE`, a `NUMBER`
-  column 1 or 0, a `VARCHAR2` column the text.
+  column 1 or 0, a `VARCHAR2` column the text. A `BOOLEAN` parameter of a
+  PL/SQL procedure or function also works when called from SQL
+  (`SELECT f(:b) FROM dual`), but not in a PL/SQL block: `BEGIN p(:b); END;`
+  fails with `PLS-00306`, since PL/SQL does not convert the text. Measured
+  on Oracle 23ai, a comparison makes the boolean in the block:
+  `BEGIN p(:b = '1'); END;`.
+- **Vectors** are bound as text, at most 32767 bytes (see Vectors above).
 - **`T.time`** is bound as text, since Oracle has no `TIME` type; the target
   decides what becomes of it.
 - **A plain string for a `DATE` column** is converted by Oracle with the
@@ -233,7 +343,9 @@ that many rows at every query, whatever the size of the result: with 1000,
 many short queries by `conn:execute` became about a quarter slower, and very
 large values fail even for small results with `ORA-01019` (unable to
 allocate memory). Values from 100 to a few thousand are sensible; `0`
-fetches each row on its own.
+fetches each row on its own. With a `CLOB` or `VECTOR` column in the result
+OCI fetches each row on its own anyway; a `CLOB` costs a second round trip
+per row for its content (measured: 2000 rows took 4002 round trips).
 
 Two consequences come from OCI and are kept as they are:
 
@@ -247,6 +359,31 @@ Two consequences come from OCI and are kept as they are:
   already `conn:execute` or `stmt:execute` fails and no row arrives. The
   error itself is always reported.
 
+## Call Timeout
+
+The driver option `calltimeout` limits each later call to the server
+(execute, fetch, commit, ...) to that many milliseconds:
+
+```lua
+assert(conn:setoption("calltimeout", 5000))
+print(conn:getoption("calltimeout"))   --> 5000
+```
+
+The value is an integer from 0 to 4294967295; `0`, the default, means no
+limit. A call over the limit fails with `ORA-03156`. What remains of the
+connection is decided by OCI, which then has another `calltimeout` to clean
+up (measured with Oracle 23ai):
+
+- If the server stops the call within that time, e.g. a loop in PL/SQL or a
+  long query, the connection stays usable and an open transaction stays
+  open; the program decides whether to commit or roll back.
+- If not, e.g. a call that waits in `DBMS_SESSION.SLEEP`, OCI closes the
+  connection: later calls fail with `ORA-03114` and the server rolls back
+  the open transaction. `conn:close()` still works; open a new connection.
+
+With a limit of 500 ms, a sleep of 3 s left the connection dead after 1.1 s;
+with 2000 ms it gave `ORA-03156` after 3 s and the connection stayed usable.
+
 ## Transactions
 
 - A new connection is in **autocommit** mode: every statement is committed
@@ -256,12 +393,12 @@ Two consequences come from OCI and are kept as they are:
 - Every **DDL** statement (`CREATE`, `ALTER`, `DROP`, ...) commits an open
   transaction first, also with autocommit off. This is how Oracle works.
 - `conn:close()`, the garbage collector and a to-be-closed variable roll back
-  an open transaction before logoff. Oracle itself would commit it; LuaSQL
-  keeps only what was committed explicitly, as its other drivers do. If
-  that rollback fails while the session still lives, the driver detaches
-  from the server before the logoff, so that the server rolls the
-  transaction back instead of committing it; the connection is closed all
-  the same.
+  an open transaction before the session ends. Oracle itself would commit
+  it; LuaSQL keeps only what was committed explicitly, as its other drivers
+  do. If that rollback fails while the session still lives, the driver
+  detaches from the server without ending the session, so that the server
+  rolls the transaction back instead of committing it; the connection is
+  closed all the same.
 - A statement that fails rolls back only itself, not the transaction.
 - `conn:commit()`, `conn:rollback()` and `conn:setautocommit()` return
   `false` and the message of Oracle when they fail, e.g. `ORA-02091` for a

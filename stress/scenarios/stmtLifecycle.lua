@@ -36,6 +36,17 @@
 --                 the driver freeing them). The phase checks that JSON
 --                 fetches do not pile up temporary LOBs or client memory,
 --                 not the release by the driver; so it has no precheck.
+--   vectorRead    one prepared statement per entry of
+--                 backend.vectorValues, a query of one row each (e.g.
+--                 vectors of several formats and NULL), executed in
+--                 turn; the value read must be the text of the entry
+--                 (nil for NULL). The precheck runs every entry once
+--                 and checks the column type the driver reports against
+--                 backend.vectorColumnType, if given.
+--
+-- Backend keys of vectorRead: vectorValues, a list of { query = <SQL
+-- without placeholders>, text = <expected text, nil for NULL> };
+-- vectorColumnType (optional), e.g. "vector".
 --
 -- Skipped if the driver has no bind API (conn:prepare and luasql.type).
 -- A phase is skipped if the backend lacks the query it needs. A LOB
@@ -505,6 +516,69 @@ local function jsonReadStep(ctx, i, stmt)
    expectValue(fetchSingle(execute(stmt, params)), expected)
 end
 
+-- Phase vectorRead. Prepares one statement per entry of
+-- backend.vectorValues; if one fails, those already prepared are closed.
+local function setupVectorRead(ctx)
+   local statements = {}
+   local ok, err = pcall(function()
+      for k, entry in ipairs(ctx.backend.vectorValues) do
+         statements[k] = prepare(ctx.testConn, entry.query)
+      end
+   end)
+   if not ok then
+      for _, stmt in ipairs(statements) do
+         stmt:close()
+      end
+      error(err, 0)
+   end
+   return statements
+end
+
+local function finishVectorRead(_, statements)
+   for _, stmt in ipairs(statements) do
+      closeStatement(stmt)
+   end
+end
+
+-- Runs the entry of iteration i; its value must be the text of the
+-- entry. A table binds nothing (execute(nil) would bind one NULL).
+local function vectorReadStep(ctx, i, statements)
+   local values = ctx.backend.vectorValues
+   local k = i % #values + 1
+   local value = fetchSingle(execute(statements[k], {}))
+   if value ~= values[k].text then
+      error(string.format("entry %d: expected %s, got %s", k,
+                          describe(values[k].text), describe(value)), 0)
+   end
+end
+
+-- Precheck of vectorRead: every entry once, with the column type
+-- (backend.vectorColumnType); also before the counters are taken, for
+-- cursors the DBMS may open at the first read of such a value.
+local function checkVectorValues(ctx)
+   local backend = ctx.backend
+   if #backend.vectorValues == 0 then
+      return "backend.vectorValues is empty"
+   end
+   for k, entry in ipairs(backend.vectorValues) do
+      local ok, err = pcall(function()
+         local stmt = prepare(ctx.testConn, entry.query)
+         local cur = execute(stmt, {})
+         local columnType = cur:getcoltypes()[1]
+         fetchSingle(cur)
+         closeStatement(stmt)
+         local expected = backend.vectorColumnType
+         if expected and columnType ~= expected then
+            error(string.format("column type %s, expected %s",
+                                tostring(columnType), expected), 0)
+         end
+      end)
+      if not ok then
+         return string.format("entry %d: %s", k, tostring(err))
+      end
+   end
+end
+
 local phaseList = {
    { name = "prepareClose", step = prepareCloseStep },
    { name = "reuse", setup = prepareBindQuery, step = reuseStep,
@@ -536,6 +610,9 @@ local phaseList = {
      finish = finishStatement, needs = "blobRowsQuery" },
    { name = "jsonRead", setup = prepareJsonQuery, step = jsonReadStep,
      finish = finishStatement, needs = "jsonQuery" },
+   { name = "vectorRead", precheck = checkVectorValues,
+     setup = setupVectorRead, step = vectorReadStep,
+     finish = finishVectorRead, needs = "vectorValues" },
 }
 
 -- ctx: tier, driver, backend, testConn, adminConn (may be nil)

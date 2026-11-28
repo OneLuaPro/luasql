@@ -4,7 +4,11 @@
 -- ORACLE_TEST_PASSWORD (a 3rd argument still works, but puts it into the
 -- command line). Connection and user default to the variables of the
 -- stress test: ORACLE_TEST_HOST, _PORT (1521), _NAME and ORACLE_TEST_USER;
--- an argument given wins.
+-- an argument given wins. Optional: ORACLE_TEST_EXTERNAL, a connect
+-- string for a logon without a password (operating system or wallet),
+-- and ORACLE_TEST_PROXY_USER with ORACLE_TEST_PROXY_PASSWORD for a proxy
+-- logon as ORACLE_TEST_USER; without them these checks are skipped.
+-- Errors are compared by their ORA- code only, never by their text.
 --
 --   set ORACLE_TEST_PASSWORD=...
 --   lua checks/oci8.lua
@@ -1108,6 +1112,209 @@ sw:close()
 ok, v, e = fetch1("select status from user_objects where object_name = 'LT_OCI8_WARN'")
 check("procedure exists and is INVALID", ok and v == "INVALID", e or tostring(v))
 pcall(exec, "DROP PROCEDURE lt_oci8_warn")
+
+print("-- VECTOR")
+-- read natively (text as VECTOR_SERIALIZE), bound as text (up to 32767 bytes)
+drop("lt_oci8_vec")
+local rv, ev = exec("CREATE TABLE lt_oci8_vec (id NUMBER, v3 VECTOR(3, FLOAT32),"
+  .. " v64 VECTOR(*, FLOAT64), vi8 VECTOR(4, INT8), vbin VECTOR(16, BINARY),"
+  .. " vsp VECTOR(10, FLOAT32, SPARSE))")
+if not rv then
+  info("VECTOR", "skipped, the server has no VECTOR: " .. tostring(ev):gsub("\n.*", ""))
+else
+  exec("INSERT INTO lt_oci8_vec VALUES (1, '[-1.1,2,3]', '[0.1,-2.5e-300]',"
+    .. " '[1,-2,127,-128]', '[255,1]', '[10,[2,5],[1.5,2.5]]')")
+  exec("INSERT INTO lt_oci8_vec (id) VALUES (2)")
+  for _, col in ipairs{"v3", "v64", "vi8", "vbin", "vsp"} do
+    local cv, cverr = exec("SELECT " .. col .. ", VECTOR_SERIALIZE(" .. col
+      .. " RETURNING CLOB) FROM lt_oci8_vec WHERE id = 1")
+    local a, b = nil, nil
+    if cv then a, b = cv:fetch(); cv:close() end
+    check("VECTOR " .. col .. " as VECTOR_SERIALIZE writes it",
+      type(a) == "string" and a == b, cverr or tostring(a))
+  end
+  ok, v, e = fetch1("SELECT v3 FROM lt_oci8_vec WHERE id = 1")
+  check("VECTOR FLOAT32 text", ok and v == "[-1.10000002E+000,2.0E+000,3.0E+000]",
+    e or tostring(v))
+  ok, v, e = fetch1("SELECT v3 FROM lt_oci8_vec WHERE id = 2")
+  check("VECTOR NULL gives nil", ok and v == nil, e or tostring(v))
+  local ctv = exec("SELECT v3 FROM lt_oci8_vec WHERE id = 1")
+  local tv = ctv and ctv:getcoltypes()[1]
+  if ctv then ctv:close() end
+  check("VECTOR column type", tv == "vector", tv)
+  local sv = assert(conn:prepare("SELECT v3 FROM lt_oci8_vec WHERE id = :id"))
+  local csv, esv = sv:execute{id = 1}
+  local vsv = csv and csv:fetch()
+  if csv then csv:close() end
+  check("VECTOR through a prepared statement",
+    vsv == "[-1.10000002E+000,2.0E+000,3.0E+000]", esv or tostring(vsv))
+  sv:close()
+  -- 65535 x FLOAT64, about 1.6 MB of text, built on the server
+  local rl, el = exec([[
+DECLARE
+  c CLOB;
+BEGIN
+  DBMS_LOB.CREATETEMPORARY(c, TRUE);
+  DBMS_LOB.APPEND(c, '[');
+  FOR i IN 1 .. 65535 LOOP
+    DBMS_LOB.APPEND(c, CASE WHEN i > 1 THEN ',' END || '-1.2345678901234567E-123');
+  END LOOP;
+  DBMS_LOB.APPEND(c, ']');
+  INSERT INTO lt_oci8_vec (id, v64) VALUES (3, TO_VECTOR(c, 65535, FLOAT64));
+END;]])
+  check("large VECTOR inserted", rl ~= nil, el)
+  ok, v, e = fetch1("SELECT v64 FROM lt_oci8_vec WHERE id = 3")
+  local want = tonumber(scalar("SELECT DBMS_LOB.GETLENGTH(VECTOR_SERIALIZE(v64"
+    .. " RETURNING CLOB)) FROM lt_oci8_vec WHERE id = 3"))
+  check("large VECTOR read whole", ok and type(v) == "string" and #v == want
+    and v:sub(1, 26) == "[-1.2345678901234567E-123,", e or (v and #v))
+  -- binding text
+  local iv = assert(conn:prepare("INSERT INTO lt_oci8_vec (id, v3) VALUES (:id, :v)"))
+  r, e = iv:execute{id = 10, v = "[4,5,6]"}
+  check("VECTOR bound as text", r == 1, e)
+  ok, v, e = fetch1("SELECT v3 FROM lt_oci8_vec WHERE id = 10")
+  check("VECTOR bound as text, read back", ok and v == "[4.0E+000,5.0E+000,6.0E+000]",
+    e or tostring(v))
+  r, e = iv:execute{id = 11, v = "[1,2]"}
+  check("VECTOR wrong dimension gives nil and ORA-51803",
+    r == nil and tostring(e):find("ORA%-51803") ~= nil, e or tostring(r))
+  r, e = iv:execute{id = 12, v = "abc"}
+  check("VECTOR invalid text gives nil and ORA-51804",
+    r == nil and tostring(e):find("ORA%-51804") ~= nil, e or tostring(r))
+  r, e = iv:execute{id = 13, v = ""}
+  ok, v = fetch1("SELECT v3 FROM lt_oci8_vec WHERE id = 13")
+  check("VECTOR empty string is NULL", r == 1 and ok and v == nil, e or tostring(v))
+  iv:close()
+  local ib = assert(conn:prepare("INSERT INTO lt_oci8_vec (id, v64) VALUES (:id, :v)"))
+  local t32767 = "[" .. string.rep("1,", 16382) .. "1]"
+  r, e = ib:execute{id = 20, v = t32767}
+  check("VECTOR text of 32767 bytes binds", #t32767 == 32767 and r == 1, e)
+  r, e = ib:execute{id = 21, v = t32767:sub(1, -2) .. ",1]"}
+  check("VECTOR text above 32767 bytes gives nil and ORA-01461",
+    r == nil and tostring(e):find("ORA%-01461") ~= nil, e or tostring(r))
+  ib:close()
+  drop("lt_oci8_vec")
+end
+
+print("-- BOOLEAN parameters")
+drop("lt_oci8_bool")
+exec("CREATE TABLE lt_oci8_bool (id NUMBER, b BOOLEAN, n NUMBER, s VARCHAR2(5))")
+local ibo = assert(conn:prepare("INSERT INTO lt_oci8_bool VALUES (:id, :b, :n, :s)"))
+check("true into BOOLEAN, NUMBER, VARCHAR2",
+  ibo:execute{id = 1, b = true, n = true, s = true} == 1)
+check("false into BOOLEAN, NUMBER, VARCHAR2",
+  ibo:execute{id = 2, b = false, n = false, s = false} == 1)
+ibo:close()
+do
+  local cbo = exec("SELECT b, n, s FROM lt_oci8_bool ORDER BY id")
+  local bo1, no1, so1 = cbo:fetch()
+  local bo2, no2, so2 = cbo:fetch()
+  cbo:close()
+  check("read back as true, 1, '1' and false, 0, '0'",
+    bo1 == true and tonumber(no1) == 1 and so1 == "1"
+    and bo2 == false and tonumber(no2) == 0 and so2 == "0",
+    string.format("%s %s %s / %s %s %s", tostring(bo1), tostring(no1), tostring(so1),
+      tostring(bo2), tostring(no2), tostring(so2)))
+end
+ok, v, e = fetch1("SELECT COUNT(*) FROM lt_oci8_bool WHERE b = '1'")
+check("WHERE b = '1' finds the true row", ok and tonumber(v) == 1, e or tostring(v))
+drop("lt_oci8_bool")
+exec("CREATE OR REPLACE FUNCTION lt_oci8_neg (x BOOLEAN) RETURN BOOLEAN IS"
+  .. " BEGIN RETURN NOT x; END;")
+do
+  local cf, ef = conn:execute("SELECT lt_oci8_neg(:x) FROM dual", {x = true})
+  local vf = cf and cf:fetch()
+  if cf then cf:close() end
+  check("BOOLEAN parameter of a function called from SQL", vf == false, ef or tostring(vf))
+  local rp, eplsql = conn:execute("DECLARE r BOOLEAN; BEGIN r := lt_oci8_neg(:x); END;", {x = true})
+  check("BOOLEAN parameter in a PL/SQL block gives nil and PLS-00306",
+    rp == nil and tostring(eplsql):find("PLS%-00306") ~= nil, eplsql or tostring(rp))
+  rp, eplsql = conn:execute("DECLARE r BOOLEAN; BEGIN r := lt_oci8_neg(:x = '1'); END;", {x = true})
+  check("the workaround :x = '1' works in the block", rp ~= nil, eplsql)
+end
+pcall(exec, "DROP FUNCTION lt_oci8_neg")
+
+print("-- calltimeout")
+check("calltimeout defaults to 0 (no limit)", conn:getoption("calltimeout") == 0)
+check("calltimeout is an integer", math.type(conn:getoption("calltimeout")) == "integer")
+check("setoption calltimeout=1500",
+  conn:setoption("calltimeout", 1500) == true and conn:getoption("calltimeout") == 1500)
+for _, badct in ipairs{-1, 1.5, 4294967296, "x"} do
+  local pr, pm = pcall(conn.setoption, conn, "calltimeout", badct)
+  check("calltimeout " .. tostring(badct) .. " raises an error",
+    not pr and tostring(pm):find("calltimeout") ~= nil, pm)
+end
+check("invalid calltimeout keeps the value", conn:getoption("calltimeout") == 1500)
+check("calltimeout 4294967295 is accepted", conn:setoption("calltimeout", 4294967295) == true
+  and conn:getoption("calltimeout") == 4294967295)
+check("back to 0", conn:setoption("calltimeout", 0) == true and conn:getoption("calltimeout") == 0)
+do
+  -- a call the server can stop: ORA-03156, the connection stays usable
+  local ct = env:connect(args.connect, args.user, passwd)
+  if ct then
+    ct:setoption("calltimeout", 500)
+    local rt, et = ct:execute("DECLARE n NUMBER := 0; BEGIN"
+      .. " FOR i IN 1 .. 300000000 LOOP n := n + 1; END LOOP; END;")
+    check("call over the limit gives nil and ORA-03156",
+      rt == nil and tostring(et):find("ORA%-03156") ~= nil, et or tostring(rt))
+    local cqt = ct:execute("SELECT 42 FROM dual")
+    local vq = cqt and cqt:fetch()
+    if cqt then cqt:close() end
+    check("connection usable after a timeout the server stopped", tonumber(vq) == 42)
+    check("close after the timeout", ct:close())
+  else
+    check("second connection for calltimeout", false)
+  end
+end
+
+print("-- logon without a password, proxy")
+do
+  local cnp, en = env:connect(args.connect, args.user)
+  check("user without a password gives nil and ORA-01005",
+    cnp == nil and tostring(en):find("ORA%-01005") ~= nil, en)
+  if cnp then cnp:close() end
+end
+local function whoami(c)
+  local cwho = c:execute("SELECT SYS_CONTEXT('USERENV', 'SESSION_USER'),"
+    .. " SYS_CONTEXT('USERENV', 'PROXY_USER'),"
+    .. " SYS_CONTEXT('USERENV', 'AUTHENTICATION_METHOD') FROM dual")
+  if not cwho then return nil end
+  local su, pu, am = cwho:fetch()
+  cwho:close()
+  return su, pu, am
+end
+local external = os.getenv("ORACLE_TEST_EXTERNAL")
+if external and external ~= "" then
+  local ce, ee = env:connect(external)
+  check("connect without user and password to ORACLE_TEST_EXTERNAL", ce ~= nil, ee)
+  if ce then
+    local su, _, am = whoami(ce)
+    info("external logon", tostring(su) .. ", method " .. tostring(am))
+    check("close the external connection", ce:close())
+  end
+else
+  info("external logon", "skipped: ORACLE_TEST_EXTERNAL not set (a connect string"
+    .. " for a logon without a password; needs a sqlnet.ora with"
+    .. " SQLNET.AUTHENTICATION_SERVICES = (NTS) and an OPS$ user, or a wallet with"
+    .. " WALLET_LOCATION and SQLNET.WALLET_OVERRIDE = TRUE)")
+end
+local proxy_user = os.getenv("ORACLE_TEST_PROXY_USER")
+local proxy_pw = os.getenv("ORACLE_TEST_PROXY_PASSWORD")
+if proxy_user and proxy_user ~= "" and proxy_pw and proxy_pw ~= "" then
+  local cpx, eplsql = env:connect(args.connect, proxy_user .. "[" .. args.user .. "]", proxy_pw)
+  check("proxy logon " .. proxy_user .. "[" .. args.user .. "]", cpx ~= nil,
+    eplsql and tostring(eplsql):gsub(proxy_pw:gsub("%p", "%%%0"), "***"))
+  if cpx then
+    local su, pu = whoami(cpx)
+    check("proxy session is the target user, proxy named",
+      su == args.user:upper() and pu == proxy_user:upper(),
+      tostring(su) .. " / " .. tostring(pu))
+    check("close the proxy connection", cpx:close())
+  end
+else
+  info("proxy logon", "skipped: ORACLE_TEST_PROXY_USER and ORACLE_TEST_PROXY_PASSWORD"
+    .. " not set (the proxy user needs GRANT CONNECT THROUGH on ORACLE_TEST_USER)")
+end
 
 print("-- cleanup")
 r, e = drop(TABLE)

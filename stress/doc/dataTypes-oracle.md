@@ -244,6 +244,27 @@ Column `js` is Oracle's native `JSON` type (21c and later). The driver reads it 
 | `jsonNull`      | NULL.                                                                                                | Pass: reads back nil.                                                               |
 | `jsonFetchNa`   | read with fetch mode `"na"`.                                                                         | Pass: the same text under both keys.                                                |
 
+## Vector
+
+Columns `v3` `VECTOR(3, FLOAT32)`, `v64` `VECTOR(*, FLOAT64)`, `vi8` `VECTOR(4, INT8)`, `vbin` `VECTOR(16, BINARY)` and `vsp` `VECTOR(10, FLOAT32, SPARSE)` (Oracle 23ai). The driver reads a vector natively and converts it to text on the client; the text must equal the text of the server (`VECTOR_SERIALIZE`). Oracle writes `FLOAT32` and `FLOAT64` values in exponent form with the precision of the format (`0.1` as `FLOAT64` is `1.0000000000000001E-001`), `INT8` and `BINARY` values as integers (`BINARY` one number per byte), a sparse vector as dimensions, indices counted from 0 and values. A vector is bound as text, at most 32 767 bytes in `luasql.oci8`. Fetching a vector column costs one round trip per row, whatever the option `prefetch`.
+
+| Test             | Checks                                                                   | Results                                                                                      |
+| ---------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `vecFloat32`     | `"[1.5,-2,0.25]"` as `luasql.type.string` into `v3`.                     | Pass: the text of the server, `[1.5E+000,-2.0E+000,2.5E-001]`.                               |
+| `vecPlain`       | `"[1,2,3]"` as a plain string into `v3`.                                 | Pass: `[1.0E+000,2.0E+000,3.0E+000]`.                                                        |
+| `vecFloat64`     | `"[0.1,-2.5,1e-300,3]"` into `v64`.                                      | Pass: `[1.0000000000000001E-001,-2.5E+000,1.0E-300,3.0E+000]`.                               |
+| `vecInt8`        | `"[1,-2,127,-128]"` into `vi8`, the range of `INT8`.                     | Pass: `[1,-2,127,-128]`.                                                                     |
+| `vecBinary`      | `"[255,1]"` into `vbin`, two bytes for 16 dimensions.                    | Pass: `[255,1]`.                                                                             |
+| `vecSparse`      | `"[10,[1,3],[1.5,-2]]"` into `vsp`.                                      | Pass: `[10,[1,3],[1.5E+000,-2.0E+000]]`.                                                     |
+| `vecNull`        | NULL.                                                                    | Pass: reads back nil.                                                                        |
+| `vecEmpty`       | `""`, which is no vector.                                                | Limit (Oracle): an empty string is stored as NULL.                                           |
+| `vecLarge`       | 65 535 ones as `FLOAT64`, built on the server (`TO_VECTOR` of a CLOB).   | Pass: the text of the server, 589 816 characters.                                            |
+| `vecBind32767`   | 16 383 ones, 32 767 bytes of text, into `v64`.                           | Pass: the text of the server, 147 448 characters.                                            |
+| `vecBindTooLong` | 16 384 ones, 32 769 bytes of text.                                       | Pass: the write fails cleanly with `ORA-01461`.                                              |
+| `vecDimension`   | `"[1,2]"` into `v3`.                                                     | Pass: the write fails cleanly with `ORA-51803`.                                              |
+| `vecSyntax`      | `"[1,2,x]"` into `v3`.                                                   | Pass: the write fails cleanly with `ORA-51805` (a dimension that is no number; text that is no vector at all, e.g. `"abc"`, gives `ORA-51804`). |
+| `vecFetchNa`     | read with fetch mode `"na"`.                                             | Pass: the same text under both keys.                                                         |
+
 ## Rows
 
 Several rows in one cursor, with values of changing length and NULL between them. This shows whether the driver reuses a buffer or a LOB locator from the row before.

@@ -16,7 +16,7 @@ For every case the scenario writes one row, reads it back with `cur:fetch` and c
 - the value, and in exact number mode also its Lua subtype (integer or float);
 - the column type the driver reports (`cur:getcoltypes()`) against `backend.columnTypes`;
 - for numbers, also the value as stored on the server, read as text (`backend.numberAsText`): it tells whether a wrong result was lost while binding or while reading;
-- for some types, the text of the value on the server: timestamps with local time zone, intervals, binary data as hex digits, JSON.
+- for some types, the text of the value on the server: timestamps with local time zone, intervals, binary data as hex digits, JSON, vectors.
 
 A case is a limit instead of a failure if it hits a documented limitation of the DBMS or its client library; the reasons come from the backend (see [DBMS-Specific Notes](../README.md#dbms-specific-notes) in the README). A case "fails cleanly" when the write or read returns `nil` and an error message without crashing.
 
@@ -28,7 +28,7 @@ The scenario is skipped if the driver has no bind API (`conn:prepare` and `luasq
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | numbers, dates, booleans    | once per test locale of the backend (`backend.sessionSettings.locale`), else once; the locale must not change any result |
 | numbers, float mode         | once more for the numbers, after `conn:setoption("numbers", "float")`; skipped if the driver has no `setoption`          |
-| strings, rowids, raw, clob, blob, json, rows, unsupported | once each                                                                                   |
+| strings, rowids, raw, clob, blob, json, vector, rows, unsupported | once each; vector is skipped as a whole (one line) if the backend has none of the vector columns |
 
 In exact mode (`numbers = "exact"`, the mode of the run) an integral value in the integer range must come back as a Lua integer, any other number as the correctly rounded float. In float mode every number must be a float within a relative deviation of 1e-14; if it is close but not exact, the case is a limit. Binary floating point columns hold IEEE values that the client library does not convert; their cases must be exact in every mode.
 
@@ -55,6 +55,9 @@ The test table has one column per kind of value. A backend creates those its DBM
 | `rw`, `bl`    | binary data of up to 2000 bytes; a binary LOB                                                                                                                               |
 | `js`          | JSON                                                                                                                                                                        |
 | `iym`, `ids`  | intervals year to month and day to second, also with other precisions (`iym4`, `ids3`)                                                                                      |
+| `v3`, `v64`   | a vector of 3 dimensions of 32-bit floats (Oracle `VECTOR(3, FLOAT32)`); a vector of any dimension of 64-bit floats |
+| `vi8`         | a vector of 4 dimensions of 8-bit integers |
+| `vbin`, `vsp` | a binary vector of 16 dimensions (2 bytes); a sparse vector of 10 dimensions of 32-bit floats |
 
 ## Expected values
 
@@ -63,6 +66,7 @@ Where LuaSQL promises nothing, e.g. for the text form of a date read back, the e
 - **SQL literals.** Some cases write an SQL literal instead of binding a value, e.g. to read back a number with more digits than a bind keeps. The literal comes from the backend (`backend.typeLiterals`), the expected value from the case list; without a literal the case is skipped.
 - **Binary data as hex text.** A plain string is bound as text: the driver goes by the Lua type, never by the content. The cases that bind hex text such as `"00FF4100"` into a binary column and expect the bytes check a conversion of the DBMS; they run only if the backend says the DBMS does it (`backend.hexTextBinary`). Binary data itself is checked by the cases with `luasql.type.binary`, which run for every DBMS.
 - **JSON.** How a DBMS stores JSON (order of the keys, numbers, `\u` escapes, spaces) is its own matter. A JSON case expects the text the server gives for the stored value (`backend.jsonAsText`): the driver must deliver it unchanged.
+- **Vectors.** A vector is bound as text, plain or with `luasql.type.string`, and read as text. How a DBMS writes the numbers (`1.5`, `1.5E+000`) is its own matter: a vector case expects the text the server gives for the stored value (`backend.vectorAsText`), which the driver must deliver unchanged, as with JSON. The cases cover the formats (one column each), NULL, an empty string (no vector), a large vector written as a literal of the backend (`vecLarge`), a text of 32 767 bytes (`vecBind32767`), a wrong dimension (`vecDimension`) and invalid text (`vecSyntax`). `vecBindTooLong` (32 769 bytes) runs only where the backend names the error of a text bind above 32 767 bytes (`backend.vectorTooLongError`, e.g. `luasql.oci8`). A case that expects an error may name a backend key with a Lua pattern the message must match (`errorMatch`): `vectorDimensionError`, `vectorSyntaxError`, `vectorTooLongError`; without the key any error passes.
 - **Limits.** The backend marks a case as a limit with a reason (`backend.typeCaseOverrides`): NULL read back (`limitNull`), an expected write error (`limitError`), a value read back (`limitValue`, also for a case that expects an error but the DBMS stored the value), or cells of a rows case (`limitCells`).
 
 ## Firebird

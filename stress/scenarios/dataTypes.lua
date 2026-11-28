@@ -23,6 +23,10 @@
 --   clob, blob, json          last: a failed LOB read may leave the
 --                             session unusable; the driver reads JSON
 --                             through a CLOB
+--   vector                    vectors bound as text and read as text:
+--                             formats, NULL, a large vector, the longest
+--                             text a driver binds, wrong dimension,
+--                             invalid text
 --   rows                      several rows in one cursor: changing
 --                             lengths, NULL between values, several
 --                             columns at once
@@ -135,6 +139,10 @@ local function binaryOf(n)
    return string.rep(allBytes, n // 256 + 1):sub(1, n)
 end
 
+-- The vector columns (see the list below); without any of them the
+-- block vector is skipped as a whole.
+local vectorColumns = { "v3", "v64", "vi8", "vbin", "vsp" }
+
 -- The columns of the test table (backend.typesTableCreate) and what a
 -- backend must give for them; a backend leaves out what its DBMS does
 -- not have (backend.typesColumns), the cases of such a column are
@@ -154,6 +162,11 @@ end
 --   ch,nch fixed length text of 10 characters, padded with spaces
 --   r      a stored row id; rw binary of up to 2000 bytes; bl binary
 --          LOB; js JSON; iym, ids (and iym4, ids3) intervals
+--   v3     vector of 3 dimensions of 32-bit floats (Oracle
+--          VECTOR(3, FLOAT32)); v64 vector of any dimension of 64-bit
+--          floats; vi8 vector of 4 dimensions of 8-bit integers; vbin
+--          binary vector of 16 dimensions (2 bytes); vsp sparse vector
+--          of 10 dimensions of 32-bit floats
 -- Where luasql promises nothing (e.g. the text form of a date read
 -- back), the expected value is the form most DBMS give; a DBMS that
 -- differs gets a limit in its backend. With no clear majority the
@@ -162,6 +175,8 @@ end
 -- Builds the case list. A case has: name, block, column, param (as for
 -- stmt:execute) and expected; optional: nullResult (expect NULL),
 -- expectError, errorAllowed (an error is fine, a wrong value is not),
+-- errorMatch (backend key of a Lua pattern that the error of such a case
+-- must match; without the key in the backend any error is fine),
 -- needsTimeZone, checkServer (also check the value stored on the
 -- server), literal (true: an SQL literal from backend.typeLiterals is
 -- written instead of param; without one the case is skipped), fetchMode
@@ -588,6 +603,56 @@ local function makeCases(t)
    add("jsonNull", "json", "js", t.null, nil, json({ nullResult = true }))
    add("jsonFetchNa", "json", "js", { '{"a" : 1}', t.string }, nil,
        json({ fetchMode = "na" }))
+
+   -- VECTOR: bound as text, plain or as luasql.type.string, and read as
+   -- text. How the DBMS writes the numbers is its own matter; the read
+   -- value must be the text the server gives for the stored value
+   -- (backend.vectorAsText), unchanged by the driver, as with JSON.
+   local function vector(extra)
+      extra = extra or {}
+      extra.checkText = "vectorAsText"
+      extra.serverText = true
+      extra.needs = extra.needs or {}
+      extra.needs[#extra.needs + 1] = "vectorAsText"
+      return extra
+   end
+   -- "[1,1,...,1]" of n dimensions: 2 * n + 1 bytes.
+   local function onesVector(n)
+      return "[" .. string.rep("1,", n - 1) .. "1]"
+   end
+   add("vecFloat32", "vector", "v3", { "[1.5,-2,0.25]", t.string }, nil,
+       vector())
+   add("vecPlain", "vector", "v3", "[1,2,3]", nil, vector())
+   add("vecFloat64", "vector", "v64", { "[0.1,-2.5,1e-300,3]", t.string },
+       nil, vector())
+   add("vecInt8", "vector", "vi8", { "[1,-2,127,-128]", t.string }, nil,
+       vector())
+   add("vecBinary", "vector", "vbin", { "[255,1]", t.string }, nil,
+       vector())
+   -- Dimensions, indices of the values that are set, the values;
+   -- indices 1 and 3 hold whether they count from 0 or from 1.
+   add("vecSparse", "vector", "vsp", { "[10,[1,3],[1.5,-2]]", t.string },
+       nil, vector())
+   add("vecNull", "vector", "v3", t.null, nil, vector({ nullResult = true }))
+   -- An empty string is no vector.
+   add("vecEmpty", "vector", "v3", { "", t.string }, nil,
+       vector({ expectError = true }))
+   -- Larger than any text bind (literal from the backend).
+   add("vecLarge", "vector", "v64", nil, nil, vector({ literal = true }))
+   -- 32767 bytes, the longest text some drivers bind (luasql.oci8).
+   add("vecBind32767", "vector", "v64", { onesVector(16383), t.string },
+       nil, vector())
+   -- One dimension more, 32769 bytes: only where the backend names the
+   -- error of a text bind over 32767 bytes.
+   add("vecBindTooLong", "vector", "v64", { onesVector(16384), t.string },
+       nil, vector({ expectError = true, errorMatch = "vectorTooLongError",
+                     needs = { "vectorTooLongError" } }))
+   add("vecDimension", "vector", "v3", { "[1,2]", t.string }, nil,
+       vector({ expectError = true, errorMatch = "vectorDimensionError" }))
+   add("vecSyntax", "vector", "v3", { "[1,2,x]", t.string }, nil,
+       vector({ expectError = true, errorMatch = "vectorSyntaxError" }))
+   add("vecFetchNa", "vector", "v3", { "[4,5,6]", t.string }, nil,
+       vector({ fetchMode = "na" }))
 
    add("clobAscii", "clob", "c", { asciiClob, t.string }, asciiClob)
    add("clobNull", "clob", "c", t.null, nil, null)
@@ -1123,6 +1188,11 @@ local function runCase(ctx, id, case)
    local ok, err = writeValue(ctx, id, case)
    if not ok then
       if case.expectError or case.errorAllowed then
+         local pattern = case.errorMatch and ctx.backend[case.errorMatch]
+         if pattern and not tostring(err):find(pattern) then
+            return "fail", string.format("write: expected an error like"
+                                         .. " %s, got %s", pattern, err)
+         end
          return "pass"
       end
       if case.limitError and err:find(case.limitError) then
@@ -1460,6 +1530,18 @@ local function runBlocks(ctx, cases)
    failed = failed + runBlock(ctx, "clob", cases, { clob = true })
    failed = failed + runBlock(ctx, "blob", cases, { blob = true })
    failed = failed + runBlock(ctx, "json", cases, { json = true })
+   -- One line instead of a skipped line per case for a DBMS without
+   -- vectors.
+   local hasVector = false
+   for _, column in ipairs(vectorColumns) do
+      hasVector = hasVector or ctx.columns[column] == true
+   end
+   if hasVector then
+      failed = failed + runBlock(ctx, "vector", cases, { vector = true })
+   else
+      report.print("  vector: ", "skipped: backend has no vector column",
+                   "skip")
+   end
    failed = failed + runBlock(ctx, "rows", cases, { rows = true })
    failed = failed + runBlock(ctx, "unsupported", cases,
                               { unsupported = true })

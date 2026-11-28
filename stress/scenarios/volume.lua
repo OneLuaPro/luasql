@@ -30,6 +30,15 @@
 --                  row is emptied first), backend.volBinarySetup (a
 --                  statement or a list of them) and
 --                  backend.volBinaryFinish before and after the phase.
+-- and with as many rows as binaryInsert (vectorRows):
+--   vectorBind     the vectors of backend.volVectorValues in turn, bound
+--                  as plain strings into a vector column of a temporary
+--                  table that empties itself at the commit; every 10th
+--                  row is read back and must be the text of its entry,
+--                  then committed. Skipped if the backend has no such
+--                  table (volVectorTableCreate). Optional:
+--                  backend.volVectorDelete runs before each insert, as
+--                  volBinaryDelete.
 -- After the phases a line shows the throughput of each phase in rows
 -- per second; it is information, not a check.
 --
@@ -65,6 +74,11 @@
 --                   (backend.maxValueLength) as text and as binary data,
 --                   and one byte more, which gives nil and a message;
 --                   needs about twice that much memory
+--
+-- Backend keys of vectorBind: volVectorTableCreate, volVectorTableDrop,
+-- volVectorInsert (id :1, vector :2), volVectorSelect (the vector of
+-- row :1), volVectorValues, a list of { bind = <text to bind>, text =
+-- <text read back> }; volVectorDelete (optional, row :1).
 --
 -- Skipped if the driver has no bind API (conn:prepare and luasql.type)
 -- or the backend has no volume table; the tablespace cases are skipped
@@ -109,6 +123,18 @@ local binarySizes = { 32767, 32768, 100000, 1048576 }
 -- Every this many rows phase binaryInsert reads the row back, then
 -- commits.
 local binaryCheckEvery = 10
+
+-- Rows of phase vectorBind per tier: as binaryInsert, so that both
+-- phases compare; the values are at most 32767 bytes of text.
+local vectorRows = {
+   smoke = 1000,
+   standard = 1000,
+   nightly = 5000,
+}
+
+-- Every this many rows phase vectorBind reads the row back, then
+-- commits.
+local vectorCheckEvery = 10
 
 -- Wall clock time in seconds for the throughput, from luv if there.
 local hasUv, uv = pcall(require, "luv")
@@ -390,7 +416,8 @@ local function binaryDifference(value, data)
                         .. " byte %d", #value, #data, at)
 end
 
--- Reads row id of the binary table back; returns the value.
+-- Reads row id of the binary table (or the vector table) back; returns
+-- the value.
 local function readBinary(stmt, id)
    local cur, err = stmt:execute({ id })
    check(cur, err, "select")
@@ -480,6 +507,81 @@ local function finishBinaryInsert(ctx, shared)
    finishTiming(ctx, "binaryInsert", shared, shared.rows)
 end
 
+-- Phase vectorBind: the entry of backend.volVectorValues for row i.
+local function vectorOf(ctx, i)
+   local values = ctx.backend.volVectorValues
+   return values[i % #values + 1]
+end
+
+-- Precheck of vectorBind: one row is written and read before the phase
+-- takes its counters, as in primeBinaryRead.
+local function primeVectorRead(ctx)
+   local backend = ctx.backend
+   if #backend.volVectorValues == 0 then
+      return "backend.volVectorValues is empty"
+   end
+   local conn = ctx.testConn
+   local ok, err = pcall(function()
+      setAutocommit(conn, false)
+      local insert = prepare(conn, backend.volVectorInsert)
+      local query = prepare(conn, backend.volVectorSelect)
+      if backend.volVectorDelete then
+         local delete = prepare(conn, backend.volVectorDelete)
+         check(delete:execute(0), nil, "delete")
+         closeStatement(delete)
+      end
+      check(insert:execute(0, vectorOf(ctx, 0).bind), nil, "insert")
+      -- Only read here; the phase checks the values.
+      readBinary(query, 0)
+      commit(conn)
+      closeStatement(insert)
+      closeStatement(query)
+   end)
+   pcall(rollback, conn)
+   setAutocommit(conn, true)
+   if not ok then
+      return tostring(err)
+   end
+end
+
+local function setupVectorBind(ctx)
+   local backend = ctx.backend
+   setAutocommit(ctx.testConn, false)
+   return { insert = prepare(ctx.testConn, backend.volVectorInsert),
+            delete = backend.volVectorDelete
+               and prepare(ctx.testConn, backend.volVectorDelete),
+            select = prepare(ctx.testConn, backend.volVectorSelect),
+            rows = 0, started = now() }
+end
+
+local function vectorBindStep(ctx, i, shared)
+   local entry = vectorOf(ctx, i)
+   if shared.delete then
+      check(shared.delete:execute(i), nil, "delete")
+   end
+   check(shared.insert:execute(i, entry.bind), nil, "insert")
+   shared.rows = i
+   if i % vectorCheckEvery == 0 then
+      local value = readBinary(shared.select, i)
+      if value ~= entry.text then
+         error(string.format("row %d: expected %s, got %s", i,
+                             describe(entry.text), describe(value)), 0)
+      end
+      commit(ctx.testConn)
+   end
+end
+
+local function finishVectorBind(ctx, shared)
+   commit(ctx.testConn)
+   closeStatement(shared.insert)
+   if shared.delete then
+      closeStatement(shared.delete)
+   end
+   closeStatement(shared.select)
+   setAutocommit(ctx.testConn, true)
+   finishTiming(ctx, "vectorBind", shared, shared.rows)
+end
+
 -- Precheck of lobFetch: reads one CLOB before the phase takes its
 -- counters. On the first LOB read from a table Oracle opens an internal
 -- cursor (table_304_11_<object id>) that stays open in the session; it
@@ -537,6 +639,12 @@ local binaryPhaseList = {
    { name = "binaryInsert", precheck = primeBinaryRead,
      setup = setupBinaryInsert, step = binaryInsertStep,
      finish = finishBinaryInsert },
+}
+
+local vectorPhaseList = {
+   { name = "vectorBind", precheck = primeVectorRead,
+     setup = setupVectorBind, step = vectorBindStep,
+     finish = finishVectorBind },
 }
 
 -- Prints the throughput of the phases.
@@ -998,6 +1106,11 @@ function volume.run(ctx)
       tables[#tables + 1] = { backend.volBinaryTableCreate,
                               backend.volBinaryTableDrop }
    end
+   local hasVector = backend.volVectorTableCreate ~= nil
+   if hasVector then
+      tables[#tables + 1] = { backend.volVectorTableCreate,
+                              backend.volVectorTableDrop }
+   end
    local function dropTables()
       for _, statements in ipairs(tables) do
          local ok, err = dbutil.exec(conn, statements[2])
@@ -1027,6 +1140,13 @@ function volume.run(ctx)
                               binaryRows[ctx.tier])
    elseif not hasBinary then
       report.print("  ", "binaryInsert   skipped: " .. binarySkip, "skip")
+   end
+   if ok and result and hasVector then
+      ok, result, err = pcall(phases.run, volCtx, vectorPhaseList,
+                              vectorRows[ctx.tier])
+   elseif not hasVector then
+      report.print("  ", "vectorBind     skipped: backend has no"
+                   .. " volVectorTableCreate", "skip")
    end
    if not ok then
       problems[#problems + 1] = tostring(result)
